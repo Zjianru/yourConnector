@@ -56,13 +56,14 @@ export function createToolDetailModal({ state, ui, hostById, ensureRuntime, metr
     const metric = metricForTool(state.detailHostId, String(tool.toolId || ""));
     const toolId = String(tool.toolId || "");
     const displayName = resolveToolDisplayName(state.detailHostId, tool);
+    const workspace = pickMetric(tool, metric, "workspaceDir") || "--";
     const connectedTool = asBool(metric.connected ?? tool.connected);
     const latestTokens = asMap(metric.latestTokens);
     const modelUsage = asListOfMap(metric.modelUsage);
 
     const summaryRows = [
-      ["宿主机", host.displayName],
       ["工具名称", displayName],
+      ["工作目录", workspace],
       ["工具模式", pickMetric(tool, metric, "mode") || "--"],
       ["会话模式", pickMetric(tool, metric, "agentMode") || "--"],
       ["当前模型", pickMetric(tool, metric, "model") || "--"],
@@ -88,7 +89,6 @@ export function createToolDetailModal({ state, ui, hostById, ensureRuntime, metr
       ["Tool Reachable", connectedTool ? "Yes" : "No"],
       ["Tool ID", toolId || "--"],
       ["Endpoint", pickMetric(tool, metric, "endpoint") || "--"],
-      ["Workspace", pickMetric(tool, metric, "workspaceDir") || "--"],
       ["Session ID", pickMetric(tool, metric, "sessionId") || "--"],
       ["Session Title", pickMetric(tool, metric, "sessionTitle") || "--"],
       ["Session Updated", pickMetric(tool, metric, "sessionUpdatedAt") || "--"],
