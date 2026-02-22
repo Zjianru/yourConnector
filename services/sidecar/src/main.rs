@@ -64,6 +64,8 @@ const ANSI_CYAN: &str = "\x1b[36m";
 const ANSI_WHITE: &str = "\x1b[97m";
 /// 配对票据默认有效期（秒）。
 const DEFAULT_PAIR_TICKET_TTL_SEC: u64 = 300;
+/// 原始 payload 日志开关环境变量（默认关闭）。
+const RAW_PAYLOAD_LOG_ENV: &str = "YC_DEBUG_RAW_PAYLOAD";
 
 /// Sidecar 入口：初始化日志、启动 health server、进入 relay 会话循环。
 #[tokio::main]
@@ -236,6 +238,7 @@ async fn run_session(cfg: &Config) -> anyhow::Result<()> {
 
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
+    let log_raw_payload = raw_payload_logging_enabled();
 
     // reader_task 专门读取 relay 下行消息，并抽取 sidecar 控制命令。
     let mut reader_task = tokio::spawn(async move {
@@ -246,8 +249,10 @@ async fn run_session(cfg: &Config) -> anyhow::Result<()> {
                         if cmd_tx.send(command).is_err() {
                             break;
                         }
+                    } else if log_raw_payload {
+                        info!("incoming raw: {text}");
                     } else {
-                        info!("incoming: {text}");
+                        info!("incoming event: {}", summarize_wire_payload(&text));
                     }
                 }
                 Ok(_) => {}
@@ -601,6 +606,45 @@ fn sidecar_ws_url(cfg: &Config) -> anyhow::Result<Url> {
     Ok(url)
 }
 
+/// 是否开启原始 payload 日志（默认关闭）。
+fn raw_payload_logging_enabled() -> bool {
+    let raw = std::env::var(RAW_PAYLOAD_LOG_ENV).unwrap_or_default();
+    let normalized = raw.trim().to_ascii_lowercase();
+    matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+}
+
+/// 将下行原始 payload 压缩为事件摘要，避免默认日志泄漏业务正文。
+fn summarize_wire_payload(raw: &str) -> String {
+    let parsed = serde_json::from_str::<Value>(raw);
+    let Ok(value) = parsed else {
+        return "non-json message".to_string();
+    };
+    let event_type = value
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let payload = value
+        .get("payload")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let tool_id = payload.get("toolId").and_then(|v| v.as_str()).unwrap_or("");
+    let status = payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    let action = payload.get("action").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut parts = vec![event_type.to_string()];
+    if !tool_id.is_empty() {
+        parts.push(format!("tool={tool_id}"));
+    }
+    if !status.is_empty() {
+        parts.push(format!("status={status}"));
+    }
+    if !action.is_empty() {
+        parts.push(format!("action={action}"));
+    }
+    parts.join(" ")
+}
+
 /// 采集系统/sidecar/工具指标，生成统一的 metrics payload。
 fn collect_metrics_snapshot(
     sys: &mut System,
@@ -710,23 +754,27 @@ mod tests {
     }
 
     #[test]
-    fn opencode_tool_id_is_stable_for_same_workspace() {
+    fn opencode_tool_id_uses_workspace_and_instance() {
         let a = build_opencode_tool_id("/Users/codez/dev/work-a", 1001);
         let b = build_opencode_tool_id("/Users/codez/dev/work-a", 2002);
         let c = build_opencode_tool_id("/Users/codez/dev/work-b", 1001);
 
-        assert_eq!(a, b);
+        assert_ne!(a, b);
         assert_ne!(a, c);
+        assert!(a.starts_with("opencode_"));
+        assert!(a.ends_with("_p1001"));
     }
 
     #[test]
-    fn openclaw_tool_id_is_stable_for_same_workspace() {
+    fn openclaw_tool_id_uses_workspace_and_instance() {
         let a = build_openclaw_tool_id("/Users/codez/dev/work-a", "openclaw", 1001);
         let b = build_openclaw_tool_id("/Users/codez/dev/work-a", "openclaw --model gpt-5", 2002);
         let c = build_openclaw_tool_id("/Users/codez/dev/work-b", "openclaw", 1001);
 
-        assert_eq!(a, b);
+        assert_ne!(a, b);
         assert_ne!(a, c);
+        assert!(a.starts_with("openclaw_"));
+        assert!(a.ends_with("_p1001"));
     }
 
     #[test]
@@ -735,7 +783,7 @@ mod tests {
         let b = build_openclaw_tool_id("", "openclaw --model gpt-5", 2002);
         let c = build_openclaw_tool_id("", "openclaw --model claude", 1001);
 
-        assert_eq!(a, b);
+        assert_ne!(a, b);
         assert_ne!(a, c);
     }
 

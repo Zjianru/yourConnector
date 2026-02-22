@@ -34,7 +34,8 @@ make repair-ios-sim IOS_SIM="iPhone 17 Pro"
 连接前先在仓库根目录执行 `make show-pairing`（或 `make show-pairing-code`）获取配对信息，再在 App 内输入：
 
 - `Relay WS URL`
-- `配对码（systemId.pairToken）`
+- `System ID（sid）`
+- `配对票据（ticket）`
 - `宿主机名称`（扫码可自动填充，可手改）
 
 扫码链路建议：
@@ -50,13 +51,13 @@ cd /Users/codez/develop/yourConnector
 make pairing PAIR_ARGS="--show all --name 我的Mac"
 make pairing PAIR_ARGS="--show qr --qr-png /tmp/yc-pair.png"
 make pairing PAIR_ARGS="--show link --ttl-sec 180"
-make pairing PAIR_ARGS="--show link --no-code"
+make pairing PAIR_ARGS="--show link --include-code"
 ```
 
 终端二维码输出依赖 `qrencode`（可选：`brew install qrencode`）。
 
-当前配对链接默认包含 `code + sid + ticket`；
-如需只保留短时票据，可使用 `--no-code` 生成仅 `sid + ticket` 链接。
+当前配对链接默认包含 `sid + ticket`；
+如需兼容旧流程，可用 `--include-code` 额外附带 `code=systemId.pairToken`。
 
 如果换机/重装后出现“设备未授权控制”：
 

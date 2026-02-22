@@ -97,9 +97,20 @@ struct SystemRoom {
     clients: HashMap<Uuid, ClientHandle>,
 }
 
+impl SystemRoom {
+    /// 判断当前房间是否存在在线 sidecar 会话。
+    fn has_online_sidecar(&self) -> bool {
+        self.clients
+            .values()
+            .any(|client| client.client_type == "sidecar")
+    }
+}
+
 /// 单个连接发送句柄。
 #[derive(Clone)]
 struct ClientHandle {
+    /// 连接端类型（`app` / `sidecar`），用于在线 sidecar 判定。
+    client_type: String,
     sender: mpsc::UnboundedSender<Message>,
 }
 
@@ -193,7 +204,6 @@ impl ApiError {
 #[serde(rename_all = "camelCase")]
 enum PairAuthMode {
     PairTicket,
-    PairToken,
 }
 
 /// 配对预检请求。
@@ -202,6 +212,7 @@ enum PairAuthMode {
 struct PairPreflightRequest {
     system_id: String,
     device_id: String,
+    /// 兼容字段：旧客户端可能仍上传 pairToken，新版将显式拒绝。
     #[serde(default)]
     pair_token: Option<String>,
     #[serde(default)]
@@ -223,6 +234,7 @@ struct PairExchangeRequest {
     device_id: String,
     #[serde(default)]
     device_name: String,
+    /// 兼容字段：旧客户端可能仍上传 pairToken，新版将显式拒绝。
     #[serde(default)]
     pair_token: Option<String>,
     #[serde(default)]
@@ -343,9 +355,7 @@ impl AuthStore {
     }
 
     fn system_mut(&mut self, system_id: &str) -> &mut SystemAuthState {
-        self.systems
-            .entry(system_id.to_string())
-            .or_insert_with(SystemAuthState::default)
+        self.systems.entry(system_id.to_string()).or_default()
     }
 
     fn system_ref(&self, system_id: &str) -> Option<&SystemAuthState> {
@@ -681,7 +691,10 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
             q.system_id.clone(),
             q.pair_token.clone(),
             client_id,
-            ClientHandle { sender: tx.clone() },
+            ClientHandle {
+                client_type: q.client_type.clone(),
+                sender: tx.clone(),
+            },
         )
         .await;
 
@@ -743,7 +756,7 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
 }
 
 impl AppState {
-    /// 连接鉴权入口：app 优先走 access token，兼容 pairToken/pairTicket；sidecar 只走 pairToken。
+    /// 连接鉴权入口：sidecar 走 pairToken；app 仅允许 accessToken + PoP。
     async fn authorize_connection(&self, q: &WsQuery) -> Result<(), ApiError> {
         if q.client_type == "sidecar" {
             if q.pair_token.trim().is_empty() {
@@ -763,7 +776,27 @@ impl AppState {
             return self.authorize_app_with_access(q).await;
         }
 
-        self.authorize_app_with_pair(q).await
+        let has_legacy_pair = !q.pair_token.trim().is_empty()
+            || q.pair_ticket
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_some();
+        if has_legacy_pair {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "PAIR_TOKEN_NOT_SUPPORTED",
+                "App 连接已不支持 pairToken/pairTicket，请先完成设备凭证换发",
+                "请重新扫码配对后再连接",
+            ));
+        }
+
+        Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "MISSING_CREDENTIALS",
+            "缺少 accessToken",
+            "请重新扫码配对后再连接",
+        ))
     }
 
     /// sidecar 鉴权并建房。
@@ -785,9 +818,14 @@ impl AppState {
             return Ok(());
         };
 
+        let sidecar_clients = room
+            .clients
+            .values()
+            .filter(|client| client.client_type == "sidecar")
+            .count();
         match authorize_pair_token(
             Some(room.pair_token.as_str()),
-            room.clients.len(),
+            sidecar_clients,
             &q.client_type,
             incoming_pair_token,
         )
@@ -923,6 +961,14 @@ impl AppState {
                 "请先启动 sidecar",
             ));
         };
+        if !room.has_online_sidecar() {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "SYSTEM_NOT_REGISTERED",
+                "宿主机 sidecar 未在线",
+                "请先启动 sidecar",
+            ));
+        }
 
         let now = unix_now();
         room.app_nonces.retain(|_, exp| exp.saturating_add(5) > now);
@@ -945,60 +991,6 @@ impl AppState {
         Ok(())
     }
 
-    /// app 的兼容链路：pairTicket / pairToken。
-    async fn authorize_app_with_pair(&self, q: &WsQuery) -> Result<(), ApiError> {
-        let pair_token = q.pair_token.trim();
-        let pair_ticket = q.pair_ticket.as_deref().map(str::trim).unwrap_or("");
-
-        let mut guard = self.systems.write().await;
-        let Some(room) = guard.get_mut(&q.system_id) else {
-            return Err(ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "SYSTEM_NOT_REGISTERED",
-                "system 未注册，请先启动 sidecar",
-                "请先启动宿主机 sidecar",
-            ));
-        };
-
-        if !pair_ticket.is_empty() {
-            match verify_pairing_ticket(
-                pair_ticket,
-                &q.system_id,
-                &room.pair_token,
-                &mut room.ticket_nonces,
-                true,
-            ) {
-                Ok(_) => return Ok(()),
-                Err(ticket_err) => return Err(pair_ticket_error_to_api(ticket_err)),
-            }
-        }
-
-        if pair_token.is_empty() {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "MISSING_CREDENTIALS",
-                "缺少 pairToken/pairTicket",
-                "请重新扫码或手动输入配对码",
-            ));
-        }
-
-        authorize_pair_token(
-            Some(room.pair_token.as_str()),
-            room.clients.len(),
-            &q.client_type,
-            pair_token,
-        )
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "PAIR_TOKEN_MISMATCH",
-                "配对信息无效",
-                "请重新生成配对信息后再试",
-            )
-        })?;
-        Ok(())
-    }
-
     /// 配对预检（不消费票据）。
     async fn preflight_pair_credentials(
         &self,
@@ -1016,9 +1008,16 @@ impl AppState {
         }
 
         let pair_token = req.pair_token.as_deref().unwrap_or_default().trim();
+        if !pair_token.is_empty() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "PAIR_TOKEN_NOT_SUPPORTED",
+                "App 配对接口已不支持 pairToken",
+                "请改用 sid + pairTicket（扫码或配对链接）",
+            ));
+        }
         let pair_ticket = req.pair_ticket.as_deref().unwrap_or_default().trim();
-        self.verify_pair_credentials(system_id, pair_token, pair_ticket, false)
-            .await
+        self.verify_pair_ticket(system_id, pair_ticket, false).await
     }
 
     /// 配对换发设备凭证（消费票据）。
@@ -1047,9 +1046,17 @@ impl AppState {
         }
 
         let pair_token = req.pair_token.as_deref().unwrap_or_default().trim();
+        if !pair_token.is_empty() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "PAIR_TOKEN_NOT_SUPPORTED",
+                "App 配对接口已不支持 pairToken",
+                "请改用 sid + pairTicket（扫码或配对链接）",
+            ));
+        }
         let pair_ticket = req.pair_ticket.as_deref().unwrap_or_default().trim();
         let auth_mode = self
-            .verify_pair_credentials(system_id, pair_token, pair_ticket, true)
+            .verify_pair_ticket(system_id, pair_ticket, true)
             .await?;
 
         let expected_payload = pair_exchange_payload(system_id, device_id, key_id);
@@ -1441,11 +1448,10 @@ impl AppState {
         verify_pop_signature(&device.public_key, payload, sig)
     }
 
-    /// pair 凭证校验。
-    async fn verify_pair_credentials(
+    /// pairTicket 凭证校验（仅支持短时票据）。
+    async fn verify_pair_ticket(
         &self,
         system_id: &str,
-        pair_token: &str,
         pair_ticket: &str,
         consume_ticket: bool,
     ) -> Result<PairAuthMode, ApiError> {
@@ -1458,44 +1464,34 @@ impl AppState {
                 "请先启动 sidecar",
             ));
         };
-
-        if !pair_ticket.is_empty() {
-            match verify_pairing_ticket(
-                pair_ticket,
-                system_id,
-                &room.pair_token,
-                &mut room.ticket_nonces,
-                consume_ticket,
-            ) {
-                Ok(_) => return Ok(PairAuthMode::PairTicket),
-                Err(err) => return Err(pair_ticket_error_to_api(err)),
-            }
-        }
-
-        if pair_token.is_empty() {
+        if !room.has_online_sidecar() {
             return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "MISSING_CREDENTIALS",
-                "缺少 pairToken/pairTicket",
-                "请重新扫码或手动输入配对码",
+                StatusCode::UNAUTHORIZED,
+                "SYSTEM_NOT_REGISTERED",
+                "宿主机 sidecar 未在线",
+                "请先启动 sidecar",
             ));
         }
 
-        authorize_pair_token(
-            Some(room.pair_token.as_str()),
-            room.clients.len(),
-            "app",
-            pair_token,
-        )
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::UNAUTHORIZED,
-                "PAIR_TOKEN_MISMATCH",
-                "配对信息无效",
-                "请重新生成配对信息后再试",
-            )
-        })?;
-        Ok(PairAuthMode::PairToken)
+        if pair_ticket.is_empty() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "MISSING_CREDENTIALS",
+                "缺少 pairTicket",
+                "请重新扫码或重新导入配对链接",
+            ));
+        }
+
+        match verify_pairing_ticket(
+            pair_ticket,
+            system_id,
+            &room.pair_token,
+            &mut room.ticket_nonces,
+            consume_ticket,
+        ) {
+            Ok(_) => Ok(PairAuthMode::PairTicket),
+            Err(err) => Err(pair_ticket_error_to_api(err)),
+        }
     }
 
     /// 注册 system 房间连接。
@@ -1519,8 +1515,20 @@ impl AppState {
     /// 移除 system 房间连接。
     async fn remove(&self, system_id: &str, client_id: Uuid) {
         let mut guard = self.systems.write().await;
+        let mut should_drop_room = false;
+        let mut close_senders = Vec::new();
         if let Some(room) = guard.get_mut(system_id) {
             room.clients.remove(&client_id);
+            should_drop_room = room.clients.is_empty() || !room.has_online_sidecar();
+            if should_drop_room {
+                close_senders.extend(room.clients.values().map(|handle| handle.sender.clone()));
+            }
+        }
+        for sender in close_senders {
+            let _ = sender.send(Message::Close(None));
+        }
+        if should_drop_room {
+            guard.remove(system_id);
         }
     }
 
@@ -1551,10 +1559,22 @@ impl AppState {
         }
 
         let mut guard = self.systems.write().await;
+        let mut should_drop_room = false;
+        let mut close_senders = Vec::new();
         if let Some(room) = guard.get_mut(system_id) {
             for client_id in stale {
                 room.clients.remove(&client_id);
             }
+            should_drop_room = room.clients.is_empty() || !room.has_online_sidecar();
+            if should_drop_room {
+                close_senders.extend(room.clients.values().map(|handle| handle.sender.clone()));
+            }
+        }
+        for sender in close_senders {
+            let _ = sender.send(Message::Close(None));
+        }
+        if should_drop_room {
+            guard.remove(system_id);
         }
     }
 
@@ -2289,9 +2309,7 @@ fn auth_revoke_payload(
     ts: u64,
     nonce: &str,
 ) -> String {
-    format!(
-        "auth-revoke\n{system_id}\n{device_id}\n{target_device_id}\n{key_id}\n{ts}\n{nonce}"
-    )
+    format!("auth-revoke\n{system_id}\n{device_id}\n{target_device_id}\n{key_id}\n{ts}\n{nonce}")
 }
 
 /// 组装 list-devices 签名 payload。
@@ -2386,11 +2404,14 @@ fn generate_signing_key_seed() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        PairTokenAuthDecision, auth_list_payload, auth_refresh_payload, auth_revoke_payload,
-        authorize_pair_token, generate_pairing_ticket, pair_exchange_payload, sanitize_envelope,
-        verify_pairing_ticket, ws_pop_payload,
+        AppState, ClientHandle, PairPreflightRequest, PairTokenAuthDecision, WsQuery,
+        auth_list_payload, auth_refresh_payload, auth_revoke_payload, authorize_pair_token,
+        generate_pairing_ticket, pair_exchange_payload, sanitize_envelope, verify_pairing_ticket,
+        ws_pop_payload,
     };
     use std::collections::HashMap;
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
 
     #[test]
     fn sanitize_envelope_injects_trusted_source_fields() {
@@ -2488,5 +2509,96 @@ mod tests {
 
         let list = auth_list_payload("sys_x", "ios_y", "kid_z", 123, "n1");
         assert_eq!(list, "auth-list-devices\nsys_x\nios_y\nkid_z\n123\nn1");
+    }
+
+    #[tokio::test]
+    async fn remove_cleans_empty_room() {
+        let state = AppState::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let client_id = Uuid::new_v4();
+        state
+            .insert(
+                "sys_room".to_string(),
+                "ptk_room".to_string(),
+                client_id,
+                ClientHandle {
+                    client_type: "sidecar".to_string(),
+                    sender: tx,
+                },
+            )
+            .await;
+
+        let before = state.snapshot().await;
+        assert_eq!(before.get("sys_room").copied(), Some(1));
+
+        state.remove("sys_room", client_id).await;
+        let after = state.snapshot().await;
+        assert!(after.get("sys_room").is_none());
+    }
+
+    #[tokio::test]
+    async fn preflight_rejects_pair_token_for_app() {
+        let state = AppState::default();
+        let err = state
+            .preflight_pair_credentials(&PairPreflightRequest {
+                system_id: "sys_test".to_string(),
+                device_id: "ios_test".to_string(),
+                pair_token: Some("ptk_legacy".to_string()),
+                pair_ticket: None,
+            })
+            .await
+            .expect_err("legacy pairToken must be rejected");
+        assert_eq!(err.code, "PAIR_TOKEN_NOT_SUPPORTED");
+    }
+
+    #[tokio::test]
+    async fn preflight_requires_online_sidecar() {
+        let state = AppState::default();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        state
+            .insert(
+                "sys_pair".to_string(),
+                "ptk_pair".to_string(),
+                Uuid::new_v4(),
+                ClientHandle {
+                    client_type: "app".to_string(),
+                    sender: tx,
+                },
+            )
+            .await;
+
+        let ticket = generate_pairing_ticket("sys_pair", "ptk_pair", 300);
+        let err = state
+            .preflight_pair_credentials(&PairPreflightRequest {
+                system_id: "sys_pair".to_string(),
+                device_id: "ios_pair".to_string(),
+                pair_token: None,
+                pair_ticket: Some(ticket),
+            })
+            .await
+            .expect_err("sidecar offline should reject preflight");
+        assert_eq!(err.code, "SYSTEM_NOT_REGISTERED");
+    }
+
+    #[tokio::test]
+    async fn ws_app_rejects_legacy_pair_credentials() {
+        let state = AppState::default();
+        let err = state
+            .authorize_connection(&WsQuery {
+                system_id: "sys_test".to_string(),
+                client_type: "app".to_string(),
+                device_id: "ios_test".to_string(),
+                pair_token: "ptk_legacy".to_string(),
+                pair_ticket: None,
+                host_name: None,
+                access_token: None,
+                key_id: None,
+                ts: None,
+                nonce: None,
+                sig: None,
+            })
+            .await
+            .expect_err("app ws should reject pairToken path");
+        assert_eq!(err.code, "PAIR_TOKEN_NOT_SUPPORTED");
     }
 }

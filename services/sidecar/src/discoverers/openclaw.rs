@@ -1,9 +1,7 @@
 //! OpenClaw 发现器职责：
 //! 1. 从进程命令行识别可接入的 openclaw 进程。
-//! 2. 解析模型参数与运行模式，构建稳定 toolId。
+//! 2. 解析模型参数与运行模式，构建实例级 toolId。
 //! 3. 产出统一的 `ToolRuntimePayload` 供前端展示。
-
-use std::collections::HashSet;
 
 use yc_shared_protocol::{LatestTokensPayload, ToolRuntimePayload, now_rfc3339_nanos};
 
@@ -22,7 +20,6 @@ pub(super) fn discover_openclaw_tools(
     pids.sort_unstable();
     pids.dedup();
 
-    let mut seen_ids = HashSet::new();
     let mut tools = Vec::with_capacity(pids.len());
     for pid in pids {
         let Some(info) = context.all.get(&pid) else {
@@ -33,10 +30,6 @@ pub(super) fn discover_openclaw_tools(
         // 模型参数来自命令行 `--model`。
         let model = crate::parse_cli_flag_value(&info.cmd, "--model").unwrap_or_default();
         let tool_id = crate::build_openclaw_tool_id(&workspace, &info.cmd, pid);
-        // 一些多进程场景会重复命中相同 workspace，需要去重。
-        if !seen_ids.insert(tool_id.clone()) {
-            continue;
-        }
 
         let reason = if model.trim().is_empty() {
             "已发现 openclaw 进程。".to_string()

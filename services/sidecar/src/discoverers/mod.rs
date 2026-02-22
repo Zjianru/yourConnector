@@ -1,6 +1,6 @@
 //! 工具发现器编排模块职责：
 //! 1. 统一管理各工具发现器（OpenCode/OpenClaw）的调用顺序。
-//! 2. 聚合并去重发现结果，必要时注入 fallback 工具。
+//! 2. 聚合发现结果并保持稳定顺序，必要时注入 fallback 工具。
 //! 3. 对上提供单一 `discover_tools` 入口。
 
 use std::collections::HashMap;
@@ -55,9 +55,14 @@ impl ToolDiscoveryComponent {
             return fallback_tools_or_empty(self.fallback_tool);
         }
 
-        // 统一排序并按 tool_id 去重，保证上层渲染稳定。
-        tools.sort_by(|a, b| a.tool_id.cmp(&b.tool_id));
-        tools.dedup_by(|a, b| a.tool_id == b.tool_id);
+        // 统一排序，避免上层渲染抖动；实例级 toolId 不做去重。
+        tools.sort_by(|a, b| {
+            a.name
+                .cmp(&b.name)
+                .then_with(|| a.workspace_dir.cmp(&b.workspace_dir))
+                .then_with(|| a.pid.unwrap_or_default().cmp(&b.pid.unwrap_or_default()))
+                .then_with(|| a.tool_id.cmp(&b.tool_id))
+        });
         tools
     }
 }
