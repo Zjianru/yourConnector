@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 
 # 文件职责：
-# 1. 统一输出配对码、配对链接和二维码（终端/PNG）。
-# 2. 支持通过参数覆盖 relay、宿主机名称等信息，便于开发与演示。
-# 3. 提供 iOS 模拟器扫码投递能力，复用同一条 yc://pair 深链。
+# 1. 通过 Relay 的 /v1/pair/bootstrap 统一签发配对信息（链接/票据/模拟扫码命令）。
+# 2. 输出配对码、配对链接、二维码与 JSON，作为终端配对与调试兜底工具。
+# 3. 支持向 iOS 模拟器投递 yc://pair 深链，验证扫码链路。
 
 set -euo pipefail
 
@@ -17,8 +17,19 @@ SIMULATE_IOS_SCAN=0
 INCLUDE_CODE=0
 TICKET_TTL_SEC=300
 
+API_BASE_URL=""
+SYSTEM_ID=""
+PAIR_TOKEN=""
+PAIR_CODE=""
+PAIR_TICKET=""
+PAIR_LINK=""
+SIMCTL_CMD=""
+SIGNED_RELAY_WS_URL=""
+SIGNED_HOST_NAME=""
+NEED_BOOTSTRAP=1
+
 usage() {
-  cat <<'EOF'
+  cat <<'EOF_HELP'
 用法：
   scripts/pairing.sh [参数]
 
@@ -41,7 +52,7 @@ usage() {
   scripts/pairing.sh --name "我的 Mac" --qr-png /tmp/yc-pair.png
   scripts/pairing.sh --show json --ttl-sec 180 --no-code
   scripts/pairing.sh --simulate-ios-scan
-EOF
+EOF_HELP
 }
 
 require_cmd() {
@@ -54,7 +65,6 @@ require_cmd() {
 
 normalize_host_name() {
   local raw="$1"
-  # 压缩多余空白并裁剪长度，避免配对链接过长。
   local compact
   compact="$(printf '%s' "${raw}" | awk '{$1=$1;print}')"
   printf '%s' "${compact}" | cut -c1-64
@@ -66,12 +76,11 @@ detect_host_name() {
     return
   fi
 
-  for key in COMPUTERNAME HOSTNAME; do
-    if [[ -n "${!key:-}" ]]; then
-      normalize_host_name "${!key}"
-      return
-    fi
-  done
+  # 与 sidecar 保持一致优先级：优先 ComputerName，再读系统级名称。
+  if [[ -n "${COMPUTERNAME:-}" ]]; then
+    normalize_host_name "${COMPUTERNAME}"
+    return
+  fi
 
   if command -v scutil >/dev/null 2>&1; then
     for sc_key in ComputerName LocalHostName HostName; do
@@ -126,77 +135,90 @@ validate_pair_code() {
   [[ -n "${sid}" && -n "${ptk}" ]]
 }
 
-url_encode() {
-  require_cmd jq
-  printf '%s' "$1" | jq -sRr @uri
+relay_api_base() {
+  require_cmd python3
+  python3 - "$1" <<'PY'
+import sys
+from urllib.parse import urlparse
+
+raw = (sys.argv[1] or '').strip()
+if not raw:
+    raise SystemExit('relay ws url empty')
+u = urlparse(raw)
+if u.scheme not in ('ws', 'wss', 'http', 'https'):
+    raise SystemExit(f'unsupported relay url scheme: {u.scheme}')
+if not u.netloc:
+    raise SystemExit('relay ws url missing host')
+protocol = 'https' if u.scheme in ('wss', 'https') else 'http'
+path = (u.path or '/').rstrip('/')
+if path.endswith('/ws'):
+    path = path[:-3]
+path = path.rstrip('/')
+if not path:
+    path = '/v1'
+elif not path.endswith('/v1'):
+    path = f'{path}/v1'
+print(f'{protocol}://{u.netloc}{path}')
+PY
 }
 
-build_pairing_link() {
-  local relay_url="$1"
-  local system_id="$2"
-  local pairing_ticket="$3"
-  local pairing_code="$4"
-  local host_name="$5"
+request_pair_bootstrap() {
+  require_cmd curl
+  require_cmd jq
 
-  local relay_enc sid_enc ticket_enc
-  relay_enc="$(url_encode "${relay_url}")"
-  sid_enc="$(url_encode "${system_id}")"
-  ticket_enc="$(url_encode "${pairing_ticket}")"
-
-  local link="yc://pair?relay=${relay_enc}&sid=${sid_enc}&ticket=${ticket_enc}"
+  local include_code_json="false"
   if [[ "${INCLUDE_CODE}" -eq 1 ]]; then
-    local code_enc
-    code_enc="$(url_encode "${pairing_code}")"
-    link="${link}&code=${code_enc}"
-  fi
-  if [[ -n "${host_name}" ]]; then
-    local name_enc
-    name_enc="$(url_encode "${host_name}")"
-    link="${link}&name=${name_enc}"
-  fi
-  echo "${link}"
-}
-
-base64url_encode_text() {
-  printf '%s' "$1" \
-    | openssl base64 -A \
-    | tr '+/' '-_' \
-    | tr -d '='
-}
-
-base64url_hmac_sha256() {
-  local key="$1"
-  local text="$2"
-  printf '%s' "${text}" \
-    | openssl dgst -sha256 -mac HMAC -macopt "key:${key}" -binary \
-    | openssl base64 -A \
-    | tr '+/' '-_' \
-    | tr -d '='
-}
-
-generate_pair_ticket() {
-  local system_id="$1"
-  local pair_token="$2"
-  local now exp nonce payload_json payload_b64 sig_b64
-
-  now="$(date +%s)"
-  exp="$((now + TICKET_TTL_SEC))"
-  if command -v uuidgen >/dev/null 2>&1; then
-    nonce="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-')"
-  else
-    nonce="$(date +%s)-$RANDOM-$RANDOM"
+    include_code_json="true"
   fi
 
-  require_cmd jq
-  payload_json="$(jq -nc \
-    --arg sid "${system_id}" \
-    --argjson iat "${now}" \
-    --argjson exp "${exp}" \
-    --arg nonce "${nonce}" \
-    '{sid: $sid, iat: $iat, exp: $exp, nonce: $nonce}')"
-  payload_b64="$(base64url_encode_text "${payload_json}")"
-  sig_b64="$(base64url_hmac_sha256 "${pair_token}" "${payload_b64}")"
-  echo "pct_v1.${payload_b64}.${sig_b64}"
+  local request_body
+  request_body="$(jq -nc \
+    --arg systemId "${SYSTEM_ID}" \
+    --arg pairToken "${PAIR_TOKEN}" \
+    --arg hostName "${HOST_NAME}" \
+    --arg relayWsUrl "${RELAY_WS_URL}" \
+    --argjson includeCode "${include_code_json}" \
+    --argjson ttlSec "${TICKET_TTL_SEC}" \
+    '{systemId: $systemId, pairToken: $pairToken, hostName: $hostName, relayWsUrl: $relayWsUrl, includeCode: $includeCode, ttlSec: $ttlSec}')"
+
+  local response
+  if ! response="$(curl -sS --fail-with-body \
+    -H 'content-type: application/json' \
+    -X POST \
+    -d "${request_body}" \
+    "${API_BASE_URL}/pair/bootstrap")"; then
+    echo "请求 Relay 配对签发失败：${API_BASE_URL}/pair/bootstrap" >&2
+    exit 1
+  fi
+
+  local ok
+  ok="$(printf '%s' "${response}" | jq -r '.ok // false')"
+  if [[ "${ok}" != "true" ]]; then
+    local code message suggestion
+    code="$(printf '%s' "${response}" | jq -r '.code // "UNKNOWN"')"
+    message="$(printf '%s' "${response}" | jq -r '.message // "未知错误"')"
+    suggestion="$(printf '%s' "${response}" | jq -r '.suggestion // "请检查 relay 与 sidecar 状态"')"
+    echo "Relay 签发失败：${code} - ${message}（${suggestion}）" >&2
+    exit 1
+  fi
+
+  PAIR_LINK="$(printf '%s' "${response}" | jq -r '.data.pairLink // empty')"
+  PAIR_TICKET="$(printf '%s' "${response}" | jq -r '.data.pairTicket // empty')"
+  SYSTEM_ID="$(printf '%s' "${response}" | jq -r '.data.systemId // empty')"
+  SIGNED_RELAY_WS_URL="$(printf '%s' "${response}" | jq -r '.data.relayWsUrl // empty')"
+  SIGNED_HOST_NAME="$(printf '%s' "${response}" | jq -r '.data.hostName // empty')"
+  SIMCTL_CMD="$(printf '%s' "${response}" | jq -r '.data.simctlCommand // empty')"
+
+  local maybe_code
+  maybe_code="$(printf '%s' "${response}" | jq -r '.data.pairCode // empty')"
+  if [[ -n "${maybe_code}" ]]; then
+    PAIR_CODE="${maybe_code}"
+  fi
+
+  if [[ -z "${PAIR_LINK}" || -z "${PAIR_TICKET}" || -z "${SYSTEM_ID}" ]]; then
+    echo "Relay 返回数据不完整：缺少 pairLink/pairTicket/systemId" >&2
+    exit 1
+  fi
 }
 
 print_qr_terminal() {
@@ -282,7 +304,6 @@ PAIR_CODE="${PAIR_CODE_OVERRIDE}"
 if [[ -z "${PAIR_CODE}" ]]; then
   PAIR_CODE="$(pair_code_from_files)"
 fi
-
 if ! validate_pair_code "${PAIR_CODE}"; then
   echo "配对码格式无效：${PAIR_CODE}" >&2
   exit 1
@@ -291,57 +312,70 @@ fi
 SYSTEM_ID="${PAIR_CODE%%.*}"
 PAIR_TOKEN="${PAIR_CODE#*.}"
 HOST_NAME="$(detect_host_name)"
-PAIR_TICKET=""
-PAIR_LINK=""
-SIMCTL_CMD=""
-
-NEED_LINK=1
 if [[ "${SHOW_MODE}" == "code" && "${SIMULATE_IOS_SCAN}" -eq 0 && -z "${QR_PNG_PATH}" ]]; then
-  NEED_LINK=0
+  NEED_BOOTSTRAP=0
 fi
-if [[ "${NEED_LINK}" -eq 1 ]]; then
-  PAIR_TICKET="$(generate_pair_ticket "${SYSTEM_ID}" "${PAIR_TOKEN}")"
-  PAIR_LINK="$(build_pairing_link "${RELAY_WS_URL}" "${SYSTEM_ID}" "${PAIR_TICKET}" "${PAIR_CODE}" "${HOST_NAME}")"
-  SIMCTL_CMD="xcrun simctl openurl booted \"${PAIR_LINK}\""
+
+if [[ "${NEED_BOOTSTRAP}" -eq 1 ]]; then
+  API_BASE_URL="$(relay_api_base "${RELAY_WS_URL}")"
+  request_pair_bootstrap
 fi
 
 if [[ -n "${QR_PNG_PATH}" ]]; then
-  if [[ "${NEED_LINK}" -ne 1 ]]; then
-    PAIR_TICKET="$(generate_pair_ticket "${SYSTEM_ID}" "${PAIR_TOKEN}")"
-    PAIR_LINK="$(build_pairing_link "${RELAY_WS_URL}" "${SYSTEM_ID}" "${PAIR_TICKET}" "${PAIR_CODE}" "${HOST_NAME}")"
+  if [[ "${NEED_BOOTSTRAP}" -ne 1 ]]; then
+    API_BASE_URL="$(relay_api_base "${RELAY_WS_URL}")"
+    request_pair_bootstrap
+    NEED_BOOTSTRAP=1
   fi
   export_qr_png "${PAIR_LINK}" "${QR_PNG_PATH}"
 fi
 
 case "${SHOW_MODE}" in
   all)
-    printf '%s\n' "宿主机名称: ${HOST_NAME}"
+    printf '%s\n' "宿主机名称: ${SIGNED_HOST_NAME:-${HOST_NAME}}"
     printf '%s\n' "systemId: ${SYSTEM_ID}"
     printf '%s\n' "配对码: ${PAIR_CODE}"
     printf '%s\n' "短时票据: ${PAIR_TICKET}"
+    printf '%s\n' "Relay WS: ${SIGNED_RELAY_WS_URL:-${RELAY_WS_URL}}"
     printf '%s\n' "配对链接: ${PAIR_LINK}"
-    printf '%s\n' "模拟扫码: ${SIMCTL_CMD}"
+    printf '%s\n' "模拟扫码: ${SIMCTL_CMD:-xcrun simctl openurl booted \"${PAIR_LINK}\"}"
     print_qr_terminal "${PAIR_LINK}" || true
     ;;
   code)
     printf '%s\n' "${PAIR_CODE}"
     ;;
   link)
+    if [[ "${NEED_BOOTSTRAP}" -ne 1 ]]; then
+      API_BASE_URL="$(relay_api_base "${RELAY_WS_URL}")"
+      request_pair_bootstrap
+      NEED_BOOTSTRAP=1
+    fi
     printf '%s\n' "${PAIR_LINK}"
     ;;
   qr)
+    if [[ "${NEED_BOOTSTRAP}" -ne 1 ]]; then
+      API_BASE_URL="$(relay_api_base "${RELAY_WS_URL}")"
+      request_pair_bootstrap
+      NEED_BOOTSTRAP=1
+    fi
     print_qr_terminal "${PAIR_LINK}"
     ;;
   json)
+    if [[ "${NEED_BOOTSTRAP}" -ne 1 ]]; then
+      API_BASE_URL="$(relay_api_base "${RELAY_WS_URL}")"
+      request_pair_bootstrap
+      NEED_BOOTSTRAP=1
+    fi
     require_cmd jq
     jq -n \
-      --arg hostName "${HOST_NAME}" \
+      --arg hostName "${SIGNED_HOST_NAME:-${HOST_NAME}}" \
       --arg systemId "${SYSTEM_ID}" \
-      --arg relay "${RELAY_WS_URL}" \
+      --arg relay "${SIGNED_RELAY_WS_URL:-${RELAY_WS_URL}}" \
       --arg code "${PAIR_CODE}" \
       --arg ticket "${PAIR_TICKET}" \
       --arg link "${PAIR_LINK}" \
-      '{hostName: $hostName, systemId: $systemId, relay: $relay, code: $code, ticket: $ticket, link: $link}'
+      --arg simctlCommand "${SIMCTL_CMD:-xcrun simctl openurl booted \"${PAIR_LINK}\"}" \
+      '{hostName: $hostName, systemId: $systemId, relay: $relay, code: $code, ticket: $ticket, link: $link, simctlCommand: $simctlCommand}'
     ;;
   *)
     echo "不支持的 --show 模式: ${SHOW_MODE}" >&2
@@ -350,6 +384,11 @@ case "${SHOW_MODE}" in
 esac
 
 if [[ "${SIMULATE_IOS_SCAN}" -eq 1 ]]; then
+  if [[ "${NEED_BOOTSTRAP}" -ne 1 ]]; then
+    API_BASE_URL="$(relay_api_base "${RELAY_WS_URL}")"
+    request_pair_bootstrap
+    NEED_BOOTSTRAP=1
+  fi
   echo "simulate scan: ${PAIR_LINK}"
   xcrun simctl openurl booted "${PAIR_LINK}"
 fi

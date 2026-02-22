@@ -1,0 +1,11 @@
+// 文件职责：
+// 1. 渲染运维/调试两页签状态。
+// 2. 将标签页 UI 切换逻辑从主流程中抽离。
+
+export function renderTabs(state, ui) {
+  const onOps = state.activeTab === "ops";
+  ui.opsView.classList.toggle("active", onOps);
+  ui.debugView.classList.toggle("active", !onOps);
+  ui.tabOps.classList.toggle("active", onOps);
+  ui.tabDebug.classList.toggle("active", !onOps);
+}

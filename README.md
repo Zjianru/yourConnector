@@ -1,79 +1,56 @@
 # yourConnector
 
-## 目录结构
+## 项目结构
 
-- `app/mobile`：唯一 App（Tauri Mobile，当前 iOS）
-- `services/relay`：relay 服务（Rust）
-- `services/sidecar`：sidecar 服务（Rust）
-- `protocol/rust`：协议 Rust 类型定义（唯一代码源）
-- `protocol/schema`：协议 JSON Schema（与 Rust 协议对齐）
-- `docs`：项目文档
+- `/Users/codez/develop/yourConnector/app/mobile`：唯一 App（Tauri Mobile，当前 iOS）
+- `/Users/codez/develop/yourConnector/services/relay`：relay 服务（Rust）
+- `/Users/codez/develop/yourConnector/services/sidecar`：sidecar 服务（Rust）
+- `/Users/codez/develop/yourConnector/protocol/rust`：协议 Rust 类型定义（唯一代码源）
+- `/Users/codez/develop/yourConnector/protocol/schema`：协议 JSON Schema（与 Rust 协议对齐）
+- `/Users/codez/develop/yourConnector/docs`：项目文档
 
-## 常用命令
+## 快速开始
 
 ```bash
 cd /Users/codez/develop/yourConnector
+make help
+make check
+make run-relay
+make run-sidecar
+make show-pairing
+make run-mobile-tauri-ios IOS_SIM="iPhone 17 Pro"
+```
 
-# 编译检查（服务与协议）
-cargo check --workspace
+## 核心命令
 
-# 启动 relay / sidecar
+```bash
+# 服务
 make run-relay
 make run-sidecar
 
-# 读取配对码（不需要翻日志）
-make show-pairing-code
-
-# 读取扫码链接（默认 sid+ticket）
-make show-pairing-link
-
-# 一次输出配对码+链接+终端二维码（推荐）
-make show-pairing
-
-# 多参数配对命令（可覆盖 relay / 名称 / 输出模式 / 票据 TTL）
-make pairing PAIR_ARGS="--show all --name 我的Mac --relay ws://127.0.0.1:18080/v1/ws"
-
-# 可选附带 legacy code（仅兼容旧流程）
-make pairing PAIR_ARGS="--show link --include-code"
-
-# 开发态模拟扫码（向 iOS 模拟器投递 yc://pair 链接）
-make simulate-ios-scan
-
-# 启动 iOS 移动端
+# iOS
 make run-mobile-tauri-ios IOS_SIM="iPhone 17 Pro"
-
-# 需要热更新时，使用 dev 模式（依赖本地网络权限）
 make run-mobile-tauri-ios-dev IOS_SIM="iPhone 17 Pro"
-
-# 若 dev 模式出现空白页，先清理重装再启动
 make run-mobile-tauri-ios-dev-clean IOS_SIM="iPhone 17 Pro"
-
-# 若模拟器服务异常（白屏/黑屏/启动卡住），先修复再重启
 make repair-ios-sim IOS_SIM="iPhone 17 Pro"
+
+# 配对（relay 统一签发）
+make pairing PAIR_ARGS="--show all"
+make show-pairing
+make show-pairing-link
+make show-pairing-code
+make simulate-ios-scan
 ```
 
-`dev` 模式出现本地网络权限提示时，需要在 iOS `设置 > 隐私与安全性 > 本地网络` 里允许 `yourConnector Mobile`，然后重启 App。
+## 配对链路说明
 
-## 配对说明（新）
+1. `pairTicket` 与 `yc://pair` 链接统一由 relay `POST /v1/pair/bootstrap` 签发。
+2. sidecar 启动后会请求 relay 签发并在终端高亮展示配对信息。
+3. `scripts/pairing.sh` 也调用 relay 签发接口，避免脚本与 sidecar 链接不一致。
+4. App 配对与 WS 握手不再接受 `pairToken`；`pairToken` 仅用于 sidecar 与 relay 鉴权。
 
-- 默认看 sidecar/relay 启动日志里的高亮“首次配对”区块（配对码 + 配对链接）
-- 配对链接默认包含短时票据（`sid + ticket`）
-- `code=systemId.pairToken` 仅作为旧链路兼容参数，App 配对接口已禁用 `pairToken`
-- `make show-pairing` 作为主命令（含二维码）
-- `make show-pairing-code` / `make show-pairing-link` 作为兜底
-- `make show-pairing-qr` 可随时重新展示终端二维码
-- 终端二维码依赖 `qrencode`（可选安装：`brew install qrencode`）
-- iOS 开发调试可用 `make simulate-ios-scan` 模拟二维码扫描投递
-- iOS App 连接时需要填写：
-  - `Relay WS URL`
-  - `System ID（sid）`
-  - `配对票据（ticket）`（或扫码/链接自动导入）
-- 若手机重装导致控制命令被拒绝，可在 App 调试页点击“绑定当前设备为控制端”进行重绑。
-- `systemId` 与 `pairToken` 由 sidecar 本地持久化生成，默认路径：
-  - `~/.config/yourconnector/sidecar/system-id.txt`
-  - `~/.config/yourconnector/sidecar/pair-token.txt`
+## 文档入口
 
-## 里程碑与验收
-
-- 里程碑与待办：`/Users/codez/develop/yourConnector/docs/里程碑与待办-v1.md`
-- 已完成功能验收：`/Users/codez/develop/yourConnector/docs/已完成功能验收-v1.md`
+- `/Users/codez/develop/yourConnector/docs/文档导航-v2.md`
+- `/Users/codez/develop/yourConnector/docs/已完成功能验收-v1.md`
+- `/Users/codez/develop/yourConnector/docs/里程碑与待办-v1.md`
