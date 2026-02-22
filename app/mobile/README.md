@@ -42,5 +42,5 @@ make simulate-ios-scan
 
 ```bash
 cd /Users/codez/develop/yourConnector
-find /Users/codez/develop/yourConnector/app/mobile/ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
+find /Users/codez/develop/yourConnector/app/mobile/ui/js -name '*.js' -print0 | xargs -0 -I{} sh -c 'node --check "$$1" && node --check --input-type=module < "$$1"' _ "{}"
 ```

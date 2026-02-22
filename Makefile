@@ -42,7 +42,7 @@ check-all:
 	cargo fmt --check
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo test --workspace
-	find app/mobile/ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
+	find app/mobile/ui/js -name '*.js' -print0 | xargs -0 -I{} sh -c 'node --check "$$1" && node --check --input-type=module < "$$1"' _ "{}"
 	$(MAKE) check-governance
 
 run-relay:

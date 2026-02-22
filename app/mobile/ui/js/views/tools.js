@@ -259,7 +259,7 @@ export function createToolsView({
       return;
     }
     const target = event.target;
-    if (!(target instanceof Element) {
+    if (!(target instanceof Element)) {
       return;
     }
     if (target.closest(".tool-swipe")) {
