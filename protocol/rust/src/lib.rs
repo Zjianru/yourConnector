@@ -49,7 +49,7 @@ pub struct EventEnvelope {
 }
 
 impl EventEnvelope {
-    // 构造默认 envelope：自动填充版本、eventId、ts。
+    /// 构造默认 envelope：自动填充版本、eventId、ts。
     pub fn new(
         event_type: impl Into<String>,
         system_id: impl Into<String>,
@@ -73,12 +73,12 @@ impl EventEnvelope {
     }
 }
 
-// 生成纳秒精度 UTC 时间戳（RFC3339）。
+/// 生成纳秒精度 UTC 时间戳（RFC3339）。
 pub fn now_rfc3339_nanos() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
 }
 
-// 归一化 clientType，保持历史兼容（mobile -> app）。
+/// 归一化 clientType，保持历史兼容（mobile -> app）。
 pub fn normalize_client_type(raw: &str) -> String {
     match raw {
         "mobile" => "app".to_string(),

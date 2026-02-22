@@ -4,6 +4,11 @@
 
 import { parseRelayWsUrl } from "./relay-api.js";
 
+/**
+ * 解析历史 `systemId.pairToken` 形式配对码。
+ * @param {string} rawValue 用户输入原文。
+ * @returns {{systemId: string, pairToken: string}|null} 成功返回结构化结果。
+ */
 export function parsePairCode(rawValue) {
   const raw = String(rawValue || "").trim();
   if (!raw) {
@@ -24,6 +29,11 @@ export function parsePairCode(rawValue) {
   return { systemId, pairToken };
 }
 
+/**
+ * 解析 `yc://pair` 配对链接。
+ * @param {string} rawValue 用户粘贴文本或扫码结果。
+ * @returns {{relayUrl: string, pairCode: string, systemId: string, pairToken: string, pairTicket: string, hostName: string}|null}
+ */
 export function parsePairingLink(rawValue) {
   const raw = String(rawValue || "").trim();
   if (!raw) {

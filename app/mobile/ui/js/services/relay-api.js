@@ -3,10 +3,18 @@
 // 2. 提供带网络容错的 JSON 请求函数，兼容 localhost/127.0.0.1 调试。
 
 function buildHostWithPort(hostname, port) {
-  const withBracket = hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
+  const withBracket = hostname.includes(":") && !hostname.startsWith("[")
+    ? `[${hostname}]`
+    : hostname;
   return port ? `${withBracket}:${port}` : withBracket;
 }
 
+/**
+ * 解析并校验 Relay WebSocket 地址。
+ * @param {string} relayWsUrl Relay WS URL。
+ * @returns {URL} 标准化 URL 实例。
+ * @throws {Error} 地址协议不合法时抛错。
+ */
 export function parseRelayWsUrl(relayWsUrl) {
   const raw = String(relayWsUrl || "").trim();
   const ws = new URL(raw);
@@ -18,6 +26,11 @@ export function parseRelayWsUrl(relayWsUrl) {
   return ws;
 }
 
+/**
+ * 根据 Relay WS 地址推导 HTTP API 候选基址（含 localhost/127.0.0.1 互通）。
+ * @param {string} relayWsUrl Relay WS URL。
+ * @returns {string[]} API 基址列表。
+ */
 export function relayApiBases(relayWsUrl) {
   const ws = parseRelayWsUrl(relayWsUrl);
   const protocol = ws.protocol === "wss:" ? "https:" : "http:";
@@ -35,6 +48,11 @@ export function relayApiBases(relayWsUrl) {
   return [...new Set(hosts)].map((host) => `${protocol}//${host}${normalizedPath}`);
 }
 
+/**
+ * 判定是否为网络可达性类错误。
+ * @param {unknown} error 异常对象。
+ * @returns {boolean}
+ */
 export function isRelayNetworkError(error) {
   const text = String(error || "");
   return (
@@ -43,6 +61,13 @@ export function isRelayNetworkError(error) {
   );
 }
 
+/**
+ * 以 JSON 方式请求 Relay API，并在本地调试地址间自动回退。
+ * @param {string} relayWsUrl Relay WS URL。
+ * @param {string} path 接口路径（以 `/` 开头）。
+ * @param {RequestInit} init fetch 参数。
+ * @returns {Promise<{resp: Response, body: any, apiBase: string}>}
+ */
 export async function relayRequestJson(relayWsUrl, path, init) {
   const bases = relayApiBases(relayWsUrl);
   let lastNetworkError = null;

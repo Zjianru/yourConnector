@@ -2,6 +2,11 @@
 // 1. 渲染运维/调试两页签状态。
 // 2. 将标签页 UI 切换逻辑从主流程中抽离。
 
+/**
+ * 渲染底部标签页状态。
+ * @param {object} state 全局状态。
+ * @param {object} ui 页面节点集合。
+ */
 export function renderTabs(state, ui) {
   const onOps = state.activeTab === "ops";
   ui.opsView.classList.toggle("active", onOps);

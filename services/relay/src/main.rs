@@ -8,6 +8,7 @@ mod state;
 mod ws;
 
 #[tokio::main]
+/// 启动 Relay 服务。
 async fn main() -> anyhow::Result<()> {
     app::run().await
 }

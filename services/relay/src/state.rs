@@ -26,6 +26,7 @@ pub(crate) struct AppState {
 }
 
 impl Default for AppState {
+    /// 初始化内存状态并加载持久化认证元数据。
     fn default() -> Self {
         let path = auth_store_path();
         let store = load_auth_store(&path).unwrap_or_else(|err| {

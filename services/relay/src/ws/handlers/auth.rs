@@ -1,148 +1,15 @@
-//! WebSocket 握手与会话处理。
+//! WebSocket 连接鉴权逻辑。
 
-use axum::{
-    extract::{
-        Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
-    http::StatusCode,
-    response::IntoResponse,
-};
-use futures_util::{SinkExt, StreamExt};
-use tokio::sync::mpsc;
-use tracing::{info, warn};
-use uuid::Uuid;
+use axum::http::StatusCode;
 
 use crate::{
-    api::{
-        error::ApiError,
-        types::{PairBootstrapRequest, WsQuery},
-    },
+    api::{error::ApiError, types::WsQuery},
     auth::{
         pop::{parse_ts, verify_ts_window, ws_pop_payload},
         token::{authorize_pair_token, verify_access_token, verify_pop_signature},
     },
-    pairing::bootstrap::print_pairing_banner_from_relay,
-    state::{AppState, ClientHandle, SystemRoom},
-    ws::envelope::{sanitize_envelope, send_server_presence},
+    state::{AppState, SystemRoom},
 };
-
-/// WS 握手入口：校验 query 并升级连接。
-pub(crate) async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-    Query(mut q): Query<WsQuery>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    if q.system_id.trim().is_empty()
-        || q.client_type.trim().is_empty()
-        || q.device_id.trim().is_empty()
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "missing systemId/clientType/deviceId".to_string(),
-        ));
-    }
-
-    q.client_type = yc_shared_protocol::normalize_client_type(&q.client_type);
-    if q.client_type != "app" && q.client_type != "sidecar" {
-        return Err((StatusCode::BAD_REQUEST, "invalid clientType".to_string()));
-    }
-
-    let auth_result = state.authorize_connection(&q).await;
-    if let Err(err) = auth_result {
-        return Err((err.status, format!("{}: {}", err.code, err.message)));
-    }
-
-    Ok(ws.on_upgrade(move |socket| handle_socket(state, socket, q)))
-}
-
-/// 单连接处理：注册连接、转发消息、连接断开清理。
-async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
-    let client_id = Uuid::new_v4();
-    let (mut ws_sender, mut ws_reader) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
-
-    state
-        .insert(
-            q.system_id.clone(),
-            q.pair_token.clone(),
-            client_id,
-            ClientHandle {
-                client_type: q.client_type.clone(),
-                sender: tx.clone(),
-            },
-        )
-        .await;
-
-    if q.client_type == "sidecar" {
-        match state
-            .issue_pair_bootstrap(&PairBootstrapRequest {
-                system_id: q.system_id.clone(),
-                pair_token: q.pair_token.clone(),
-                host_name: q.host_name.clone(),
-                relay_ws_url: None,
-                include_code: Some(true),
-                ttl_sec: None,
-            })
-            .await
-        {
-            Ok(data) => print_pairing_banner_from_relay(&data),
-            Err(err) => warn!("bootstrap banner failed: {} {}", err.code, err.message),
-        }
-    }
-
-    info!(
-        "ws connected system={} type={} device={}",
-        q.system_id, q.client_type, q.device_id
-    );
-
-    send_server_presence(&tx, &q.system_id, &q.client_type, &q.device_id);
-
-    let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if ws_sender.send(msg).await.is_err() {
-                break;
-            }
-        }
-    });
-
-    while let Some(next) = ws_reader.next().await {
-        let msg = match next {
-            Ok(m) => m,
-            Err(err) => {
-                warn!(
-                    "ws read error system={} device={}: {err}",
-                    q.system_id, q.device_id
-                );
-                break;
-            }
-        };
-
-        let Message::Text(text) = msg else {
-            continue;
-        };
-
-        let sanitized = match sanitize_envelope(&text, &q.system_id, &q.client_type, &q.device_id) {
-            Ok(v) => v,
-            Err(err) => {
-                warn!(
-                    "drop invalid payload system={} device={}: {}",
-                    q.system_id, q.device_id, err
-                );
-                continue;
-            }
-        };
-
-        state.broadcast(&q.system_id, client_id, sanitized).await;
-    }
-
-    state.remove(&q.system_id, client_id).await;
-    writer.abort();
-    info!(
-        "ws disconnected system={} type={} device={}",
-        q.system_id, q.client_type, q.device_id
-    );
-}
 
 impl AppState {
     /// 连接鉴权入口：sidecar 走 pairToken；app 仅允许 accessToken + PoP。
@@ -171,6 +38,7 @@ impl AppState {
                 .map(str::trim)
                 .filter(|v| !v.is_empty())
                 .is_some();
+        // App 链路禁止继续使用临时票据/配对码直接连 WS，必须先完成凭证换发。
         if has_legacy_pair {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
@@ -360,6 +228,7 @@ impl AppState {
         }
 
         let now = crate::auth::store::unix_now();
+        // nonce 以短窗口缓存，过期即清理，既防重放又避免内存常驻增长。
         room.app_nonces.retain(|_, exp| exp.saturating_add(5) > now);
         if let Some(exp) = room.app_nonces.get(nonce)
             && *exp > now

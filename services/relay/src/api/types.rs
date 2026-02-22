@@ -213,6 +213,7 @@ pub(crate) struct AuthStore {
 }
 
 impl AuthStore {
+    /// 使用签名种子初始化认证存储。
     pub(crate) fn new(signing_key: String) -> Self {
         Self {
             version: 1,
@@ -221,10 +222,12 @@ impl AuthStore {
         }
     }
 
+    /// 读取或创建指定 system 的可变认证状态。
     pub(crate) fn system_mut(&mut self, system_id: &str) -> &mut SystemAuthState {
         self.systems.entry(system_id.to_string()).or_default()
     }
 
+    /// 读取指定 system 的认证状态。
     pub(crate) fn system_ref(&self, system_id: &str) -> Option<&SystemAuthState> {
         self.systems.get(system_id)
     }

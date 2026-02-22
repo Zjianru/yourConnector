@@ -15,6 +15,7 @@ pub(crate) struct ApiError {
 }
 
 impl ApiError {
+    /// 构造统一 API 错误。
     pub(crate) fn new(
         status: StatusCode,
         code: &'static str,
@@ -29,6 +30,7 @@ impl ApiError {
         }
     }
 
+    /// 转换为统一响应体。
     pub(crate) fn into_response(self) -> (StatusCode, Json<ApiEnvelope<Value>>) {
         (
             self.status,

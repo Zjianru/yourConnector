@@ -8,7 +8,8 @@ PAIR_ARGS ?=
 
 .DEFAULT_GOAL := help
 
-.PHONY: check run-relay run-sidecar stop-relay stop-sidecar restart-relay restart-sidecar
+.PHONY: check check-governance check-all
+.PHONY: run-relay run-sidecar stop-relay stop-sidecar restart-relay restart-sidecar
 .PHONY: install-tauri-cli boot-ios-sim stop-mobile-tauri-ios repair-ios-sim
 .PHONY: run-mobile-tauri-ios run-mobile-tauri-ios-dev run-mobile-tauri-ios-dev-clean
 .PHONY: pairing show-pairing show-pairing-code show-pairing-link show-pairing-qr show-pairing-json simulate-ios-scan
@@ -17,6 +18,8 @@ PAIR_ARGS ?=
 help:
 	@echo "yourConnector 常用命令："
 	@echo "  make check                          # 工作区编译检查"
+	@echo "  make check-governance               # 代码注释/行长/文档一致性门禁"
+	@echo "  make check-all                      # 全量门禁（编译+测试+lint+治理）"
 	@echo "  make run-relay                      # 启动 relay"
 	@echo "  make run-sidecar                    # 启动 sidecar"
 	@echo "  make run-mobile-tauri-ios           # 构建并安装 iOS App（推荐）"
@@ -29,6 +32,18 @@ help:
 
 check:
 	cargo check --workspace
+
+check-governance:
+	./scripts/check-governance.sh
+	./scripts/check-doc-consistency.sh
+
+check-all:
+	cargo check --workspace
+	cargo fmt --check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo test --workspace
+	find app/mobile/ui/js -name '*.js' -print0 | xargs -0 -n1 node --check
+	$(MAKE) check-governance
 
 run-relay:
 	cargo run -p yc-relay
