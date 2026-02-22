@@ -1,0 +1,4 @@
+/target
+.DS_Store
+**/target
+app/mobile/src-tauri/gen

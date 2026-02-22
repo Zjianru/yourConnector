@@ -1,0 +1,36 @@
+[workspace]
+members = [
+  "protocol/rust",
+  "services/relay",
+  "services/sidecar",
+]
+exclude = [
+  "app/mobile/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+authors = ["yourConnector Team"]
+
+[workspace.dependencies]
+anyhow = "1.0"
+axum = { version = "0.8", features = ["ws", "json", "macros"] }
+chrono = { version = "0.4", features = ["serde"] }
+ed25519-dalek = "2.2"
+futures-util = "0.3"
+base64 = "0.22"
+hmac = "0.12"
+sha2 = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.37"
+tokio = { version = "1.48", features = ["full"] }
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tower-http = { version = "0.6", features = ["cors"] }
+url = "2.5"
+uuid = { version = "1.18", features = ["v4", "serde"] }

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>dev.yourconnector.mobile.pairing</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>yc</string>
+      </array>
+    </dict>
+  </array>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>用于连接本机开发服务并调试移动端页面。</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_tauri._tcp</string>
+  </array>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
+  <key>NSCameraUsageDescription</key>
+  <string>用于扫描宿主机配对二维码，完成首次配对。</string>
+  <key>NSPhotoLibraryUsageDescription</key>
+  <string>用于从相册导入二维码图片并完成配对。</string>
+</dict>
+</plist>

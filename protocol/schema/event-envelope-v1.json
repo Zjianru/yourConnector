@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://yourconnector.dev/schema/event-envelope-v1.json",
+  "title": "EventEnvelopeV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "v",
+    "eventId",
+    "type",
+    "systemId",
+    "ts",
+    "payload"
+  ],
+  "properties": {
+    "v": {
+      "const": 1
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "minLength": 1
+    },
+    "systemId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "toolId": {
+      "type": "string"
+    },
+    "peerId": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": "string"
+    },
+    "sourceClientType": {
+      "type": "string"
+    },
+    "sourceDeviceId": {
+      "type": "string"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "ackRequired": {
+      "type": "boolean"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

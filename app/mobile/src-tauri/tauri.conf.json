@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "yourConnector Mobile",
+  "version": "0.1.0",
+  "identifier": "dev.yourconnector.mobile",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "yourConnector Mobile",
+        "width": 430,
+        "height": 932,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  }
+}
