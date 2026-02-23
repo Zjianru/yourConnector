@@ -97,9 +97,9 @@ mod tests {
 
     #[test]
     fn opencode_tool_id_uses_workspace_and_instance() {
-        let a = build_opencode_tool_id("/Users/codez/dev/work-a", 1001);
-        let b = build_opencode_tool_id("/Users/codez/dev/work-a", 2002);
-        let c = build_opencode_tool_id("/Users/codez/dev/work-b", 1001);
+        let a = build_opencode_tool_id("/workspace/work-a", 1001);
+        let b = build_opencode_tool_id("/workspace/work-a", 2002);
+        let c = build_opencode_tool_id("/workspace/work-b", 1001);
 
         assert_ne!(a, b);
         assert_ne!(a, c);
@@ -109,9 +109,9 @@ mod tests {
 
     #[test]
     fn openclaw_tool_id_uses_workspace_and_instance() {
-        let a = build_openclaw_tool_id("/Users/codez/dev/work-a", "openclaw", 1001);
-        let b = build_openclaw_tool_id("/Users/codez/dev/work-a", "openclaw --model gpt-5", 2002);
-        let c = build_openclaw_tool_id("/Users/codez/dev/work-b", "openclaw", 1001);
+        let a = build_openclaw_tool_id("/workspace/work-a", "openclaw", 1001);
+        let b = build_openclaw_tool_id("/workspace/work-a", "openclaw --model gpt-5", 2002);
+        let c = build_openclaw_tool_id("/workspace/work-b", "openclaw", 1001);
 
         assert_ne!(a, b);
         assert_ne!(a, c);

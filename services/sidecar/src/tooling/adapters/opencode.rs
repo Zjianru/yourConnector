@@ -224,14 +224,14 @@ mod tests {
         let mut all = HashMap::new();
         all.insert(
             100,
-            proc(100, "/opt/homebrew/bin/opencode", "/Users/codez/dev/a"),
+            proc(100, "/opt/homebrew/bin/opencode", "/workspace/a"),
         );
         all.insert(
             101,
             proc(
                 101,
                 "/opt/homebrew/.../opencode-darwin-arm64/bin/opencode",
-                "/Users/codez/dev/a",
+                "/workspace/a",
             ),
         );
         all.insert(
@@ -239,7 +239,7 @@ mod tests {
             proc(
                 202,
                 "/opt/homebrew/.../opencode-darwin-arm64/bin/opencode",
-                "/Users/codez/dev/b",
+                "/workspace/b",
             ),
         );
 
