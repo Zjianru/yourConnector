@@ -1,0 +1,105 @@
+name: sync-release-to-oss
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.3.3"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET || 'your-connector' }}
+      OSS_ENDPOINT: ${{ vars.ALIYUN_OSS_ENDPOINT || 'oss-cn-beijing.aliyuncs.com' }}
+      OSS_DOMAIN: ${{ vars.ALIYUN_OSS_DOMAIN || 'your-connector.oss-cn-beijing.aliyuncs.com' }}
+      OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX || 'releases' }}
+      ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
+      ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
+    steps:
+      - name: Resolve tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate OSS credentials
+        run: |
+          [[ -n "${ALIYUN_ACCESS_KEY_ID}" ]] || { echo "missing secret: ALIYUN_ACCESS_KEY_ID"; exit 1; }
+          [[ -n "${ALIYUN_ACCESS_KEY_SECRET}" ]] || { echo "missing secret: ALIYUN_ACCESS_KEY_SECRET"; exit 1; }
+          [[ -n "${OSS_BUCKET}" ]] || { echo "missing var: ALIYUN_OSS_BUCKET"; exit 1; }
+          [[ -n "${OSS_ENDPOINT}" ]] || { echo "missing var: ALIYUN_OSS_ENDPOINT"; exit 1; }
+          [[ -n "${OSS_DOMAIN}" ]] || { echo "missing var: ALIYUN_OSS_DOMAIN"; exit 1; }
+          [[ -n "${OSS_PREFIX}" ]] || { echo "missing var: ALIYUN_OSS_PREFIX"; exit 1; }
+
+      - name: Download release assets from GitHub
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ steps.tag.outputs.value }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir dist \
+            --pattern "yc-relay-linux-amd64.tar.gz" \
+            --pattern "yc-sidecar-linux-amd64.tar.gz" \
+            --pattern "checksums.txt"
+          (
+            cd dist
+            sha256sum -c checksums.txt
+          )
+
+      - name: Install ossutil
+        run: |
+          curl -fsSL "https://gosspublic.alicdn.com/ossutil/1.7.16/ossutil64" -o ossutil64
+          chmod +x ossutil64
+          ./ossutil64 --version
+
+      - name: Configure ossutil
+        run: |
+          ./ossutil64 config \
+            -e "${OSS_ENDPOINT}" \
+            -i "${ALIYUN_ACCESS_KEY_ID}" \
+            -k "${ALIYUN_ACCESS_KEY_SECRET}" \
+            -L CH
+
+      - name: Upload artifacts to OSS by tag
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          OSS_BASE="oss://${OSS_BUCKET}/${OSS_PREFIX}/${TAG}"
+          ./ossutil64 cp dist/yc-relay-linux-amd64.tar.gz "${OSS_BASE}/yc-relay-linux-amd64.tar.gz" -f
+          ./ossutil64 cp dist/yc-sidecar-linux-amd64.tar.gz "${OSS_BASE}/yc-sidecar-linux-amd64.tar.gz" -f
+          ./ossutil64 cp dist/checksums.txt "${OSS_BASE}/checksums.txt" -f
+
+      - name: Upload latest.json
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          cat > dist/latest.json <<JSON
+          {
+            "tag": "${TAG}",
+            "ossBaseUrl": "https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}",
+            "files": [
+              "yc-relay-linux-amd64.tar.gz",
+              "yc-sidecar-linux-amd64.tar.gz",
+              "checksums.txt"
+            ]
+          }
+          JSON
+          ./ossutil64 cp dist/latest.json "oss://${OSS_BUCKET}/${OSS_PREFIX}/latest.json" -f
+
+      - name: Print domestic download URLs
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
+          echo "relay:   ${BASE}/yc-relay-linux-amd64.tar.gz"
+          echo "sidecar: ${BASE}/yc-sidecar-linux-amd64.tar.gz"
+          echo "sum:     ${BASE}/checksums.txt"
