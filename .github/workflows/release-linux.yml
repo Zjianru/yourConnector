@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -55,11 +57,35 @@ jobs:
             echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Generate release notes from commits
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          mkdir -p dist
+
+          PREV_TAG="$(git tag --sort=-v:refname | awk -v t="${TAG}" '$0 != t { print; exit }')"
+          if [[ -n "${PREV_TAG}" ]]; then
+            RANGE="${PREV_TAG}..${TAG}"
+            CHANGELOG_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+          else
+            RANGE="${TAG}"
+            CHANGELOG_URL="https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
+          fi
+
+          {
+            echo "## 版本说明（${TAG}）"
+            echo
+            echo "### 代码提交"
+            git log --no-merges --pretty='- %s (%h)' "${RANGE}" || echo "- 无提交记录"
+            echo
+            echo "### 完整变更"
+            echo "Full Changelog: ${CHANGELOG_URL}"
+          } > dist/release-notes.md
+
       - name: Create/Update GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.value }}
-          generate_release_notes: true
+          body_path: dist/release-notes.md
           files: |
             dist/yc-relay-linux-amd64.tar.gz
             dist/yc-sidecar-linux-amd64.tar.gz
