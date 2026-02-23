@@ -102,13 +102,14 @@
         </div>
 
         <section class="detail-card">
-          <h4 class="detail-title">OpenCode 摘要</h4>
+          <h4 id="toolSummaryTitle" class="detail-title">工具摘要</h4>
+          <div id="summaryStatusDots" class="tool-summary-dots"></div>
           <div id="summaryRows" class="rows"></div>
         </section>
 
         <section class="detail-card">
           <div class="expand-head">
-            <span class="title">更多信息</span>
+            <span id="toolDetailSectionTitle" class="title">更多信息</span>
             <button id="toggleDetailsBtn" class="icon-btn" aria-label="展开或收起">⌄</button>
           </div>
           <div id="detailRows" class="rows" style="margin-top: 8px"></div>
@@ -116,7 +117,7 @@
         </section>
 
         <section id="usagePanel" class="detail-card" style="display: none">
-          <h4 class="detail-title">模型用量（当前会话）</h4>
+          <h4 id="usagePanelTitle" class="detail-title">模型用量（当前会话）</h4>
           <div id="usageRows" class="rows"></div>
         </section>
       </div>

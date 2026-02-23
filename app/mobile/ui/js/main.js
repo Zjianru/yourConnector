@@ -80,6 +80,7 @@ const toolsView = createToolsView({
   ui,
   ensureRuntime: runtimeState.ensureRuntime,
   metricForTool: runtimeState.metricForTool,
+  detailForTool: runtimeState.detailForTool,
   resolveToolDisplayName: runtimeState.resolveToolDisplayName,
   hostStatusLabel: runtimeState.hostStatusLabel,
 });
@@ -99,7 +100,9 @@ const toolDetailModal = createToolDetailModal({
   hostById: hostState.hostById,
   ensureRuntime: runtimeState.ensureRuntime,
   metricForTool: runtimeState.metricForTool,
+  detailForTool: runtimeState.detailForTool,
   resolveToolDisplayName: runtimeState.resolveToolDisplayName,
+  requestToolDetailsRefresh: connectionFlow.requestToolDetailsRefresh,
 });
 
 const toolManageFlow = createToolManageFlow({

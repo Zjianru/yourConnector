@@ -73,6 +73,11 @@ export function createConnectionEvents({
         return;
       }
 
+      if (type === "tool_details_snapshot") {
+        applyToolDetailsSnapshot(hostId, payload);
+        return;
+      }
+
       if (type === "controller_bind_updated") {
         handleControllerBindUpdated(hostId, payload);
         return;
@@ -212,6 +217,42 @@ export function createConnectionEvents({
       }],
       false,
     );
+  }
+
+  /**
+   * 应用工具详情快照（tool_details_snapshot）。
+   * @param {string} hostId 宿主机标识。
+   * @param {Record<string, any>} payload 事件载荷。
+   */
+  function applyToolDetailsSnapshot(hostId, payload) {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime) {
+      return;
+    }
+
+    const detailsById = {};
+    const staleById = {};
+    const updatedAtById = {};
+
+    const details = asListOfMap(payload.details);
+    for (const item of details) {
+      const toolId = String(item.toolId || "").trim();
+      if (!toolId) {
+        continue;
+      }
+      detailsById[toolId] = {
+        schema: String(item.schema || ""),
+        data: asMap(item.data),
+        profileKey: String(item.profileKey || ""),
+        expiresAt: String(item.expiresAt || ""),
+      };
+      staleById[toolId] = asBool(item.stale);
+      updatedAtById[toolId] = String(item.collectedAt || "");
+    }
+
+    runtime.toolDetailsById = detailsById;
+    runtime.toolDetailStaleById = staleById;
+    runtime.toolDetailUpdatedAtById = updatedAtById;
   }
 
   return { ingestEvent };

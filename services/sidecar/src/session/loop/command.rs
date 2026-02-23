@@ -21,8 +21,42 @@ use crate::{
 /// Relay WebSocket 写端类型别名。
 pub(crate) type RelayWriter = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
 
-/// 处理一条 sidecar 控制命令。
-/// 返回值：`true` 表示命令后需要刷新快照；`false` 表示无需刷新。
+/// sidecar 命令处理结果：声明后续是否需要刷新快照/详情。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SidecarCommandOutcome {
+    /// 是否需要刷新 tools_snapshot / metrics_snapshot。
+    pub(crate) refresh_snapshots: bool,
+    /// 是否需要刷新 tool_details_snapshot。
+    pub(crate) refresh_details: bool,
+    /// 详情刷新目标工具；为空表示刷新全部已接入工具。
+    pub(crate) detail_tool_id: Option<String>,
+    /// 是否强制刷新详情（忽略去抖）。
+    pub(crate) force_detail_refresh: bool,
+}
+
+impl SidecarCommandOutcome {
+    /// 刷新快照与详情。
+    fn snapshots_and_details() -> Self {
+        Self {
+            refresh_snapshots: true,
+            refresh_details: true,
+            detail_tool_id: None,
+            force_detail_refresh: true,
+        }
+    }
+
+    /// 仅刷新详情。
+    fn details_only(detail_tool_id: Option<String>, force: bool) -> Self {
+        Self {
+            refresh_snapshots: false,
+            refresh_details: true,
+            detail_tool_id,
+            force_detail_refresh: force,
+        }
+    }
+}
+
+/// 处理一条 sidecar 控制命令，并返回后续刷新意图。
 pub(crate) async fn handle_sidecar_command(
     ws_writer: &mut RelayWriter,
     cfg: &Config,
@@ -31,7 +65,7 @@ pub(crate) async fn handle_sidecar_command(
     discovered_tools: &[ToolRuntimePayload],
     whitelist: &mut ToolWhitelistStore,
     controllers: &mut ControllerDevicesStore,
-) -> Result<bool> {
+) -> Result<SidecarCommandOutcome> {
     if let SidecarCommand::RebindController { device_id } = &command_envelope.command {
         let device = device_id.trim();
         let (ok, changed, reason) = if command_envelope.source_client_type != "app" {
@@ -67,7 +101,7 @@ pub(crate) async fn handle_sidecar_command(
         )
         .await?;
 
-        return Ok(false);
+        return Ok(SidecarCommandOutcome::default());
     }
 
     let (allowed, allow_reason) = match controllers.authorize_or_bind(
@@ -95,11 +129,11 @@ pub(crate) async fn handle_sidecar_command(
             }),
         )
         .await?;
-        return Ok(false);
+        return Ok(SidecarCommandOutcome::default());
     }
 
-    match command_envelope.command {
-        SidecarCommand::Refresh => {}
+    let outcome = match command_envelope.command {
+        SidecarCommand::Refresh => SidecarCommandOutcome::snapshots_and_details(),
         SidecarCommand::ConnectTool { tool_id } => {
             let candidate = discovered_tools.iter().find(|tool| tool.tool_id == tool_id);
             let (ok, changed, reason) = if candidate.is_none() {
@@ -136,6 +170,8 @@ pub(crate) async fn handle_sidecar_command(
                 }),
             )
             .await?;
+
+            SidecarCommandOutcome::snapshots_and_details()
         }
         SidecarCommand::DisconnectTool { tool_id } => {
             let (ok, changed, reason) = match whitelist.remove(&tool_id) {
@@ -157,9 +193,14 @@ pub(crate) async fn handle_sidecar_command(
                 }),
             )
             .await?;
-        }
-        SidecarCommand::RebindController { .. } => {}
-    }
 
-    Ok(true)
+            SidecarCommandOutcome::snapshots_and_details()
+        }
+        SidecarCommand::RefreshToolDetails { tool_id, force } => {
+            SidecarCommandOutcome::details_only(tool_id, force)
+        }
+        SidecarCommand::RebindController { .. } => SidecarCommandOutcome::default(),
+    };
+
+    Ok(outcome)
 }

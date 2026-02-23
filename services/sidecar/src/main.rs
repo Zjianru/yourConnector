@@ -9,7 +9,6 @@ use tracing::{error, info};
 
 mod config;
 mod control;
-mod discoverers;
 mod pairing;
 mod runtime;
 mod session;
@@ -18,14 +17,14 @@ mod tooling;
 
 use config::Config;
 
-pub(crate) use runtime::{ProcInfo, discover_tools, fallback_tools_or_empty};
+pub(crate) use runtime::{ProcInfo, fallback_tools_or_empty};
 pub(crate) use tooling::{
     build_openclaw_tool_id, build_opencode_tool_id, bytes_to_gb, bytes_to_mb,
     collect_opencode_session_state, detect_openclaw_mode, detect_opencode_mode,
-    evaluate_opencode_connection, first_non_empty, is_openclaw_candidate_command,
-    is_opencode_candidate_command, is_opencode_wrapper_command, normalize_path,
-    normalize_probe_host, option_non_empty, parse_cli_flag_value, parse_serve_address,
-    pick_runtime_pid, round2,
+    evaluate_openclaw_connection, evaluate_opencode_connection, first_non_empty,
+    is_openclaw_candidate_command, is_opencode_candidate_command, is_opencode_wrapper_command,
+    normalize_path, normalize_probe_host, option_non_empty, parse_cli_flag_value,
+    parse_serve_address, pick_runtime_pid, round2,
 };
 
 /// Sidecar 入口：初始化日志、启动 health server、进入 relay 会话循环。

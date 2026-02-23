@@ -105,6 +105,7 @@ export function createConnectionFlow({
     disconnectHost: socketOps.disconnectHost,
     sendSocketEvent: sendOps.sendSocketEvent,
     requestToolsRefresh: sendOps.requestToolsRefresh,
+    requestToolDetailsRefresh: sendOps.requestToolDetailsRefresh,
     requestControllerRebind: sendOps.requestControllerRebind,
     sendTestEvent,
     isAnyHostConnected: socketOps.isAnyHostConnected,

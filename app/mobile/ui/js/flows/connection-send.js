@@ -7,7 +7,7 @@ import { asMap } from "../utils/type.js";
 /**
  * 创建连接发送能力。
  * @param {object} deps 依赖集合。
- * @returns {{sendSocketEvent: Function,requestToolsRefresh: Function,requestControllerRebind: Function}}
+ * @returns {object} 发送能力集合（通用发送、工具刷新、详情刷新、控制端重绑）。
  */
 export function createConnectionSendOps({
   state,
@@ -64,6 +64,23 @@ export function createConnectionSendOps({
   }
 
   /**
+   * 请求 sidecar 刷新工具详情。
+   * @param {string} hostId 宿主机标识。
+   * @param {string} toolId 工具标识；为空时刷新全部工具详情。
+   * @param {boolean} force 是否强制刷新。
+   */
+  function requestToolDetailsRefresh(hostId, toolId = "", force = false) {
+    const normalizedToolId = String(toolId || "").trim();
+    const payload = {
+      force: Boolean(force),
+    };
+    if (normalizedToolId) {
+      payload.toolId = normalizedToolId;
+    }
+    sendSocketEvent(hostId, "tool_details_refresh_request", payload);
+  }
+
+  /**
    * 请求重绑控制端。
    * @param {string} hostId 宿主机标识。
    */
@@ -86,6 +103,7 @@ export function createConnectionSendOps({
   return {
     sendSocketEvent,
     requestToolsRefresh,
+    requestToolDetailsRefresh,
     requestControllerRebind,
   };
 }

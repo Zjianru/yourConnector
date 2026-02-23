@@ -38,6 +38,12 @@ make simulate-ios-scan
 7. `/Users/codez/develop/yourConnector/app/mobile/ui/js/views/*`：渲染层
 8. `/Users/codez/develop/yourConnector/app/mobile/ui/js/modals/*`：弹窗层
 
+工具详情链路关键文件：
+
+1. `/Users/codez/develop/yourConnector/app/mobile/ui/js/modals/tool-detail.js`：按 `schema` 渲染 openclaw/opencode 详情
+2. `/Users/codez/develop/yourConnector/app/mobile/ui/js/flows/connection-events.js`：消费 `tool_details_snapshot`
+3. `/Users/codez/develop/yourConnector/app/mobile/ui/js/flows/connection-send.js`：发送 `tool_details_refresh_request`
+
 ## 本地检查
 
 ```bash

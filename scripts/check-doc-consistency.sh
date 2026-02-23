@@ -18,6 +18,7 @@ required_docs=(
   "${ROOT_DIR}/docs/里程碑与待办-v1.md"
   "${ROOT_DIR}/docs/代码治理与注释规范-v1.md"
   "${ROOT_DIR}/docs/质量门禁与检查规范-v1.md"
+  "${ROOT_DIR}/docs/工具接入核心组件-v1.md"
   "${ROOT_DIR}/docs/配对与宿主机接入/00-设计总览与决策-v1.md"
   "${ROOT_DIR}/docs/配对与宿主机接入/01-用户流程与页面交互-v1.md"
   "${ROOT_DIR}/docs/配对与宿主机接入/02-协议与安全方案-v1.md"

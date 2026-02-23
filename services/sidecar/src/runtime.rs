@@ -1,16 +1,13 @@
 //! 运行时探测模块职责：
 //! 1. 从系统进程列表提取统一的进程快照结构。
-//! 2. 组织父子进程关系并交给 discoverers 做工具识别。
+//! 2. 向 Tool Adapter Core 提供统一进程结构（pid/cmd/cwd/cpu/memory）。
 //! 3. 在未发现工具时按配置返回 fallback 占位工具。
 
-use std::collections::HashMap;
-
-use sysinfo::{ProcessesToUpdate, System};
 use yc_shared_protocol::{LatestTokensPayload, ToolRuntimePayload, now_rfc3339_nanos};
 
-use crate::{bytes_to_mb, discoverers};
-
 /// 进程摘要信息，作为工具发现器的统一输入。
+///
+/// 该结构由 Tool Adapter Core 在每轮扫描时构建并传给各工具适配器。
 #[derive(Debug, Clone)]
 pub(crate) struct ProcInfo {
     /// 进程 PID。
@@ -23,50 +20,6 @@ pub(crate) struct ProcInfo {
     pub(crate) cpu_percent: f64,
     /// 内存占用（MB）。
     pub(crate) memory_mb: f64,
-}
-
-/// 扫描系统进程并识别 OpenCode/OpenClaw 工具实例。
-pub(crate) fn discover_tools(sys: &mut System, fallback_tool: bool) -> Vec<ToolRuntimePayload> {
-    sys.refresh_processes(ProcessesToUpdate::All, true);
-
-    // all：pid -> 进程信息；children_by_ppid：父进程 -> 子进程 pid 列表。
-    let mut all: HashMap<i32, ProcInfo> = HashMap::new();
-    let mut children_by_ppid: HashMap<i32, Vec<i32>> = HashMap::new();
-
-    for process in sys.processes().values() {
-        let pid = process.pid().as_u32() as i32;
-        let ppid = process
-            .parent()
-            .map(|parent| parent.as_u32() as i32)
-            .unwrap_or(0);
-        let cmd = process
-            .cmd()
-            .iter()
-            .map(|item| item.to_string_lossy().to_string())
-            .collect::<Vec<String>>()
-            .join(" ");
-        if cmd.is_empty() {
-            continue;
-        }
-        let cwd = process
-            .cwd()
-            .map(|dir| dir.display().to_string())
-            .unwrap_or_default();
-
-        all.insert(
-            pid,
-            ProcInfo {
-                pid,
-                cmd,
-                cwd,
-                cpu_percent: process.cpu_usage() as f64,
-                memory_mb: bytes_to_mb(process.memory()),
-            },
-        );
-        children_by_ppid.entry(ppid).or_default().push(pid);
-    }
-
-    discoverers::discover_tools(&all, &children_by_ppid, fallback_tool)
 }
 
 /// 当开关开启且未发现真实工具时，返回单条 fallback 占位工具。

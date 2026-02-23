@@ -44,3 +44,4 @@ make check-all
 2. `/Users/codez/develop/yourConnector/docs/代码治理与注释规范-v1.md`
 3. `/Users/codez/develop/yourConnector/docs/质量门禁与检查规范-v1.md`
 4. `/Users/codez/develop/yourConnector/docs/已完成功能验收-v1.md`
+5. `/Users/codez/develop/yourConnector/docs/工具接入核心组件-v1.md`

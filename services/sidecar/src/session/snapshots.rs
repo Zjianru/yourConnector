@@ -6,8 +6,8 @@ use serde_json::json;
 use sysinfo::{Disks, ProcessesToUpdate, System};
 use tokio_tungstenite::tungstenite::Message;
 use yc_shared_protocol::{
-    MetricsSnapshotPayload, SidecarMetricsPayload, SystemMetricsPayload, ToolRuntimePayload,
-    ToolsSnapshotPayload, now_rfc3339_nanos,
+    MetricsSnapshotPayload, SidecarMetricsPayload, SystemMetricsPayload, ToolDetailEnvelopePayload,
+    ToolDetailsSnapshotPayload, ToolRuntimePayload, ToolsSnapshotPayload, now_rfc3339_nanos,
 };
 
 use crate::{
@@ -21,6 +21,8 @@ pub(crate) const TOOLS_SNAPSHOT_EVENT: &str = "tools_snapshot";
 pub(crate) const TOOLS_CANDIDATES_EVENT: &str = "tools_candidates";
 /// 系统/sidecar/工具指标快照事件。
 pub(crate) const METRICS_SNAPSHOT_EVENT: &str = "metrics_snapshot";
+/// 工具详情快照事件。
+pub(crate) const TOOL_DETAILS_SNAPSHOT_EVENT: &str = "tool_details_snapshot";
 
 /// 一次性发送 tools_snapshot / tools_candidates / metrics_snapshot 三个事件。
 pub(crate) async fn send_snapshots<W>(
@@ -68,6 +70,29 @@ where
     )
     .await?;
 
+    Ok(())
+}
+
+/// 发送工具详情快照（按 toolId 对齐）。
+pub(crate) async fn send_tool_details_snapshot<W>(
+    ws_writer: &mut W,
+    system_id: &str,
+    seq: &mut u64,
+    details: &[ToolDetailEnvelopePayload],
+) -> Result<()>
+where
+    W: Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    send_event(
+        ws_writer,
+        system_id,
+        seq,
+        TOOL_DETAILS_SNAPSHOT_EVENT,
+        serde_json::to_value(ToolDetailsSnapshotPayload {
+            details: details.to_vec(),
+        })?,
+    )
+    .await?;
     Ok(())
 }
 

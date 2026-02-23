@@ -46,11 +46,15 @@ export function createUiRefs() {
     toolModal: document.getElementById("toolModal"),
     toolModalTitle: document.getElementById("toolModalTitle"),
     toolModalClose: document.getElementById("toolModalClose"),
+    toolSummaryTitle: document.getElementById("toolSummaryTitle"),
+    summaryStatusDots: document.getElementById("summaryStatusDots"),
     summaryRows: document.getElementById("summaryRows"),
+    toolDetailSectionTitle: document.getElementById("toolDetailSectionTitle"),
     detailRows: document.getElementById("detailRows"),
     detailTip: document.getElementById("detailTip"),
     toggleDetailsBtn: document.getElementById("toggleDetailsBtn"),
     usagePanel: document.getElementById("usagePanel"),
+    usagePanelTitle: document.getElementById("usagePanelTitle"),
     usageRows: document.getElementById("usageRows"),
 
     // 添加工具。

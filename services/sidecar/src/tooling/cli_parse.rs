@@ -134,7 +134,9 @@ pub(crate) fn is_opencode_wrapper_command(cmd_lower: &str) -> bool {
 
 /// 判断是否是可接入的 openclaw 命令。
 pub(crate) fn is_openclaw_candidate_command(cmd_lower: &str) -> bool {
-    if !contains_command_word(cmd_lower, "openclaw") {
+    let is_openclaw_cli = contains_command_word(cmd_lower, "openclaw");
+    let is_openclaw_gateway = contains_command_word(cmd_lower, "openclaw-gateway");
+    if !is_openclaw_cli && !is_openclaw_gateway {
         return false;
     }
     if cmd_lower.contains("--help")
@@ -198,6 +200,32 @@ pub(crate) fn evaluate_opencode_connection(
     (true, "RUNNING", String::new())
 }
 
+/// 基于运行模式和模型参数判断 OpenClaw 可接入状态与提示。
+pub(crate) fn evaluate_openclaw_connection(
+    mode: &str,
+    model: &str,
+) -> (bool, &'static str, String) {
+    if mode == "SERVE" {
+        return (
+            false,
+            "UNSUPPORTED_MODE",
+            "当前策略只支持通过 openclaw 命令运行的会话，不支持 openclaw serve。".to_string(),
+        );
+    }
+    if model.trim().is_empty() {
+        return (
+            true,
+            "RUNNING",
+            "已发现 openclaw 进程，等待模型参数同步。".to_string(),
+        );
+    }
+    (
+        true,
+        "RUNNING",
+        format!("已发现 openclaw 进程，模型：{model}"),
+    )
+}
+
 /// 根据命令行特征判断 OpenCode 当前模式。
 pub(crate) fn detect_opencode_mode(cmd: &str) -> &'static str {
     if cmd.contains("opencode serve") || cmd.contains("opencode web") {
@@ -212,4 +240,38 @@ pub(crate) fn detect_openclaw_mode(cmd: &str) -> &'static str {
         return "SERVE";
     }
     "CLI"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{evaluate_openclaw_connection, is_openclaw_candidate_command};
+
+    #[test]
+    fn evaluate_openclaw_connection_rejects_serve_mode() {
+        let (connected, status, reason) = evaluate_openclaw_connection("SERVE", "gpt-5");
+        assert!(!connected);
+        assert_eq!(status, "UNSUPPORTED_MODE");
+        assert!(reason.contains("openclaw serve"));
+    }
+
+    #[test]
+    fn evaluate_openclaw_connection_accepts_cli_mode() {
+        let (connected, status, reason) = evaluate_openclaw_connection("CLI", "gpt-5");
+        assert!(connected);
+        assert_eq!(status, "RUNNING");
+        assert!(reason.contains("模型"));
+    }
+
+    #[test]
+    fn openclaw_candidate_accepts_gateway_process() {
+        assert!(is_openclaw_candidate_command("openclaw-gateway"));
+        assert!(is_openclaw_candidate_command(
+            "/usr/local/bin/openclaw-gateway --port 18000"
+        ));
+    }
+
+    #[test]
+    fn openclaw_candidate_rejects_help_command() {
+        assert!(!is_openclaw_candidate_command("openclaw --help"));
+    }
 }

@@ -21,14 +21,15 @@ use self::{
 use crate::{
     config::Config,
     control::{SidecarCommandEnvelope, parse_sidecar_command},
-    discover_tools,
     pairing::{banner::print_pairing_banner, bootstrap_client::fetch_pair_bootstrap},
     session::{
-        snapshots::{send_snapshots, summarize_wire_payload},
+        snapshots::{send_snapshots, send_tool_details_snapshot, summarize_wire_payload},
         transport::send_event,
     },
     stores::{ControllerDevicesStore, ToolWhitelistStore},
+    tooling::core::{ToolAdapterCore, types::ToolDetailsCollectRequest},
 };
+use yc_shared_protocol::ToolRuntimePayload;
 
 /// 维护 relay 会话生命周期，并在断线后执行指数退避重连。
 pub(crate) async fn run_relay_loop(cfg: Config) -> Result<()> {
@@ -111,12 +112,19 @@ async fn run_session(cfg: &Config) -> Result<()> {
     let mut seq = 0_u64;
     let started_at = Instant::now();
     let mut sys = System::new_all();
+    let mut tool_core = ToolAdapterCore::new(
+        cfg.fallback_tool,
+        cfg.details_interval,
+        cfg.details_command_timeout,
+        cfg.details_max_parallel,
+        cfg.details_refresh_debounce,
+    );
     let mut whitelist = ToolWhitelistStore::load();
     let mut controllers = ControllerDevicesStore::load();
     if let Err(err) = controllers.seed(&cfg.controller_device_ids) {
         warn!("seed controller devices failed: {err}");
     }
-    let mut discovered_tools = discover_tools(&mut sys, cfg.fallback_tool);
+    let mut discovered_tools = tool_core.discover_tools(&mut sys);
 
     send_snapshots(
         &mut ws_writer,
@@ -128,12 +136,22 @@ async fn run_session(cfg: &Config) -> Result<()> {
         &whitelist,
     )
     .await?;
+    refresh_and_send_details(
+        &mut ws_writer,
+        cfg,
+        &mut seq,
+        &mut tool_core,
+        build_details_collect_request(&discovered_tools, &whitelist, None, true),
+    )
+    .await?;
 
     let mut heartbeat_ticker = tokio::time::interval(cfg.heartbeat_interval);
     heartbeat_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     let mut metrics_ticker = tokio::time::interval(cfg.metrics_interval);
     metrics_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut details_ticker = tokio::time::interval(cfg.details_interval);
+    details_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -149,7 +167,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     return Err(anyhow!("command channel closed"));
                 };
 
-                let should_refresh = handle_sidecar_command(
+                let outcome = handle_sidecar_command(
                     &mut ws_writer,
                     cfg,
                     &mut seq,
@@ -159,8 +177,8 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &mut controllers,
                 ).await?;
 
-                if should_refresh {
-                    discovered_tools = discover_tools(&mut sys, cfg.fallback_tool);
+                if outcome.refresh_snapshots {
+                    discovered_tools = tool_core.discover_tools(&mut sys);
                     send_snapshots(
                         &mut ws_writer,
                         cfg,
@@ -169,6 +187,21 @@ async fn run_session(cfg: &Config) -> Result<()> {
                         started_at,
                         &discovered_tools,
                         &whitelist,
+                    )
+                    .await?;
+                }
+                if outcome.refresh_details {
+                    refresh_and_send_details(
+                        &mut ws_writer,
+                        cfg,
+                        &mut seq,
+                        &mut tool_core,
+                        build_details_collect_request(
+                            &discovered_tools,
+                            &whitelist,
+                            outcome.detail_tool_id,
+                            outcome.force_detail_refresh,
+                        ),
                     )
                     .await?;
                 }
@@ -186,7 +219,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
                 ).await?;
             }
             _ = metrics_ticker.tick() => {
-                discovered_tools = discover_tools(&mut sys, cfg.fallback_tool);
+                discovered_tools = tool_core.discover_tools(&mut sys);
                 send_snapshots(
                     &mut ws_writer,
                     cfg,
@@ -198,8 +231,58 @@ async fn run_session(cfg: &Config) -> Result<()> {
                 )
                 .await?;
             }
+            _ = details_ticker.tick() => {
+                refresh_and_send_details(
+                    &mut ws_writer,
+                    cfg,
+                    &mut seq,
+                    &mut tool_core,
+                    build_details_collect_request(&discovered_tools, &whitelist, None, false),
+                )
+                .await?;
+            }
         }
     }
+}
+
+/// 基于当前发现结果和白名单，组装一次详情采集请求。
+fn build_details_collect_request(
+    discovered_tools: &[ToolRuntimePayload],
+    whitelist: &ToolWhitelistStore,
+    target_tool_id: Option<String>,
+    force: bool,
+) -> ToolDetailsCollectRequest {
+    let tools = discovered_tools
+        .iter()
+        .filter(|tool| whitelist.contains(&tool.tool_id))
+        .cloned()
+        .collect::<Vec<ToolRuntimePayload>>();
+
+    ToolDetailsCollectRequest {
+        tools,
+        target_tool_id,
+        force,
+    }
+}
+
+/// 刷新工具详情并发送 `tool_details_snapshot`。
+async fn refresh_and_send_details(
+    ws_writer: &mut command::RelayWriter,
+    cfg: &Config,
+    seq: &mut u64,
+    tool_core: &mut ToolAdapterCore,
+    request: ToolDetailsCollectRequest,
+) -> Result<()> {
+    let connected_tools = request.tools.clone();
+
+    let details = tool_core.collect_details_snapshot(request).await;
+
+    if details.is_empty() && connected_tools.is_empty() {
+        return Ok(());
+    }
+
+    send_tool_details_snapshot(ws_writer, &cfg.system_id, seq, &details).await?;
+    Ok(())
 }
 
 /// session 模块总入口，供 main 调用。

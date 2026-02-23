@@ -4,6 +4,7 @@
 // 3. 提供连接相关计时器清理，避免跨重连遗留脏状态。
 
 import { createRuntime, state } from "./store.js";
+import { asBool } from "../utils/type.js";
 
 /** 创建运行态管理器（按 hostId 维护连接与工具状态）。 */
 export function createRuntimeState({ persistConfig }) {
@@ -163,6 +164,35 @@ export function createRuntimeState({ persistConfig }) {
     return {};
   }
 
+  /**
+   * 读取工具详情缓存（由 `tool_details_snapshot` 下行驱动）。
+   * @param {string} hostId 宿主机标识。
+   * @param {string} toolId 工具标识。
+   * @returns {{schema: string, stale: boolean, collectedAt: string, expiresAt: string, profileKey: string, data: object}}
+   */
+  function detailForTool(hostId, toolId) {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime || !toolId) {
+      return {
+        schema: "",
+        stale: false,
+        collectedAt: "",
+        expiresAt: "",
+        profileKey: "",
+        data: {},
+      };
+    }
+    const detail = runtime.toolDetailsById[toolId] || {};
+    return {
+      schema: String(detail.schema || ""),
+      stale: asBool(runtime.toolDetailStaleById[toolId]),
+      collectedAt: String(runtime.toolDetailUpdatedAtById[toolId] || ""),
+      expiresAt: String(detail.expiresAt || ""),
+      profileKey: String(detail.profileKey || ""),
+      data: detail.data && typeof detail.data === "object" ? detail.data : {},
+    };
+  }
+
   function hostStatusLabel(hostId) {
     const runtime = ensureRuntime(hostId);
     if (!runtime) {
@@ -199,6 +229,7 @@ export function createRuntimeState({ persistConfig }) {
     resolveToolDisplayName,
     sanitizeTools,
     metricForTool,
+    detailForTool,
     hostStatusLabel,
   };
 }

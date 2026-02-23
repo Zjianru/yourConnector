@@ -205,6 +205,9 @@ export function createConnectionSocketOps({
     runtime.connectingToolIds = {};
     runtime.toolConnectRetryCount = {};
     Object.keys(runtime.toolConnectTimers || {}).forEach((toolId) => clearToolConnectTimer(runtime, toolId));
+    runtime.toolDetailsById = {};
+    runtime.toolDetailStaleById = {};
+    runtime.toolDetailUpdatedAtById = {};
 
     const host = hostById(hostId);
     addLog(`disconnected host: ${host ? host.displayName : hostId}`);

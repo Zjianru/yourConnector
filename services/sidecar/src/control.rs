@@ -11,6 +11,8 @@ pub(crate) const TOOL_CONNECT_REQUEST_EVENT: &str = "tool_connect_request";
 pub(crate) const TOOL_DISCONNECT_REQUEST_EVENT: &str = "tool_disconnect_request";
 /// 请求 sidecar 立即刷新工具快照。
 pub(crate) const TOOLS_REFRESH_REQUEST_EVENT: &str = "tools_refresh_request";
+/// 请求 sidecar 立即刷新工具详情（支持指定 toolId）。
+pub(crate) const TOOL_DETAILS_REFRESH_REQUEST_EVENT: &str = "tool_details_refresh_request";
 /// sidecar 返回工具白名单更新结果。
 pub(crate) const TOOL_WHITELIST_UPDATED_EVENT: &str = "tool_whitelist_updated";
 /// 请求把当前（或指定）设备重绑为控制端。
@@ -34,6 +36,11 @@ pub(crate) enum SidecarCommand {
     ConnectTool { tool_id: String },
     /// 将工具移出白名单并回到 Candidates 列表。
     DisconnectTool { tool_id: String },
+    /// 刷新工具详情（可指定单工具）。
+    RefreshToolDetails {
+        tool_id: Option<String>,
+        force: bool,
+    },
     /// 将控制端设备重绑为指定 deviceId。
     RebindController { device_id: String },
 }
@@ -94,6 +101,19 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
             .map(|tool_id| SidecarCommand::DisconnectTool {
                 tool_id: tool_id.to_string(),
             }),
+        TOOL_DETAILS_REFRESH_REQUEST_EVENT => {
+            let tool_id = payload
+                .get("toolId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+            let force = payload
+                .get("force")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(SidecarCommand::RefreshToolDetails { tool_id, force })
+        }
         CONTROLLER_REBIND_REQUEST_EVENT => payload
             .get("deviceId")
             .and_then(Value::as_str)
@@ -125,6 +145,9 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
         SidecarCommand::Refresh => ("refresh", String::new()),
         SidecarCommand::ConnectTool { tool_id } => ("connect", tool_id.clone()),
         SidecarCommand::DisconnectTool { tool_id } => ("disconnect", tool_id.clone()),
+        SidecarCommand::RefreshToolDetails { tool_id, .. } => {
+            ("refresh-details", tool_id.clone().unwrap_or_default())
+        }
         SidecarCommand::RebindController { device_id } => {
             ("rebind-controller", device_id.to_string())
         }
@@ -166,6 +189,25 @@ mod tests {
         match env.command {
             SidecarCommand::RebindController { device_id } => {
                 assert_eq!(device_id, "ios_source");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_details_refresh_command_with_force_and_tool_id() {
+        let raw = r#"{
+            "type":"tool_details_refresh_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{"toolId":"openclaw_xxx","force":true}
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::RefreshToolDetails { tool_id, force } => {
+                assert_eq!(tool_id.unwrap_or_default(), "openclaw_xxx");
+                assert!(force);
             }
             _ => panic!("unexpected command"),
         }

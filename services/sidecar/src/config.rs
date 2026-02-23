@@ -13,6 +13,11 @@ use std::{
 use url::Url;
 use uuid::Uuid;
 
+use crate::tooling::core::scheduler::{
+    DEFAULT_DETAILS_COMMAND_TIMEOUT_MS, DEFAULT_DETAILS_DEBOUNCE_SEC, DEFAULT_DETAILS_INTERVAL_SEC,
+    DEFAULT_DETAILS_MAX_PARALLEL,
+};
+
 /// Sidecar 运行时配置。
 #[derive(Debug, Clone)]
 pub(crate) struct Config {
@@ -36,6 +41,14 @@ pub(crate) struct Config {
     pub(crate) heartbeat_interval: Duration,
     /// 指标快照推送周期。
     pub(crate) metrics_interval: Duration,
+    /// 工具详情补采周期。
+    pub(crate) details_interval: Duration,
+    /// 工具详情按需刷新去抖窗口。
+    pub(crate) details_refresh_debounce: Duration,
+    /// 工具详情 CLI 命令执行超时。
+    pub(crate) details_command_timeout: Duration,
+    /// 工具详情采集并发上限。
+    pub(crate) details_max_parallel: usize,
     /// 是否启用 fallback 工具占位。
     pub(crate) fallback_tool: bool,
 }
@@ -68,6 +81,22 @@ impl Config {
             health_addr: env_or_default("SIDECAR_ADDR", "0.0.0.0:18081"),
             heartbeat_interval: duration_from_env("HEARTBEAT_INTERVAL_SEC", 5),
             metrics_interval: duration_from_env("METRICS_INTERVAL_SEC", 10),
+            details_interval: duration_from_env(
+                "DETAILS_INTERVAL_SEC",
+                DEFAULT_DETAILS_INTERVAL_SEC,
+            ),
+            details_refresh_debounce: duration_from_env(
+                "DETAILS_REFRESH_DEBOUNCE_SEC",
+                DEFAULT_DETAILS_DEBOUNCE_SEC,
+            ),
+            details_command_timeout: duration_from_env_millis(
+                "DETAILS_COMMAND_TIMEOUT_MS",
+                DEFAULT_DETAILS_COMMAND_TIMEOUT_MS,
+            ),
+            details_max_parallel: usize_from_env(
+                "DETAILS_MAX_PARALLEL",
+                DEFAULT_DETAILS_MAX_PARALLEL,
+            ),
             fallback_tool: bool_from_env("FALLBACK_TOOL_ENABLED", false),
         }
     }
@@ -197,6 +226,25 @@ fn duration_from_env(key: &str, fallback_sec: u64) -> Duration {
         .filter(|v| *v > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(fallback_sec))
+}
+
+/// 读取毫秒级时长配置，非法值回退到默认毫秒数。
+fn duration_from_env_millis(key: &str, fallback_ms: u64) -> Duration {
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .map(Duration::from_millis)
+        .unwrap_or_else(|| Duration::from_millis(fallback_ms))
+}
+
+/// 读取 usize 配置，非法值回退到默认值。
+fn usize_from_env(key: &str, fallback: usize) -> usize {
+    std::env::var(key)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
 }
 
 /// 解析布尔环境变量，支持常见 true/false 文本。

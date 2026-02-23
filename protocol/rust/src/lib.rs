@@ -240,3 +240,43 @@ pub struct MetricsSnapshotPayload {
     // 所有工具指标。
     pub tools: Vec<ToolRuntimePayload>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDetailEnvelopePayload {
+    // 目标工具 ID。
+    pub tool_id: String,
+    // 数据结构版本（如 openclaw.v1 / opencode.v1）。
+    pub schema: String,
+    // 是否为过期缓存（true 表示本次采集失败或超时）。
+    pub stale: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 本次数据采集时间。
+    pub collected_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 本次数据过期时间。
+    pub expires_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 配置来源分组键（如 openclaw profile）。
+    pub profile_key: Option<String>,
+    // 结构化详情数据（按 schema 解释）。
+    pub data: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDetailsSnapshotPayload {
+    // 当前详情快照列表。
+    pub details: Vec<ToolDetailEnvelopePayload>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDetailsRefreshRequestPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 指定刷新目标工具；空表示刷新当前宿主机全部工具详情。
+    pub tool_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 是否忽略去抖与缓存直接强制刷新。
+    pub force: Option<bool>,
+}

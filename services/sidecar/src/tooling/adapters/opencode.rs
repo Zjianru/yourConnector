@@ -1,17 +1,18 @@
-//! OpenCode 发现器职责：
-//! 1. 从系统进程中定位 opencode wrapper/runtime 进程。
-//! 2. 解析运行模式、端口、工作区与会话状态。
-//! 3. 生成前端可直接展示的 `ToolRuntimePayload`。
+//! OpenCode 适配器职责：
+//! 1. 基于进程与本地会话文件发现 OpenCode 工具实例。
+//! 2. 输出 opencode.v1 详情数据，统一接入 Tool Adapter Core。
 
+use chrono::{Duration as ChronoDuration, Utc};
+use serde_json::json;
 use yc_shared_protocol::{ToolRuntimePayload, now_rfc3339_nanos};
 
-use super::ToolDiscoveryContext;
+use crate::tooling::{
+    adapters::OPENCODE_SCHEMA_V1,
+    core::types::{ToolDetailCollectOptions, ToolDetailCollectResult, ToolDiscoveryContext},
+};
 
 /// 发现所有 OpenCode 工具实例。
-pub(super) fn discover_opencode_tools(
-    context: &ToolDiscoveryContext<'_>,
-) -> Vec<ToolRuntimePayload> {
-    // 先找 wrapper 进程（`/bin/opencode`），作为 runtime 归属起点。
+pub(crate) fn discover(context: &ToolDiscoveryContext<'_>) -> Vec<ToolRuntimePayload> {
     let mut wrapper_pids = context
         .all
         .values()
@@ -20,7 +21,6 @@ pub(super) fn discover_opencode_tools(
         .map(|info| info.pid)
         .collect::<Vec<i32>>();
 
-    // 兼容某些环境下 wrapper 识别不到的场景，回退到 runtime 命令特征。
     if wrapper_pids.is_empty() {
         wrapper_pids.extend(
             context
@@ -43,7 +43,7 @@ pub(super) fn discover_opencode_tools(
         let Some(info) = context.all.get(&wrapper_pid) else {
             continue;
         };
-        // 命令模式与 serve 地址来自 wrapper 命令行。
+
         let mode = crate::detect_opencode_mode(&info.cmd.to_lowercase());
         let (host, configured_port) = crate::parse_serve_address(&info.cmd);
         let mut candidate_pids = vec![wrapper_pid];
@@ -57,7 +57,6 @@ pub(super) fn discover_opencode_tools(
             .get(&runtime_pid)
             .map(|proc_info| proc_info.cwd.clone())
             .unwrap_or_default();
-        // 会话状态从 opencode 本地存储解析，支持缓存。
         let state = crate::collect_opencode_session_state(&process_cwd);
 
         let endpoint = if configured_port > 0 {
@@ -76,7 +75,6 @@ pub(super) fn discover_opencode_tools(
             .get(&runtime_pid)
             .map(|proc_info| (proc_info.cpu_percent, proc_info.memory_mb))
             .unwrap_or((0.0, 0.0));
-        // workspace 优先取会话目录，缺失时回退进程 cwd。
         let workspace = crate::first_non_empty(&state.workspace_dir, &process_cwd);
         let tool_id = crate::build_opencode_tool_id(&workspace, wrapper_pid);
 
@@ -109,4 +107,70 @@ pub(super) fn discover_opencode_tools(
     }
 
     tools
+}
+
+/// 判断指定工具是否归属于 OpenCode 适配器。
+pub(crate) fn matches_tool(tool: &ToolRuntimePayload) -> bool {
+    let tool_id = tool.tool_id.to_lowercase();
+    let name = tool.name.to_lowercase();
+    let vendor = tool.vendor.to_lowercase();
+    tool_id.starts_with("opencode_") || name.contains("opencode") || vendor.contains("opencode")
+}
+
+/// 采集 OpenCode 详情数据（opencode.v1）。
+pub(crate) fn collect_details(
+    tools: &[ToolRuntimePayload],
+    options: &ToolDetailCollectOptions,
+) -> Vec<ToolDetailCollectResult> {
+    let mut results = Vec::with_capacity(tools.len());
+
+    for tool in tools {
+        let workspace = tool.workspace_dir.clone().unwrap_or_default();
+        let session_state = crate::collect_opencode_session_state(&workspace);
+        let data = json!({
+            "workspaceDir": workspace,
+            "sessionId": session_state.session_id,
+            "sessionTitle": session_state.session_title,
+            "sessionUpdatedAt": session_state.session_updated_at,
+            "agentMode": session_state.agent_mode,
+            "providerId": session_state.provider_id,
+            "modelId": session_state.model_id,
+            "model": session_state.model,
+            "latestTokens": session_state.latest_tokens,
+            "modelUsage": session_state.model_usage,
+        });
+
+        results.push(ToolDetailCollectResult::success(
+            tool.tool_id.clone(),
+            OPENCODE_SCHEMA_V1,
+            None,
+            inject_expire_fields(data, options),
+        ));
+    }
+
+    results
+}
+
+/// 注入 `collectedAt` 与 `expiresAt` 到详情数据体，便于前端直接展示。
+fn inject_expire_fields(
+    data: serde_json::Value,
+    options: &ToolDetailCollectOptions,
+) -> serde_json::Value {
+    let now = Utc::now();
+    let ttl_secs = options.detail_ttl.as_secs().min(i64::MAX as u64) as i64;
+    let expires = now + ChronoDuration::seconds(ttl_secs);
+
+    if let Some(mut obj) = data.as_object().cloned() {
+        obj.insert(
+            "collectedAt".to_string(),
+            serde_json::Value::String(now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+        obj.insert(
+            "expiresAt".to_string(),
+            serde_json::Value::String(expires.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+        return serde_json::Value::Object(obj);
+    }
+
+    data
 }
