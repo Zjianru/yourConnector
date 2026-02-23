@@ -747,17 +747,17 @@ issue_cert() {
   out_file="$(mktemp)"
   set +e
   if (( force_reissue == 1 )); then
-    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
+    lego "${server_args[@]}" --accept-tos --disable-cn --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
     rc=$?
   elif [[ -f "$cert_crt" && -f "$cert_key" ]]; then
-    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" renew --profile shortlived --days 3 >"$out_file" 2>&1
+    lego "${server_args[@]}" --accept-tos --disable-cn --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" renew --profile shortlived --days 3 >"$out_file" 2>&1
     rc=$?
     if (( rc != 0 )); then
-      lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
+      lego "${server_args[@]}" --accept-tos --disable-cn --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
       rc=$?
     fi
   else
-    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
+    lego "${server_args[@]}" --accept-tos --disable-cn --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
     rc=$?
   fi
   set -e
