@@ -30,7 +30,7 @@ RELAYSIDE_LOG_DIR="/var/log/yourconnector"
 RELAY_LOG_FILE="${RELAYSIDE_LOG_DIR}/relay.log"
 SIDECAR_LOG_FILE="${RELAYSIDE_LOG_DIR}/sidecar.log"
 
-LEGO_VERSION_DEFAULT="v4.18.0"
+LEGO_VERSION_DEFAULT="v4.32.0"
 
 COMMAND=""
 VERSION=""
@@ -747,17 +747,17 @@ issue_cert() {
   out_file="$(mktemp)"
   set +e
   if (( force_reissue == 1 )); then
-    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --profile shortlived --http --http.webroot "$WEBROOT_DIR" run >"$out_file" 2>&1
+    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
     rc=$?
   elif [[ -f "$cert_crt" && -f "$cert_key" ]]; then
-    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --profile shortlived --http --http.webroot "$WEBROOT_DIR" renew --days 3 >"$out_file" 2>&1
+    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" renew --profile shortlived --days 3 >"$out_file" 2>&1
     rc=$?
     if (( rc != 0 )); then
-      lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --profile shortlived --http --http.webroot "$WEBROOT_DIR" run >"$out_file" 2>&1
+      lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
       rc=$?
     fi
   else
-    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --profile shortlived --http --http.webroot "$WEBROOT_DIR" run >"$out_file" 2>&1
+    lego "${server_args[@]}" --accept-tos --email "$ACME_EMAIL" --domains "$ip" --http --http.webroot "$WEBROOT_DIR" run --profile shortlived >"$out_file" 2>&1
     rc=$?
   fi
   set -e
