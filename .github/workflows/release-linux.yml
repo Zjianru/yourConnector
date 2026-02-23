@@ -27,20 +27,25 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
       - name: Build release binaries (amd64)
         run: |
-          cargo build --release -p yc-relay
-          cargo build --release -p yc-sidecar
+          cargo build --release --target x86_64-unknown-linux-musl -p yc-relay
+          cargo build --release --target x86_64-unknown-linux-musl -p yc-sidecar
 
       - name: Package tarballs
         run: |
           mkdir -p dist
-          cp target/release/yc-relay dist/yc-relay
-          cp target/release/yc-sidecar dist/yc-sidecar
+          cp target/x86_64-unknown-linux-musl/release/yc-relay dist/yc-relay
+          cp target/x86_64-unknown-linux-musl/release/yc-sidecar dist/yc-sidecar
           cp scripts/dist/relay-sidecar.sh dist/relay-sidecar.sh
           cp scripts/dist/sidecar.sh dist/sidecar.sh
           chmod +x dist/relay-sidecar.sh dist/sidecar.sh
