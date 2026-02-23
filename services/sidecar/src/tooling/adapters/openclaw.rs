@@ -219,7 +219,8 @@ async fn collect_profile_details(
     )
     .await
     .ok();
-    let models_status_timeout = effective_timeout(options.command_timeout, MODELS_STATUS_TIMEOUT_CAP_MS);
+    let models_status_timeout =
+        effective_timeout(options.command_timeout, MODELS_STATUS_TIMEOUT_CAP_MS);
     let models_status_json = run_openclaw_json(
         profile_key,
         &["models", "status", "--json"],
@@ -1292,7 +1293,8 @@ fn build_configured_model_rows(models: &[ModelPricing]) -> Vec<Value> {
     rows.sort_by(|a, b| {
         let ap = read_string(a, "provider");
         let bp = read_string(b, "provider");
-        ap.cmp(&bp).then_with(|| read_string(a, "model").cmp(&read_string(b, "model")))
+        ap.cmp(&bp)
+            .then_with(|| read_string(a, "model").cmp(&read_string(b, "model")))
     });
     rows
 }
@@ -1444,8 +1446,14 @@ fn build_usage_model_row(
         "cacheWrite": total.map(|row| read_i64(row, "cacheWrite")).unwrap_or(0),
         "latestUpdatedAt": total.map(|row| read_i64(row, "latestUpdatedAt")).unwrap_or(0),
         "totalCost": cost.map(|row| read_f64(row, "totalCost")).unwrap_or(0.0),
-        "currency": cost.map(|row| read_string(row, "currency")).filter(|v| !v.is_empty()).unwrap_or_else(|| "config-rate".to_string()),
-        "rateSource": cost.map(|row| read_string(row, "rateSource")).filter(|v| !v.is_empty()).unwrap_or_else(|| "openclaw.json".to_string()),
+        "currency": cost
+            .map(|row| read_string(row, "currency"))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "config-rate".to_string()),
+        "rateSource": cost
+            .map(|row| read_string(row, "rateSource"))
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "openclaw.json".to_string()),
         "windowPreset": "1h",
         "windowFromMs": window_from_ms,
         "windowToMs": window_to_ms,
@@ -1496,8 +1504,14 @@ fn build_usage_api_provider_cards(
     let mut cards = Vec::new();
     for (provider, mut models) in grouped {
         models.sort_by_key(|row| Reverse(read_i64(row, "tokenTotal")));
-        let provider_token_total = models.iter().map(|row| read_i64(row, "tokenTotal")).sum::<i64>();
-        let provider_cost_total = models.iter().map(|row| read_f64(row, "totalCost")).sum::<f64>();
+        let provider_token_total = models
+            .iter()
+            .map(|row| read_i64(row, "tokenTotal"))
+            .sum::<i64>();
+        let provider_cost_total = models
+            .iter()
+            .map(|row| read_f64(row, "totalCost"))
+            .sum::<f64>();
         let stat_at = models
             .iter()
             .map(|row| read_i64(row, "latestUpdatedAt"))
@@ -2527,8 +2541,8 @@ mod tests {
 
     use super::{
         attach_agent_context_metrics, build_model_lookup, build_sessions_payload,
-        parse_channel_identities, parse_profile_key_from_cmd, parse_status_default_agent_id,
-        parse_auth_user_by_provider, parse_status_recent_sessions, parse_usage_windows,
+        parse_auth_user_by_provider, parse_channel_identities, parse_profile_key_from_cmd,
+        parse_status_default_agent_id, parse_status_recent_sessions, parse_usage_windows,
         resolve_profile_state_dir, select_agents_by_workspace, select_sessions_by_agents,
         to_percent,
     };

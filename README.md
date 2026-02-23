@@ -26,6 +26,27 @@ make show-pairing-link
 make simulate-ios-scan
 ```
 
+## Linux 分发脚本（v3.3）
+
+```bash
+# 网关+执行机（一体节点）
+sudo bash /path/to/relay-sidecar.sh install \
+  --version vX.Y.Z \
+  --acme-email you@example.com
+
+# 执行机（连接远端 Relay）
+sudo bash /path/to/sidecar.sh install \
+  --version vX.Y.Z \
+  --relay wss://<公网IPv4>/v1/ws
+```
+
+说明：
+
+1. 公网默认仅支持 `wss://.../v1/ws`，`ws://` 仅用于开发调试开关。
+2. 一体节点脚本强制使用 Let’s Encrypt shortlived IP 证书（HTTP-01 + webroot）。
+3. 详细参数、卸载与 `doctor/status` 见 `/Users/codez/develop/yourConnector/docs/分发安装与卸载-v1.md`。
+4. GitHub Actions 已支持“打 tag 自动构建发布资产（amd64）”，工作流见 `/Users/codez/develop/yourConnector/.github/workflows/release-linux.yml`。
+
 ## 质量门禁
 
 ```bash
@@ -60,6 +81,7 @@ make check-all
 1. `/Users/codez/develop/yourConnector/docs/文档导航-v2.md`
 2. `/Users/codez/develop/yourConnector/docs/代码治理与注释规范-v1.md`
 3. `/Users/codez/develop/yourConnector/docs/质量门禁与检查规范-v1.md`
-4. `/Users/codez/develop/yourConnector/docs/系统日志与归档-v1.md`
-5. `/Users/codez/develop/yourConnector/docs/已完成功能验收-v1.md`
-6. `/Users/codez/develop/yourConnector/docs/工具接入核心组件-v1.md`
+4. `/Users/codez/develop/yourConnector/docs/分发安装与卸载-v1.md`
+5. `/Users/codez/develop/yourConnector/docs/系统日志与归档-v1.md`
+6. `/Users/codez/develop/yourConnector/docs/已完成功能验收-v1.md`
+7. `/Users/codez/develop/yourConnector/docs/工具接入核心组件-v1.md`

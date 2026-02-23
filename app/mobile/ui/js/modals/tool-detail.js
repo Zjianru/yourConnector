@@ -734,9 +734,14 @@ export function createToolDetailModal({
           const used = Number(row.used);
           const limit = Number(row.limit);
           const remaining = Number(row.remaining);
-          const hasAmount = Number.isFinite(used) || Number.isFinite(limit) || Number.isFinite(remaining);
+          const hasAmount =
+            Number.isFinite(used) ||
+            Number.isFinite(limit) ||
+            Number.isFinite(remaining);
           const amountText = hasAmount
-            ? `已用 ${Number.isFinite(used) ? fmt2(used) : "--"} / ${Number.isFinite(limit) ? fmt2(limit) : "--"}，剩余 ${Number.isFinite(remaining) ? fmt2(remaining) : "--"}`
+            ? `已用 ${Number.isFinite(used) ? fmt2(used) : "--"} / ${
+                Number.isFinite(limit) ? fmt2(limit) : "--"
+              }，剩余 ${Number.isFinite(remaining) ? fmt2(remaining) : "--"}`
             : "";
           return `
             <div class="openclaw-list-item">
@@ -899,7 +904,11 @@ export function createToolDetailModal({
           </div>
           <div class="openclaw-list-item">
             <div class="name">模型覆盖</div>
-            <div class="value">${escapeHtml(`配置 ${fmtInt(coverage.configuredModelCount)} · 活跃(1h) ${fmtInt(coverage.activeModelCount1h)}`)}</div>
+            <div class="value">${escapeHtml(
+              `配置 ${fmtInt(coverage.configuredModelCount)} · 活跃(1h) ${fmtInt(
+                coverage.activeModelCount1h
+              )}`
+            )}</div>
           </div>
           <div class="openclaw-list-item">
             <div class="name">说明</div>

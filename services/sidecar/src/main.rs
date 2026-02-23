@@ -7,6 +7,7 @@ use anyhow::Result;
 use axum::{Router, routing::get};
 use tracing::{error, info};
 
+mod cli;
 mod config;
 mod control;
 mod logging;
@@ -31,9 +32,15 @@ pub(crate) use tooling::{
 /// Sidecar 入口：初始化日志、启动 health server、进入 relay 会话循环。
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args = std::env::args().skip(1).collect::<Vec<String>>();
+    match cli::dispatch(&args).await? {
+        cli::CliDispatch::Run => {}
+        cli::CliDispatch::Exit => return Ok(()),
+    }
+
     let _log_runtime = logging::init("sidecar")?;
 
-    let cfg = Config::from_env();
+    let cfg = Config::from_env()?;
     info!(
         "sidecar identity ready system_id={} device_id={} host_name={} pairing_code={}",
         cfg.system_id,
