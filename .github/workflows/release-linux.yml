@@ -41,11 +41,19 @@ jobs:
           mkdir -p dist
           cp target/release/yc-relay dist/yc-relay
           cp target/release/yc-sidecar dist/yc-sidecar
+          cp scripts/dist/relay-sidecar.sh dist/relay-sidecar.sh
+          cp scripts/dist/sidecar.sh dist/sidecar.sh
+          chmod +x dist/relay-sidecar.sh dist/sidecar.sh
           tar -C dist -czf dist/yc-relay-linux-amd64.tar.gz yc-relay
           tar -C dist -czf dist/yc-sidecar-linux-amd64.tar.gz yc-sidecar
           (
             cd dist
-            sha256sum yc-relay-linux-amd64.tar.gz yc-sidecar-linux-amd64.tar.gz > checksums.txt
+            sha256sum \
+              relay-sidecar.sh \
+              sidecar.sh \
+              yc-relay-linux-amd64.tar.gz \
+              yc-sidecar-linux-amd64.tar.gz \
+              > checksums.txt
           )
 
       - name: Resolve release tag
@@ -87,6 +95,8 @@ jobs:
           tag_name: ${{ steps.tag.outputs.value }}
           body_path: dist/release-notes.md
           files: |
+            dist/relay-sidecar.sh
+            dist/sidecar.sh
             dist/yc-relay-linux-amd64.tar.gz
             dist/yc-sidecar-linux-amd64.tar.gz
             dist/checksums.txt

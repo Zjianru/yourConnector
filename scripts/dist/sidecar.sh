@@ -27,6 +27,7 @@ PURGE=0
 FORMAT="text"
 ALLOW_INSECURE_WS=0
 EFFECTIVE_RELAY_URL=""
+ASSET_BASE_URL="${YC_ASSET_BASE_URL:-}"
 
 usage() {
   cat <<'USAGE'
@@ -44,6 +45,7 @@ Commands:
 
 Options:
   --version <tag>         Required for install. Example: v0.1.0
+  --asset-base <url>      Optional release base URL, example: https://<domain>/releases
   --relay <wss-url>       Required for install unless already set
   --allow-insecure-ws     Allow ws:// relay (debug only)
   --dry-run               Print actions only
@@ -101,6 +103,10 @@ parse_args() {
         RELAY_URL="${2:-}"
         shift 2
         ;;
+      --asset-base)
+        ASSET_BASE_URL="${2:-}"
+        shift 2
+        ;;
       --allow-insecure-ws)
         ALLOW_INSECURE_WS=1
         shift
@@ -135,6 +141,12 @@ parse_args() {
     text|json) ;;
     *) fail "--format must be text or json" ;;
   esac
+}
+
+normalize_asset_base_url() {
+  if [[ -n "${ASSET_BASE_URL}" ]]; then
+    ASSET_BASE_URL="${ASSET_BASE_URL%/}"
+  fi
 }
 
 confirm() {
@@ -194,6 +206,14 @@ ensure_directories() {
 
 release_url() {
   local file="$1"
+  if [[ -n "${ASSET_BASE_URL}" ]]; then
+    if [[ "${ASSET_BASE_URL}" == *"{tag}"* ]]; then
+      echo "${ASSET_BASE_URL//\{tag\}/${VERSION}}/${file}"
+      return 0
+    fi
+    echo "${ASSET_BASE_URL}/${VERSION}/${file}"
+    return 0
+  fi
   echo "https://github.com/${REPO}/releases/download/${VERSION}/${file}"
 }
 
@@ -359,6 +379,7 @@ JSON
 
 install_cmd() {
   [[ -n "$VERSION" ]] || fail "--version <tag> is required for install"
+  normalize_asset_base_url
   require_root
   ensure_packages
   ensure_service_user

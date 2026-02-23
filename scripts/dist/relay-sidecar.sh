@@ -41,6 +41,7 @@ DRY_RUN=0
 YES=0
 PURGE=0
 FORMAT="text"
+ASSET_BASE_URL="${YC_ASSET_BASE_URL:-}"
 
 usage() {
   cat <<'USAGE'
@@ -58,6 +59,7 @@ Commands:
 
 Options:
   --version <tag>         Required for install. Example: v0.1.0
+  --asset-base <url>      Optional release base URL, example: https://<domain>/releases
   --acme-email <email>    Required for install (or env YC_ACME_EMAIL)
   --public-ip <ipv4>      Optional public IPv4 override
   --acme-staging          Use Let's Encrypt staging endpoint
@@ -132,6 +134,10 @@ parse_args() {
         ACME_EMAIL="${2:-}"
         shift 2
         ;;
+      --asset-base)
+        ASSET_BASE_URL="${2:-}"
+        shift 2
+        ;;
       --public-ip)
         PUBLIC_IP="${2:-}"
         shift 2
@@ -170,6 +176,12 @@ parse_args() {
     text|json) ;;
     *) fail "--format must be text or json" ;;
   esac
+}
+
+normalize_asset_base_url() {
+  if [[ -n "${ASSET_BASE_URL}" ]]; then
+    ASSET_BASE_URL="${ASSET_BASE_URL%/}"
+  fi
 }
 
 port_listener_count() {
@@ -343,6 +355,14 @@ ensure_directories() {
 
 release_url() {
   local file="$1"
+  if [[ -n "${ASSET_BASE_URL}" ]]; then
+    if [[ "${ASSET_BASE_URL}" == *"{tag}"* ]]; then
+      echo "${ASSET_BASE_URL//\{tag\}/${VERSION}}/${file}"
+      return 0
+    fi
+    echo "${ASSET_BASE_URL}/${VERSION}/${file}"
+    return 0
+  fi
   echo "https://github.com/${REPO}/releases/download/${VERSION}/${file}"
 }
 
@@ -963,6 +983,7 @@ render_pairing() {
 install_cmd() {
   [[ -n "$VERSION" ]] || fail "--version <tag> is required for install"
   validate_email "$ACME_EMAIL" || fail "--acme-email <email> is required and must be valid" 2
+  normalize_asset_base_url
 
   require_root
   ensure_packages

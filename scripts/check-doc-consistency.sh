@@ -20,6 +20,7 @@ required_docs=(
   "docs/质量门禁与检查规范-v1.md"
   "docs/系统日志与归档-v1.md"
   "docs/分发安装与卸载-v1.md"
+  "docs/跨宿主联调测试-v1.md"
   "docs/工具接入核心组件-v1.md"
   "docs/配对与宿主机接入/00-设计总览与决策-v1.md"
   "docs/配对与宿主机接入/01-用户流程与页面交互-v1.md"

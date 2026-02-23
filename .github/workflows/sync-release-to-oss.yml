@@ -50,6 +50,8 @@ jobs:
           gh release download "${{ steps.tag.outputs.value }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --dir dist \
+            --pattern "relay-sidecar.sh" \
+            --pattern "sidecar.sh" \
             --pattern "yc-relay-linux-amd64.tar.gz" \
             --pattern "yc-sidecar-linux-amd64.tar.gz" \
             --pattern "checksums.txt"
@@ -76,6 +78,8 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.value }}"
           OSS_BASE="oss://${OSS_BUCKET}/${OSS_PREFIX}/${TAG}"
+          ./ossutil64 cp dist/relay-sidecar.sh "${OSS_BASE}/relay-sidecar.sh" -f
+          ./ossutil64 cp dist/sidecar.sh "${OSS_BASE}/sidecar.sh" -f
           ./ossutil64 cp dist/yc-relay-linux-amd64.tar.gz "${OSS_BASE}/yc-relay-linux-amd64.tar.gz" -f
           ./ossutil64 cp dist/yc-sidecar-linux-amd64.tar.gz "${OSS_BASE}/yc-sidecar-linux-amd64.tar.gz" -f
           ./ossutil64 cp dist/checksums.txt "${OSS_BASE}/checksums.txt" -f
@@ -88,6 +92,8 @@ jobs:
             "tag": "${TAG}",
             "ossBaseUrl": "https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}",
             "files": [
+              "relay-sidecar.sh",
+              "sidecar.sh",
               "yc-relay-linux-amd64.tar.gz",
               "yc-sidecar-linux-amd64.tar.gz",
               "checksums.txt"
@@ -102,6 +108,8 @@ jobs:
           BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
           cat > dist/oss-download-urls.txt <<TXT
           yourConnector ${TAG} 国内下载地址
+          relay-sidecar script: ${BASE}/relay-sidecar.sh
+          sidecar script:       ${BASE}/sidecar.sh
           relay:   ${BASE}/yc-relay-linux-amd64.tar.gz
           sidecar: ${BASE}/yc-sidecar-linux-amd64.tar.gz
           sum:     ${BASE}/checksums.txt
@@ -123,6 +131,8 @@ jobs:
           {
             echo "## OSS 下载地址"
             echo ""
+            echo "- relay-sidecar 脚本: \`${BASE}/relay-sidecar.sh\`"
+            echo "- sidecar 脚本: \`${BASE}/sidecar.sh\`"
             echo "- relay: \`${BASE}/yc-relay-linux-amd64.tar.gz\`"
             echo "- sidecar: \`${BASE}/yc-sidecar-linux-amd64.tar.gz\`"
             echo "- checksums: \`${BASE}/checksums.txt\`"
