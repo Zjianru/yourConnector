@@ -11,7 +11,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   sync:
@@ -96,10 +96,37 @@ jobs:
           JSON
           ./ossutil64 cp dist/latest.json "oss://${OSS_BUCKET}/${OSS_PREFIX}/latest.json" -f
 
-      - name: Print domestic download URLs
+      - name: Generate OSS download URL file
         run: |
           TAG="${{ steps.tag.outputs.value }}"
           BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
-          echo "relay:   ${BASE}/yc-relay-linux-amd64.tar.gz"
-          echo "sidecar: ${BASE}/yc-sidecar-linux-amd64.tar.gz"
-          echo "sum:     ${BASE}/checksums.txt"
+          cat > dist/oss-download-urls.txt <<TXT
+          yourConnector ${TAG} 国内下载地址
+          relay:   ${BASE}/yc-relay-linux-amd64.tar.gz
+          sidecar: ${BASE}/yc-sidecar-linux-amd64.tar.gz
+          sum:     ${BASE}/checksums.txt
+          latest:  https://${OSS_DOMAIN}/${OSS_PREFIX}/latest.json
+          TXT
+
+      - name: Upload URL file to GitHub Release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.value }}" dist/oss-download-urls.txt \
+            --repo "${GITHUB_REPOSITORY}" \
+            --clobber
+
+      - name: Publish URLs to workflow summary
+        run: |
+          TAG="${{ steps.tag.outputs.value }}"
+          BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
+          {
+            echo "## OSS 下载地址"
+            echo ""
+            echo "- relay: \`${BASE}/yc-relay-linux-amd64.tar.gz\`"
+            echo "- sidecar: \`${BASE}/yc-sidecar-linux-amd64.tar.gz\`"
+            echo "- checksums: \`${BASE}/checksums.txt\`"
+            echo "- latest 元数据: \`https://${OSS_DOMAIN}/${OSS_PREFIX}/latest.json\`"
+            echo ""
+            echo "Release 资产中也已附带：\`oss-download-urls.txt\`。"
+          } >> "$GITHUB_STEP_SUMMARY"
