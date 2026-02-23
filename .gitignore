@@ -4,3 +4,4 @@
 app/mobile/src-tauri/gen
 .tmp
 logs
+.env

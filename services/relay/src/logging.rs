@@ -35,6 +35,8 @@ const ARCHIVE_LOCK_DIR_NAME: &str = ".archive-lock";
 const DEFAULT_ARCHIVE_INTERVAL_SEC: u64 = 3600;
 /// 文件日志级别环境变量（独立于 `RUST_LOG`）。
 const FILE_LOG_LEVEL_ENV: &str = "YC_FILE_LOG_LEVEL";
+/// stdout 默认日志过滤（人类可读摘要）。
+const DEFAULT_STDOUT_FILTER: &str = "info";
 
 /// 日志运行时守卫，防止 non-blocking writer 提前析构。
 pub(crate) struct LogRuntime {
@@ -58,14 +60,14 @@ pub(crate) fn init(service_name: &str) -> Result<LogRuntime> {
     let file_appender = tracing_appender::rolling::daily(&raw_dir, format!("{service_name}.log"));
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
     let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
-    let stdout_filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let stdout_filter = resolve_stdout_env_filter();
     let file_filter = resolve_file_level_filter();
 
     let stdout_layer = tracing_subscriber::fmt::layer()
         .with_writer(stdout_writer)
         .with_ansi(true)
-        .with_target(true)
+        .with_target(false)
+        .compact()
         .with_filter(stdout_filter);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_writer)
@@ -86,12 +88,17 @@ pub(crate) fn init(service_name: &str) -> Result<LogRuntime> {
     })
 }
 
-/// 解析文件日志级别；默认至少保留 `info` 级别，确保系统日志可回放。
+/// 解析 stdout 日志过滤规则：优先 `RUST_LOG`，回退默认摘要级别。
+fn resolve_stdout_env_filter() -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_STDOUT_FILTER))
+}
+
+/// 解析文件日志级别；默认保留 `debug` 级别，确保日志文件可完整回放。
 fn resolve_file_level_filter() -> LevelFilter {
     std::env::var(FILE_LOG_LEVEL_ENV)
         .ok()
         .and_then(|raw| raw.trim().parse::<LevelFilter>().ok())
-        .unwrap_or(LevelFilter::INFO)
+        .unwrap_or(LevelFilter::DEBUG)
 }
 
 /// 启动后台归档任务，定期将历史日志打包为 `.7z`。

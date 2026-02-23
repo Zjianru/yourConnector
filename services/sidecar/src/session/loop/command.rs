@@ -5,7 +5,7 @@ use futures_util::stream::SplitSink;
 use serde_json::json;
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
-use tracing::info;
+use tracing::{debug, info};
 use yc_shared_protocol::ToolRuntimePayload;
 
 use crate::{
@@ -71,7 +71,7 @@ pub(crate) async fn handle_sidecar_command(
     } else {
         Some(command_envelope.trace_id.clone())
     };
-    info!(
+    debug!(
         "handle command type={} event_id={} trace_id={} source_type={} source_device={}",
         command_envelope.event_type,
         command_envelope.event_id,

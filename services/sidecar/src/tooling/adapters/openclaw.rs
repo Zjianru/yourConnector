@@ -2,13 +2,13 @@
 //! 1. 从进程命令行发现 openclaw/openclaw-gateway 实例并构建实例级 toolId。
 //! 2. 采集 OpenClaw 运行态数据并组装 `openclaw.v1` 结构化详情。
 //! 3. 在采集失败时仅标记 stale，不清空最近一次成功数据。
-//! 4. 仅读取非敏感本地配置白名单字段（上下文/模型窗口/费率/余额快照）。
+//! 4. 仅读取非敏感本地配置白名单字段（上下文/模型窗口/费率）。
 
 use std::{
     cmp::Reverse,
     collections::HashMap,
     env, fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -35,8 +35,12 @@ const GATEWAY_TIMEOUT_CAP_MS: u64 = 8_000;
 const MEMORY_TIMEOUT_CAP_MS: u64 = 6_000;
 /// `security audit --json` 的超时上限（毫秒）。
 const SECURITY_TIMEOUT_CAP_MS: u64 = 6_000;
+/// `models status --json` 的超时上限（毫秒）。
+const MODELS_STATUS_TIMEOUT_CAP_MS: u64 = 6_000;
 /// `agents/sessions` 的超时上限（毫秒）。
 const AGENTS_SESSIONS_TIMEOUT_CAP_MS: u64 = 2_500;
+/// Usage 页默认统计窗口（秒）。
+const USAGE_WINDOW_SEC_1H: i64 = 3600;
 /// 会话“长时间未更新”阈值（秒）。
 const INACTIVE_SESSION_SEC: i64 = 6 * 3600;
 /// 会话“24 小时活跃”阈值（秒）。
@@ -196,7 +200,6 @@ async fn collect_profile_details(
     };
 
     let profile_config = load_profile_config_whitelist(profile_key);
-    let profile_balances = load_profile_balances(profile_key);
     let model_lookup = build_model_lookup(&profile_config.models);
 
     let agents_timeout = effective_timeout(options.command_timeout, AGENTS_SESSIONS_TIMEOUT_CAP_MS);
@@ -216,15 +219,30 @@ async fn collect_profile_details(
     )
     .await
     .ok();
+    let models_status_timeout = effective_timeout(options.command_timeout, MODELS_STATUS_TIMEOUT_CAP_MS);
+    let models_status_json = run_openclaw_json(
+        profile_key,
+        &["models", "status", "--json"],
+        models_status_timeout,
+    )
+    .await
+    .ok();
 
-    let mut sessions_all = parse_status_recent_sessions(&status_json);
-    if sessions_all.is_empty()
-        && let Ok(sessions_json) =
-            run_openclaw_json(profile_key, &["sessions", "--json"], agents_timeout).await
-    {
-        sessions_all = parse_sessions_rows_from_command(&sessions_json);
-    }
+    let sessions_json = run_openclaw_json(profile_key, &["sessions", "--json"], agents_timeout)
+        .await
+        .ok();
+    let mut sessions_all = sessions_json
+        .as_ref()
+        .map(parse_sessions_rows_from_command)
+        .filter(|rows| !rows.is_empty())
+        .unwrap_or_else(|| parse_status_recent_sessions(&status_json));
     sessions_all.sort_by_key(|row| Reverse(read_i64(row, "updatedAt")));
+    sessions_all = dedupe_sessions_by_identity(&sessions_all);
+
+    let usage_window_to_ms = now_epoch_sec().saturating_mul(1000);
+    let usage_window_from_ms = usage_window_to_ms.saturating_sub(USAGE_WINDOW_SEC_1H * 1000);
+    let sessions_in_usage_window =
+        filter_sessions_by_updated_window(&sessions_all, usage_window_from_ms, usage_window_to_ms);
 
     let default_agent_id = parse_status_default_agent_id(&status_json);
     let heartbeat_by_agent = parse_heartbeat_agents(&status_json);
@@ -240,10 +258,31 @@ async fn collect_profile_details(
         sessions_default_context,
     );
 
-    let usage_provider_windows = parse_usage_windows(&status_json);
-    let usage_model_totals = aggregate_model_totals(&sessions_all, &model_lookup);
+    let auth_user_by_provider = parse_auth_user_by_provider(models_status_json.as_ref());
+    let usage_provider_windows = parse_usage_windows(&status_json, &auth_user_by_provider);
+    let usage_model_totals = aggregate_model_totals(&sessions_in_usage_window, &model_lookup);
     let usage_estimated_cost = estimate_model_cost(&usage_model_totals, &model_lookup);
-    let usage_coverage = build_usage_coverage(&usage_provider_windows, &usage_estimated_cost);
+    let usage_configured_models = build_configured_model_rows(&profile_config.models);
+    let usage_merged_models = merge_usage_model_rows(
+        &usage_configured_models,
+        &usage_model_totals,
+        &usage_estimated_cost,
+        usage_window_from_ms,
+        usage_window_to_ms,
+    );
+    let (usage_models_with_cost, usage_models_without_cost) =
+        split_usage_model_rows_by_activity(&usage_merged_models);
+    let usage_api_provider_cards = build_usage_api_provider_cards(
+        &usage_models_with_cost,
+        &usage_provider_windows,
+        usage_window_from_ms,
+        usage_window_to_ms,
+    );
+    let usage_coverage = build_usage_coverage(
+        &usage_provider_windows,
+        &usage_models_with_cost,
+        &usage_models_without_cost,
+    );
     let usage_headline = build_usage_headline(
         &usage_provider_windows,
         &usage_model_totals,
@@ -322,10 +361,17 @@ async fn collect_profile_details(
             );
 
             let usage_payload = json!({
+                "windowPreset": "1h",
+                "windowFromMs": usage_window_from_ms,
+                "windowToMs": usage_window_to_ms,
+                "authWindows": usage_provider_windows,
+                "apiProviderCards": usage_api_provider_cards,
+                "modelsWithCost": usage_models_with_cost,
+                "modelsWithoutCost": usage_models_without_cost,
+                "configuredModels": usage_configured_models,
                 "providerWindows": usage_provider_windows,
                 "modelTotals": usage_model_totals,
                 "estimatedCost": usage_estimated_cost,
-                "balances": profile_balances,
                 "coverage": usage_coverage,
             });
 
@@ -540,54 +586,6 @@ fn load_profile_config_whitelist(profile_key: &str) -> LocalProfileConfig {
     }
 }
 
-/// 读取 custom/state 的余额快照（可选文件，不存在时返回空）。
-fn load_profile_balances(profile_key: &str) -> Vec<Value> {
-    let state_dir = resolve_profile_state_dir(profile_key);
-    let custom_state = state_dir.join("custom").join("state");
-    if !custom_state.exists() {
-        return Vec::new();
-    }
-
-    let mut balances = Vec::new();
-
-    let cost_balances = custom_state.join("cost-monitor-balances.json");
-    if let Some(value) = read_json_file(&cost_balances)
-        && let Some(entries) = value.as_object()
-    {
-        for (provider, row) in entries {
-            balances.push(json!({
-                "provider": provider,
-                "currency": read_string(row, "currency"),
-                "value": read_f64(row, "value"),
-                "updatedAt": read_string(row, "ts"),
-                "source": "cost-monitor-balances",
-            }));
-        }
-    }
-
-    let nexus_usage = custom_state.join("nexus-usage.json");
-    if let Some(value) = read_json_file(&nexus_usage) {
-        let total_cost_usd = read_f64(&value, "total_cost_usd");
-        if total_cost_usd > 0.0 {
-            balances.push(json!({
-                "provider": "nexus",
-                "currency": "USD",
-                "value": total_cost_usd,
-                "updatedAt": read_string(&value, "updated"),
-                "source": "nexus-usage",
-            }));
-        }
-    }
-
-    balances
-}
-
-/// 读取 JSON 文件，不存在或解析失败时返回 None。
-fn read_json_file(path: &Path) -> Option<Value> {
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str::<Value>(&text).ok()
-}
-
 /// 建立模型查找索引（id/name -> pricing）。
 fn build_model_lookup(models: &[ModelPricing]) -> HashMap<String, ModelPricing> {
     let mut lookup = HashMap::new();
@@ -771,14 +769,81 @@ fn parse_agent_id_from_session_key(key: &str) -> String {
     parts.next().unwrap_or_default().trim().to_string()
 }
 
+/// 解析 provider -> auth 用户名映射（来自 `openclaw models status --json`）。
+fn parse_auth_user_by_provider(models_status_json: Option<&Value>) -> HashMap<String, String> {
+    let Some(raw) = models_status_json else {
+        return HashMap::new();
+    };
+
+    let mut rows = HashMap::new();
+    let providers = read_array_path(raw, &["auth", "oauth", "providers"]);
+    for provider_row in providers {
+        let provider = normalize_lookup_key(&read_string(&provider_row, "provider"));
+        if provider.is_empty() {
+            continue;
+        }
+        let profiles = provider_row
+            .get("profiles")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut username = String::new();
+        for profile in profiles {
+            let profile_id = read_string(&profile, "profileId");
+            let label = read_string(&profile, "label");
+            username = parse_auth_user_name(&profile_id, &label);
+            if !username.is_empty() {
+                break;
+            }
+        }
+        if !username.is_empty() {
+            rows.insert(provider, username);
+        }
+    }
+
+    rows
+}
+
+/// 从 profileId/label 中提取 auth 用户名（优先具体用户名，回退 profile 后缀）。
+fn parse_auth_user_name(profile_id: &str, label: &str) -> String {
+    let normalized_id = profile_id.trim();
+    let normalized_label = label.trim();
+
+    if let Some(open_idx) = normalized_label.rfind('(')
+        && let Some(close_idx) = normalized_label.rfind(')')
+        && close_idx > open_idx + 1
+    {
+        let value = normalized_label[(open_idx + 1)..close_idx].trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+
+    if let Some((_, suffix)) = normalized_id.split_once(':') {
+        let value = suffix.trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+
+    String::new()
+}
+
 /// 解析 usage 窗口（provider + window 维度）。
-fn parse_usage_windows(status_json: &Value) -> Vec<Value> {
+fn parse_usage_windows(
+    status_json: &Value,
+    auth_user_by_provider: &HashMap<String, String>,
+) -> Vec<Value> {
     let providers = read_array_path(status_json, &["usage", "providers"]);
     let mut windows = Vec::new();
 
     for provider in providers {
         let provider_id = read_string(&provider, "provider");
         let provider_name = read_string_or(&provider, "displayName", "provider");
+        let auth_user = auth_user_by_provider
+            .get(&normalize_lookup_key(&provider_id))
+            .cloned()
+            .unwrap_or_default();
         let list = provider
             .get("windows")
             .and_then(Value::as_array)
@@ -789,8 +854,10 @@ fn parse_usage_windows(status_json: &Value) -> Vec<Value> {
             windows.push(json!({
                 "provider": provider_id,
                 "displayName": provider_name,
+                "authUser": auth_user,
                 "label": read_string(&window, "label"),
                 "usedPercent": read_i64(&window, "usedPercent"),
+                "usedPercentMeaning": "used",
                 "used": read_f64_or_null(&window, "used"),
                 "limit": read_f64_or_null(&window, "limit"),
                 "remaining": read_f64_or_null(&window, "remaining"),
@@ -1085,6 +1152,58 @@ fn parse_channel_overview(channels_status_json: Option<&Value>) -> Vec<Value> {
     rows
 }
 
+/// 以 sessionId（回退 key）去重会话，避免 run 镜像记录重复计费。
+fn dedupe_sessions_by_identity(sessions: &[Value]) -> Vec<Value> {
+    let mut bucket: HashMap<String, Value> = HashMap::new();
+    for row in sessions {
+        let session_id = read_string(row, "sessionId");
+        let key = if session_id.is_empty() {
+            read_string(row, "key")
+        } else {
+            session_id
+        };
+        if key.is_empty() {
+            continue;
+        }
+
+        if let Some(existing) = bucket.get(&key) {
+            let current_key = read_string(row, "key");
+            let existing_key = read_string(existing, "key");
+            let current_is_run = current_key.contains(":run:");
+            let existing_is_run = existing_key.contains(":run:");
+            let current_updated_at = read_i64(row, "updatedAt");
+            let existing_updated_at = read_i64(existing, "updatedAt");
+            let should_replace = (!current_is_run && existing_is_run)
+                || (current_is_run == existing_is_run && current_updated_at > existing_updated_at);
+            if should_replace {
+                bucket.insert(key, row.clone());
+            }
+            continue;
+        }
+        bucket.insert(key, row.clone());
+    }
+
+    let mut rows = bucket.into_values().collect::<Vec<Value>>();
+    rows.sort_by_key(|row| Reverse(read_i64(row, "updatedAt")));
+    rows
+}
+
+/// 过滤指定更新时间窗口内的 sessions（毫秒时间戳）。
+fn filter_sessions_by_updated_window(
+    sessions: &[Value],
+    window_from_ms: i64,
+    window_to_ms: i64,
+) -> Vec<Value> {
+    sessions
+        .iter()
+        .filter(|row| {
+            let updated_at = read_i64(row, "updatedAt");
+            updated_at >= window_from_ms && updated_at <= window_to_ms
+        })
+        .cloned()
+        .collect::<Vec<Value>>()
+}
+
 /// 聚合模型用量（本地会话聚合）。
 fn aggregate_model_totals(
     sessions: &[Value],
@@ -1100,6 +1219,7 @@ fn aggregate_model_totals(
         token_total: i64,
         cache_read: i64,
         cache_write: i64,
+        latest_updated_at: i64,
     }
 
     let mut bucket: HashMap<String, ModelTotal> = HashMap::new();
@@ -1109,7 +1229,7 @@ fn aggregate_model_totals(
             continue;
         }
         let provider = infer_session_provider(row, &model, model_lookup);
-        let key = format!("{}::{}", provider, model);
+        let key = usage_model_key(&provider, &model);
         let entry = bucket.entry(key).or_insert_with(|| ModelTotal {
             provider: provider.clone(),
             model: model.clone(),
@@ -1121,6 +1241,7 @@ fn aggregate_model_totals(
         entry.token_total += read_i64(row, "totalTokens");
         entry.cache_read += read_i64(row, "cacheRead");
         entry.cache_write += read_i64(row, "cacheWrite");
+        entry.latest_updated_at = entry.latest_updated_at.max(read_i64(row, "updatedAt"));
     }
 
     let mut rows = bucket
@@ -1135,11 +1256,44 @@ fn aggregate_model_totals(
                 "tokenTotal": row.token_total,
                 "cacheRead": row.cache_read,
                 "cacheWrite": row.cache_write,
+                "latestUpdatedAt": row.latest_updated_at,
             })
         })
         .collect::<Vec<Value>>();
 
     rows.sort_by_key(|row| Reverse(read_i64(row, "tokenTotal")));
+    rows
+}
+
+/// 读取配置中的全量模型列表（provider + model）。
+fn build_configured_model_rows(models: &[ModelPricing]) -> Vec<Value> {
+    let mut rows = Vec::new();
+    let mut seen: HashMap<String, bool> = HashMap::new();
+    for model in models {
+        let provider = model.provider.trim().to_ascii_lowercase();
+        let display_model = if model.model_name.trim().is_empty() {
+            model.model_id.trim().to_string()
+        } else {
+            model.model_name.trim().to_string()
+        };
+        if provider.is_empty() || display_model.is_empty() {
+            continue;
+        }
+        let key = usage_model_key(&provider, &display_model);
+        if seen.contains_key(&key) {
+            continue;
+        }
+        seen.insert(key, true);
+        rows.push(json!({
+            "provider": provider,
+            "model": display_model,
+        }));
+    }
+    rows.sort_by(|a, b| {
+        let ap = read_string(a, "provider");
+        let bp = read_string(b, "provider");
+        ap.cmp(&bp).then_with(|| read_string(a, "model").cmp(&read_string(b, "model")))
+    });
     rows
 }
 
@@ -1190,25 +1344,213 @@ fn estimate_model_cost(
     rows
 }
 
+/// 合并配置模型与 1h 聚合数据，确保“全模型展示”。
+fn merge_usage_model_rows(
+    configured_models: &[Value],
+    model_totals: &[Value],
+    estimated_cost: &[Value],
+    window_from_ms: i64,
+    window_to_ms: i64,
+) -> Vec<Value> {
+    let mut totals_by_key: HashMap<String, Value> = HashMap::new();
+    for row in model_totals {
+        let provider = read_string(row, "provider");
+        let model = read_string(row, "model");
+        let key = usage_model_key(&provider, &model);
+        if !key.is_empty() {
+            totals_by_key.insert(key, row.clone());
+        }
+    }
+
+    let mut costs_by_key: HashMap<String, Value> = HashMap::new();
+    for row in estimated_cost {
+        let provider = read_string(row, "provider");
+        let model = read_string(row, "model");
+        let key = usage_model_key(&provider, &model);
+        if !key.is_empty() {
+            costs_by_key.insert(key, row.clone());
+        }
+    }
+
+    let mut rows = Vec::new();
+    let mut merged_keys: HashMap<String, bool> = HashMap::new();
+    for configured in configured_models {
+        let provider = read_string(configured, "provider");
+        let model = read_string(configured, "model");
+        let key = usage_model_key(&provider, &model);
+        if key.is_empty() {
+            continue;
+        }
+        merged_keys.insert(key.clone(), true);
+        rows.push(build_usage_model_row(
+            &provider,
+            &model,
+            totals_by_key.get(&key),
+            costs_by_key.get(&key),
+            true,
+            window_from_ms,
+            window_to_ms,
+        ));
+    }
+
+    for (key, total) in totals_by_key {
+        if merged_keys.contains_key(&key) {
+            continue;
+        }
+        let provider = read_string(&total, "provider");
+        let model = read_string(&total, "model");
+        rows.push(build_usage_model_row(
+            &provider,
+            &model,
+            Some(&total),
+            costs_by_key.get(&key),
+            false,
+            window_from_ms,
+            window_to_ms,
+        ));
+    }
+
+    rows.sort_by(|a, b| {
+        let a_active = usage_model_activity_tokens(a);
+        let b_active = usage_model_activity_tokens(b);
+        b_active
+            .cmp(&a_active)
+            .then_with(|| read_i64(b, "tokenTotal").cmp(&read_i64(a, "tokenTotal")))
+            .then_with(|| read_string(a, "provider").cmp(&read_string(b, "provider")))
+            .then_with(|| read_string(a, "model").cmp(&read_string(b, "model")))
+    });
+    rows
+}
+
+/// 构建单模型 usage 行。
+fn build_usage_model_row(
+    provider: &str,
+    model: &str,
+    total: Option<&Value>,
+    cost: Option<&Value>,
+    configured: bool,
+    window_from_ms: i64,
+    window_to_ms: i64,
+) -> Value {
+    json!({
+        "provider": provider,
+        "model": model,
+        "configured": configured,
+        "messages": total.map(|row| read_i64(row, "messages")).unwrap_or(0),
+        "tokenInput": total.map(|row| read_i64(row, "tokenInput")).unwrap_or(0),
+        "tokenOutput": total.map(|row| read_i64(row, "tokenOutput")).unwrap_or(0),
+        "tokenTotal": total.map(|row| read_i64(row, "tokenTotal")).unwrap_or(0),
+        "cacheRead": total.map(|row| read_i64(row, "cacheRead")).unwrap_or(0),
+        "cacheWrite": total.map(|row| read_i64(row, "cacheWrite")).unwrap_or(0),
+        "latestUpdatedAt": total.map(|row| read_i64(row, "latestUpdatedAt")).unwrap_or(0),
+        "totalCost": cost.map(|row| read_f64(row, "totalCost")).unwrap_or(0.0),
+        "currency": cost.map(|row| read_string(row, "currency")).filter(|v| !v.is_empty()).unwrap_or_else(|| "config-rate".to_string()),
+        "rateSource": cost.map(|row| read_string(row, "rateSource")).filter(|v| !v.is_empty()).unwrap_or_else(|| "openclaw.json".to_string()),
+        "windowPreset": "1h",
+        "windowFromMs": window_from_ms,
+        "windowToMs": window_to_ms,
+    })
+}
+
+/// 将模型按“1h 内是否有 token 活动”拆分。
+fn split_usage_model_rows_by_activity(model_rows: &[Value]) -> (Vec<Value>, Vec<Value>) {
+    let mut with_cost = Vec::new();
+    let mut without_cost = Vec::new();
+    for row in model_rows {
+        if usage_model_activity_tokens(row) > 0 {
+            with_cost.push(row.clone());
+        } else {
+            without_cost.push(row.clone());
+        }
+    }
+    (with_cost, without_cost)
+}
+
+/// 构建 API 来源的 provider 聚合卡片（auth provider 不进入该分组）。
+fn build_usage_api_provider_cards(
+    models_with_cost: &[Value],
+    provider_windows: &[Value],
+    window_from_ms: i64,
+    window_to_ms: i64,
+) -> Vec<Value> {
+    let mut auth_provider_map: HashMap<String, bool> = HashMap::new();
+    for window in provider_windows {
+        let provider = normalize_lookup_key(&read_string(window, "provider"));
+        if !provider.is_empty() {
+            auth_provider_map.insert(provider, true);
+        }
+    }
+
+    let mut grouped: HashMap<String, Vec<Value>> = HashMap::new();
+    for model in models_with_cost {
+        let provider = normalize_lookup_key(&read_string(model, "provider"));
+        if provider.is_empty() {
+            continue;
+        }
+        if auth_provider_map.contains_key(&provider) {
+            continue;
+        }
+        grouped.entry(provider).or_default().push(model.clone());
+    }
+
+    let mut cards = Vec::new();
+    for (provider, mut models) in grouped {
+        models.sort_by_key(|row| Reverse(read_i64(row, "tokenTotal")));
+        let provider_token_total = models.iter().map(|row| read_i64(row, "tokenTotal")).sum::<i64>();
+        let provider_cost_total = models.iter().map(|row| read_f64(row, "totalCost")).sum::<f64>();
+        let stat_at = models
+            .iter()
+            .map(|row| read_i64(row, "latestUpdatedAt"))
+            .max()
+            .unwrap_or(0);
+        cards.push(json!({
+            "provider": provider,
+            "models": models,
+            "providerTokenTotal": provider_token_total,
+            "providerCostTotal": round4(provider_cost_total),
+            "providerBalance": Value::Null,
+            "balanceStatus": "unavailable",
+            "balanceNote": "未获取到",
+            "windowPreset": "1h",
+            "windowFromMs": window_from_ms,
+            "windowToMs": window_to_ms,
+            "statAt": stat_at,
+        }));
+    }
+    cards.sort_by_key(|row| read_string(row, "provider"));
+    cards
+}
+
 /// 构建 usage 覆盖率说明。
-fn build_usage_coverage(provider_windows: &[Value], estimated_cost: &[Value]) -> Value {
-    let window_providers = provider_windows
+fn build_usage_coverage(
+    provider_windows: &[Value],
+    models_with_cost: &[Value],
+    models_without_cost: &[Value],
+) -> Value {
+    let mut window_providers = provider_windows
         .iter()
         .map(|row| read_string_or(row, "displayName", "provider"))
         .filter(|v| !v.is_empty())
         .collect::<Vec<String>>();
-    let estimated_models = estimated_cost
+    window_providers.sort();
+    window_providers.dedup();
+
+    let mut estimated_models = models_with_cost
         .iter()
         .map(|row| read_string(row, "model"))
         .filter(|v| !v.is_empty())
         .collect::<Vec<String>>();
+    estimated_models.sort();
+    estimated_models.dedup();
 
     json!({
         "hasWindowData": !provider_windows.is_empty(),
-        "hasEstimateData": !estimated_cost.is_empty(),
+        "hasEstimateData": !models_with_cost.is_empty(),
         "windowProviders": window_providers,
         "estimatedModels": estimated_models,
-        "note": "账号窗口为真实配额视图；模型成本为基于本地会话与配置费率的估算值。",
+        "configuredModelCount": models_with_cost.len() + models_without_cost.len(),
+        "activeModelCount1h": models_with_cost.len(),
+        "note": "Usage 仅依赖 OpenClaw 官方 CLI 与 openclaw.json，不读取 custom/state 自定义统计文件。",
     })
 }
 
@@ -1261,6 +1603,28 @@ fn build_usage_headline(
         "provider": Value::Null,
         "model": Value::Null,
     })
+}
+
+/// 构造 provider+model 的稳定键。
+fn usage_model_key(provider: &str, model: &str) -> String {
+    let p = normalize_lookup_key(provider);
+    let m = normalize_lookup_key(model);
+    if p.is_empty() || m.is_empty() {
+        return String::new();
+    }
+    format!("{p}::{m}")
+}
+
+/// 计算模型行的 token 活动总量（用于“是否已产生费用”判定）。
+fn usage_model_activity_tokens(row: &Value) -> i64 {
+    let token_total = read_i64(row, "tokenTotal");
+    if token_total > 0 {
+        return token_total;
+    }
+    read_i64(row, "tokenInput")
+        + read_i64(row, "tokenOutput")
+        + read_i64(row, "cacheRead")
+        + read_i64(row, "cacheWrite")
 }
 
 /// 根据 session/model 映射推断 provider。
@@ -2157,13 +2521,16 @@ fn set_if_non_empty(obj: &mut Map<String, Value>, key: &str, value: String) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
 
     use super::{
         attach_agent_context_metrics, build_model_lookup, build_sessions_payload,
         parse_channel_identities, parse_profile_key_from_cmd, parse_status_default_agent_id,
-        parse_status_recent_sessions, parse_usage_windows, resolve_profile_state_dir,
-        select_agents_by_workspace, select_sessions_by_agents, to_percent,
+        parse_auth_user_by_provider, parse_status_recent_sessions, parse_usage_windows,
+        resolve_profile_state_dir, select_agents_by_workspace, select_sessions_by_agents,
+        to_percent,
     };
 
     #[test]
@@ -2208,7 +2575,29 @@ mod tests {
         });
         assert_eq!(parse_status_default_agent_id(&status), "main");
         assert_eq!(parse_status_recent_sessions(&status).len(), 1);
-        assert_eq!(parse_usage_windows(&status).len(), 1);
+        assert_eq!(parse_usage_windows(&status, &HashMap::new()).len(), 1);
+    }
+
+    #[test]
+    fn parse_auth_user_prefers_label_parentheses() {
+        let models_status = json!({
+            "auth": {
+                "oauth": {
+                    "providers": [{
+                        "provider": "google-gemini-cli",
+                        "profiles": [{
+                            "profileId": "google-gemini-cli:default",
+                            "label": "google-gemini-cli:default (demo@example.com)"
+                        }]
+                    }]
+                }
+            }
+        });
+        let rows = parse_auth_user_by_provider(Some(&models_status));
+        assert_eq!(
+            rows.get("google-gemini-cli").cloned().unwrap_or_default(),
+            "demo@example.com"
+        );
     }
 
     #[test]

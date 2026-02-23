@@ -98,6 +98,7 @@ export const state = {
   detailExpanded: false,
   detailOpenClawPageIndex: 0,
   detailOpenClawSessionsSection: "diagnostics",
+  detailOpenClawUsageWindowPreset: "1h",
   detailOpenClawAgentOpenIds: {},
   detailOpenClawSecurityExpanded: false,
   addToolHostId: "",

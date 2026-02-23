@@ -12,7 +12,7 @@ use sysinfo::System;
 use tokio::sync::mpsc;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use self::{
     command::handle_sidecar_command,
@@ -91,7 +91,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
             match next {
                 Ok(Message::Text(text)) => {
                     if let Some(command) = parse_sidecar_command(&text) {
-                        info!(
+                        debug!(
                             "incoming command type={} event_id={} trace_id={} source_type={} source_device={}",
                             command.event_type,
                             command.event_id,
@@ -103,9 +103,9 @@ async fn run_session(cfg: &Config) -> Result<()> {
                             break;
                         }
                     } else if log_raw_payload {
-                        info!("incoming raw: {text}");
+                        debug!("incoming raw: {text}");
                     } else {
-                        info!("incoming event: {}", summarize_wire_payload(&text));
+                        debug!("incoming event: {}", summarize_wire_payload(&text));
                     }
                 }
                 Ok(_) => {}

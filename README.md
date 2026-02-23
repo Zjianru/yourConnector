@@ -50,9 +50,10 @@ make check-all
 4. 常用环境变量：
    - `YC_LOG_DIR`：日志根目录（默认 `logs`）
    - `YC_LOG_ARCHIVE_INTERVAL_SEC`：归档轮询周期（默认 `3600` 秒）
-   - `YC_FILE_LOG_LEVEL`：文件日志级别（默认 `info`）
+   - `YC_FILE_LOG_LEVEL`：文件日志级别（默认 `debug`）
    - `RUST_LOG`：仅影响 stdout 级别，不影响文件日志
-5. 详细说明见：`/Users/codez/develop/yourConnector/docs/系统日志与归档-v1.md`
+5. 配对信息（配对码、配对链接、模拟扫码命令）会以高亮 banner 直接输出到终端，便于现场配对。
+6. 详细说明见：`/Users/codez/develop/yourConnector/docs/系统日志与归档-v1.md`
 
 ## 文档入口
 

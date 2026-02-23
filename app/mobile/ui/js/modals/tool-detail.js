@@ -38,6 +38,7 @@ export function createToolDetailModal({
     state.detailExpanded = false;
     state.detailOpenClawPageIndex = 0;
     state.detailOpenClawSessionsSection = "diagnostics";
+    state.detailOpenClawUsageWindowPreset = "1h";
     state.detailOpenClawAgentOpenIds = {};
     state.detailOpenClawSecurityExpanded = false;
     if (typeof requestToolDetailsRefresh === "function") {
@@ -53,6 +54,7 @@ export function createToolDetailModal({
     state.detailExpanded = false;
     state.detailOpenClawPageIndex = 0;
     state.detailOpenClawSessionsSection = "diagnostics";
+    state.detailOpenClawUsageWindowPreset = "1h";
     state.detailOpenClawAgentOpenIds = {};
     state.detailOpenClawSecurityExpanded = false;
     renderToolModal();
@@ -266,7 +268,7 @@ export function createToolDetailModal({
     const label = String(usageHeadline.label || "--").trim() || "--";
     const percent = Number(usageHeadline.percent);
     if (Number.isFinite(percent)) {
-      return `${label} · ${Math.trunc(percent)}%`;
+      return `${label} · 已使用 ${Math.trunc(percent)}%`;
     }
     return label;
   }
@@ -323,6 +325,18 @@ export function createToolDetailModal({
       return value;
     }
     return "diagnostics";
+  }
+
+  /**
+   * 计算 OpenClaw Usage 窗口激活值。
+   * @returns {"1h"|"24h"|"7d"|"all"}
+   */
+  function openClawActiveUsageWindow() {
+    const value = String(state.detailOpenClawUsageWindowPreset || "1h").trim().toLowerCase();
+    if (value === "24h" || value === "7d" || value === "all") {
+      return value;
+    }
+    return "1h";
   }
 
   /**
@@ -693,15 +707,23 @@ export function createToolDetailModal({
     }
     /** @type {Record<string, Array<Record<string, any>>>} */
     const groups = {};
+    /** @type {Record<string, string>} */
+    const providerUsers = {};
     for (const row of providerWindows) {
       const provider = String(row.displayName || row.provider || "Unknown");
       if (!groups[provider]) {
         groups[provider] = [];
       }
       groups[provider].push(row);
+      const authUser = String(row.authUser || "").trim();
+      if (authUser && !providerUsers[provider]) {
+        providerUsers[provider] = authUser;
+      }
     }
 
     return Object.keys(groups).sort().map((provider) => {
+      const authUser = String(providerUsers[provider] || "").trim();
+      const providerTitle = authUser ? `${provider}（账号 ${authUser}）` : provider;
       const rows = groups[provider]
         .sort((a, b) => Number(b.usedPercent || 0) - Number(a.usedPercent || 0))
         .map((row) => {
@@ -709,17 +731,25 @@ export function createToolDetailModal({
           const percentText = Number.isFinite(Number(row.usedPercent))
             ? `${Math.trunc(Number(row.usedPercent))}%`
             : "--";
+          const used = Number(row.used);
+          const limit = Number(row.limit);
+          const remaining = Number(row.remaining);
+          const hasAmount = Number.isFinite(used) || Number.isFinite(limit) || Number.isFinite(remaining);
+          const amountText = hasAmount
+            ? `已用 ${Number.isFinite(used) ? fmt2(used) : "--"} / ${Number.isFinite(limit) ? fmt2(limit) : "--"}，剩余 ${Number.isFinite(remaining) ? fmt2(remaining) : "--"}`
+            : "";
           return `
             <div class="openclaw-list-item">
               <div class="name">${escapeHtml(String(row.label || "--"))}</div>
-              <div class="value">${escapeHtml(`${percentText} · 重置 ${resetText}`)}</div>
+              <div class="value">${escapeHtml(`已使用 ${percentText} · 重置 ${resetText}`)}</div>
+              ${amountText ? `<div class="value">${escapeHtml(amountText)}</div>` : ""}
             </div>
           `;
         })
         .join("");
       return `
         <div class="openclaw-section-block tone-usage-provider">
-          <div class="openclaw-subtitle">${escapeHtml(provider)}</div>
+          <div class="openclaw-subtitle">${escapeHtml(providerTitle)}</div>
           <div class="openclaw-list">${rows}</div>
         </div>
       `;
@@ -733,52 +763,79 @@ export function createToolDetailModal({
    */
   function renderOpenClawUsagePage(detailData) {
     const usage = asMap(detailData.usage);
-    const providerWindows = asListOfMap(usage.providerWindows);
-    const modelTotals = asListOfMap(usage.modelTotals);
-    const estimatedCost = asListOfMap(usage.estimatedCost);
-    const balances = asListOfMap(usage.balances);
+    const providerWindows = asListOfMap(usage.authWindows).length > 0
+      ? asListOfMap(usage.authWindows)
+      : asListOfMap(usage.providerWindows);
+    const modelsWithCost = asListOfMap(usage.modelsWithCost);
+    const modelsWithoutCost = asListOfMap(usage.modelsWithoutCost);
+    const apiProviderCards = asListOfMap(usage.apiProviderCards);
     const coverage = asMap(usage.coverage);
+    const activeWindow = openClawActiveUsageWindow();
+    const onlyOneHourData = String(usage.windowPreset || "1h").trim().toLowerCase() === "1h";
 
-    const modelTotalsHtml = modelTotals.length > 0
-      ? modelTotals.slice(0, 16).map((row) => {
-      const usageText = [
-        `总 ${fmtTokenM(row.tokenTotal)}`,
-        `输入 ${fmtTokenM(row.tokenInput)}`,
-        `输出 ${fmtTokenM(row.tokenOutput)}`,
-        `消息 ${fmtInt(row.messages)}`,
-      ].join(" · ");
-      return `
-        <div class="openclaw-list-item">
-          <div class="name">${escapeHtml(`${String(row.provider || "--")} · ${String(row.model || "--")}`)}</div>
-          <div class="value">
-            ${escapeHtml(usageText)}
+    const renderModelRows = (rows, emptyText) => {
+      if (!Array.isArray(rows) || rows.length === 0) {
+        return `<div class="openclaw-empty">${escapeHtml(emptyText)}</div>`;
+      }
+      return rows.slice(0, 120).map((row) => {
+        const provider = String(row.provider || "--");
+        const model = String(row.model || "--");
+        const tokenText = [
+          `总 ${fmtTokenM(row.tokenTotal)}`,
+          `输入 ${fmtTokenM(row.tokenInput)}`,
+          `输出 ${fmtTokenM(row.tokenOutput)}`,
+          `消息 ${fmtInt(row.messages)}`,
+        ].join(" · ");
+        const costText = `估算成本 ${fmt2(row.totalCost)} (${String(row.currency || "config-rate")})`;
+        return `
+          <div class="openclaw-list-item">
+            <div class="name">${escapeHtml(`${provider} · ${model}`)}</div>
+            <div class="value">${escapeHtml(tokenText)}</div>
+            <div class="value">${escapeHtml(costText)}</div>
           </div>
-        </div>
-      `;
-    }).join("")
-      : '<div class="openclaw-empty">暂无本地会话聚合数据</div>';
+        `;
+      }).join("");
+    };
 
-    const estimatedHtml = estimatedCost.length > 0
-      ? estimatedCost.slice(0, 16).map((row) => `
-        <div class="openclaw-list-item">
-          <div class="name">${escapeHtml(`${String(row.provider || "--")} · ${String(row.model || "--")}`)}</div>
-          <div class="value">
-            ${escapeHtml(`估算 ${fmt2(row.totalCost)} (${String(row.currency || "config-rate")})`)}
+    const apiCardsHtml = apiProviderCards.length > 0
+      ? apiProviderCards.slice(0, 32).map((card) => {
+        const provider = String(card.provider || "--");
+        const rows = asListOfMap(card.models);
+        const rowsHtml = rows.length > 0
+          ? rows.slice(0, 24).map((row) => `
+              <div class="openclaw-list-item">
+                <div class="name">${escapeHtml(String(row.model || "--"))}</div>
+                <div class="value">
+                  ${escapeHtml(`总 ${fmtTokenM(row.tokenTotal)} · 输入 ${fmtTokenM(row.tokenInput)} · 输出 ${fmtTokenM(row.tokenOutput)}`)}
+                </div>
+                <div class="value">${escapeHtml(`估算成本 ${fmt2(row.totalCost)} (${String(row.currency || "config-rate")})`)}</div>
+              </div>
+            `).join("")
+          : '<div class="openclaw-empty">当前 provider 没有模型明细</div>';
+        const balanceStatus = String(card.balanceStatus || "unavailable");
+        const balanceText = balanceStatus === "available"
+          ? `${fmt2(card.providerBalance)}`
+          : String(card.balanceNote || "未获取到");
+        const statAt = Number(card.statAt);
+        return `
+          <div class="openclaw-section-block tone-usage-model">
+            <div class="openclaw-subtitle">${escapeHtml(provider)}</div>
+            <div class="openclaw-list">
+              ${rowsHtml}
+              <div class="openclaw-list-item">
+                <div class="name">聚合统计</div>
+                <div class="value">
+                  ${escapeHtml(`总Token ${fmtTokenM(card.providerTokenTotal)} · 总估算成本 ${fmt2(card.providerCostTotal)}`)}
+                </div>
+                <div class="value">
+                  ${escapeHtml(`余额 ${balanceText} · 统计时间 ${Number.isFinite(statAt) && statAt > 0 ? formatTime(statAt) : "--"}`)}
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-      `).join("")
-      : '<div class="openclaw-empty">暂无资费估算数据</div>';
-
-    const balanceHtml = balances.length > 0
-      ? balances.slice(0, 16).map((row) => `
-        <div class="openclaw-list-item">
-          <div class="name">${escapeHtml(`${String(row.provider || "--")} · ${String(row.source || "--")}`)}</div>
-          <div class="value">
-            ${escapeHtml(`${fmt2(row.value)} ${String(row.currency || "")} · ${formatTime(row.updatedAt)}`)}
-          </div>
-        </div>
-      `).join("")
-      : '<div class="openclaw-empty">未发现余额快照（可选数据源）</div>';
+        `;
+      }).join("")
+      : '<div class="openclaw-empty">暂无 API 聚合数据</div>';
 
     const coverageWindowProviders = Array.isArray(coverage.windowProviders)
       ? coverage.windowProviders.map((row) => String(row || "")).filter((row) => row)
@@ -788,22 +845,46 @@ export function createToolDetailModal({
       : [];
     const coverageNote = String(coverage.note || "").trim();
 
+    const windowTabs = [
+      ["1h", "1小时"],
+      ["24h", "24小时"],
+      ["7d", "7天"],
+      ["all", "全部"],
+    ];
+    const tabsHtml = windowTabs.map(([value, label]) => `
+      <button
+        class="openclaw-segment-tab ${activeWindow === value ? "active" : ""}"
+        type="button"
+        data-openclaw-usage-window="${value}"
+      >
+        ${label}
+      </button>
+    `).join("");
+    const unsupportedHint = activeWindow !== "1h" && onlyOneHourData
+      ? '<div class="openclaw-empty">当前版本仅采集“过去1小时”窗口，其他窗口将后续补齐。</div>'
+      : "";
+
     return `
+      <div class="openclaw-section-block tone-usage-coverage">
+        <div class="openclaw-subtitle">统计窗口</div>
+        <div class="openclaw-segment-tabs">${tabsHtml}</div>
+      </div>
+      ${unsupportedHint}
       <div class="openclaw-section-block tone-usage-window">
         <div class="openclaw-subtitle">账号窗口（真实值）</div>
         ${renderOpenClawUsageProviderWindows(providerWindows)}
       </div>
       <div class="openclaw-section-block tone-usage-model">
-        <div class="openclaw-subtitle">模型聚合（本地会话）</div>
-        <div class="openclaw-list">${modelTotalsHtml}</div>
+        <div class="openclaw-subtitle">已产生费用模型（1小时）</div>
+        <div class="openclaw-list">${renderModelRows(modelsWithCost, "1小时内暂无已产生费用模型")}</div>
       </div>
       <div class="openclaw-section-block tone-usage-cost">
-        <div class="openclaw-subtitle">资费估算（基于配置费率）</div>
-        <div class="openclaw-list">${estimatedHtml}</div>
+        <div class="openclaw-subtitle">未产生费用模型（1小时）</div>
+        <div class="openclaw-list">${renderModelRows(modelsWithoutCost, "全部配置模型在1小时内都有消耗")}</div>
       </div>
-      <div class="openclaw-section-block tone-usage-balance">
-        <div class="openclaw-subtitle">余额快照（可选）</div>
-        <div class="openclaw-list">${balanceHtml}</div>
+      <div class="openclaw-section-block tone-usage-window">
+        <div class="openclaw-subtitle">API 调用聚合（按 provider）</div>
+        ${apiCardsHtml}
       </div>
       <div class="openclaw-section-block tone-usage-coverage">
         <div class="openclaw-subtitle">覆盖说明</div>
@@ -813,8 +894,12 @@ export function createToolDetailModal({
             <div class="value">${escapeHtml(coverageWindowProviders.join(" / ") || "--")}</div>
           </div>
           <div class="openclaw-list-item">
-            <div class="name">估算覆盖模型</div>
+            <div class="name">已产生费用模型</div>
             <div class="value">${escapeHtml(coverageEstimatedModels.join(" / ") || "--")}</div>
+          </div>
+          <div class="openclaw-list-item">
+            <div class="name">模型覆盖</div>
+            <div class="value">${escapeHtml(`配置 ${fmtInt(coverage.configuredModelCount)} · 活跃(1h) ${fmtInt(coverage.activeModelCount1h)}`)}</div>
           </div>
           <div class="openclaw-list-item">
             <div class="name">说明</div>
@@ -1346,6 +1431,18 @@ export function createToolDetailModal({
         if (section === "diagnostics" || section === "timeline" || section === "ledger") {
           state.detailOpenClawSessionsSection = section;
           syncOpenClawSessionsSectionUi();
+        }
+        return;
+      }
+
+      const usageWindowBtn = target.closest("[data-openclaw-usage-window]");
+      if (usageWindowBtn instanceof Element) {
+        const preset = String(usageWindowBtn.getAttribute("data-openclaw-usage-window") || "")
+          .trim()
+          .toLowerCase();
+        if (preset === "1h" || preset === "24h" || preset === "7d" || preset === "all") {
+          state.detailOpenClawUsageWindowPreset = preset;
+          renderToolModal();
         }
         return;
       }

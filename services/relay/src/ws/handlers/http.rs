@@ -10,7 +10,7 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -126,7 +126,7 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
         };
 
         let summary = summarize_envelope(&sanitized);
-        info!(
+        debug!(
             "ws relay message system={} src_type={} src_device={} type={} event_id={} trace_id={} tool_id={}",
             q.system_id,
             q.client_type,

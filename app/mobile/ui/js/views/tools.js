@@ -197,7 +197,7 @@ export function createToolsView(deps) {
     const usagePercent = Number(usageHeadline.percent);
     let usageHeadlineText = usageLabel || "--";
     if (Number.isFinite(usagePercent)) {
-      usageHeadlineText = `${usageHeadlineText} · ${Math.trunc(usagePercent)}%`;
+      usageHeadlineText = `${usageHeadlineText} · 已使用 ${Math.trunc(usagePercent)}%`;
     }
 
     const gatewayRaw = String(statusDots.gateway || "").trim().toLowerCase();
