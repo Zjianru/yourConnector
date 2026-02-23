@@ -326,7 +326,7 @@ ensure_lego() {
   local arch
   arch="$(arch_name)"
   local lego_ver="${LEGO_VERSION:-$LEGO_VERSION_DEFAULT}"
-  local lego_name="lego_${lego_ver#v}_linux_${arch}.tar.gz"
+  local lego_name="lego_${lego_ver}_linux_${arch}.tar.gz"
   local url="https://github.com/go-acme/lego/releases/download/${lego_ver}/${lego_name}"
   local tmp_dir
   tmp_dir="$(mktemp -d)"
