@@ -38,6 +38,8 @@ export function createToolDetailModal({
     state.detailExpanded = false;
     state.detailOpenClawPageIndex = 0;
     state.detailOpenClawSessionsSection = "diagnostics";
+    state.detailOpenClawAgentOpenIds = {};
+    state.detailOpenClawSecurityExpanded = false;
     if (typeof requestToolDetailsRefresh === "function") {
       requestToolDetailsRefresh(hostId, toolId, true);
     }
@@ -51,6 +53,8 @@ export function createToolDetailModal({
     state.detailExpanded = false;
     state.detailOpenClawPageIndex = 0;
     state.detailOpenClawSessionsSection = "diagnostics";
+    state.detailOpenClawAgentOpenIds = {};
+    state.detailOpenClawSecurityExpanded = false;
     renderToolModal();
   }
 
@@ -242,8 +246,7 @@ export function createToolDetailModal({
       .map((row) => {
         const channel = String(row.displayLabel || row.channel || "Unknown").trim();
         const account = String(row.accountDisplay || row.username || row.accountId || "default").trim() || "default";
-        const status = asBool(row.running) ? "在线" : "离线";
-        return `${channel}@${account} · ${status}`;
+        return `${channel}@${account}`;
       })
       .filter((line) => line.trim().length > 0);
     const hidden = Math.max(0, identities.length - labels.length);
@@ -333,12 +336,15 @@ export function createToolDetailModal({
     const gatewayRuntime = asMap(systemService.gatewayRuntime);
     const dashboardMeta = asMap(overview.dashboardMeta);
 
-    const bindMode = String(gatewayRuntime.bindMode || dashboardMeta.bindMode || "未上报");
-    const bindHost = String(gatewayRuntime.bindHost || dashboardMeta.bindHost || "未上报");
+    const bindMode = String(gatewayRuntime.bindMode || dashboardMeta.bindMode || "").trim();
+    const bindHost = String(gatewayRuntime.bindHost || dashboardMeta.bindHost || "").trim();
     const bindPort = Number(gatewayRuntime.port || dashboardMeta.port);
-    const bindAddress = Number.isFinite(bindPort) && bindPort > 0
-      ? `${bindHost}:${Math.trunc(bindPort)}`
-      : bindHost;
+    const bindAddress = bindHost
+      ? (Number.isFinite(bindPort) && bindPort > 0 ? `${bindHost}:${Math.trunc(bindPort)}` : bindHost)
+      : "";
+    const bindSummary = bindMode && bindAddress
+      ? `${bindMode} · ${bindAddress}`
+      : bindMode || bindAddress || "未上报";
     const rpcOk = asBool(gatewayRuntime.rpcOk ?? dashboardMeta.rpcReachable);
     const gatewayReachable = asBool(dashboardMeta.gatewayReachable);
     const dashboardAvailable = asBool(dashboardMeta.available);
@@ -357,7 +363,7 @@ export function createToolDetailModal({
       <div class="openclaw-overview-grid">
         <div class="openclaw-overview-card tone-gateway">
           <div class="label">Gateway 绑定</div>
-          <div class="value">${escapeHtml(`${bindMode} · ${bindAddress}`)}</div>
+          <div class="value">${escapeHtml(bindSummary)}</div>
           <div class="meta">
             ${escapeHtml(`RPC ${rpcOk ? "可达" : "不可达"} · 网关 ${gatewayReachable ? "在线" : "离线/未知"}`)}
           </div>
@@ -384,7 +390,7 @@ export function createToolDetailModal({
           </div>
           <div class="openclaw-list-item">
             <div class="name">绑定信息</div>
-            <div class="value">${escapeHtml(`${bindMode} · ${bindAddress}`)}</div>
+            <div class="value">${escapeHtml(bindSummary)}</div>
           </div>
           <div class="openclaw-list-item">
             <div class="name">RPC URL</div>
@@ -417,8 +423,8 @@ export function createToolDetailModal({
   function openClawAgentContextText(agent) {
     const used = Number(agent.contextUsedTokens);
     const max = Number(agent.contextMaxTokens);
-    const usedText = Number.isFinite(used) && used >= 0 ? fmtTokenM(used) : "--";
-    const maxText = Number.isFinite(max) && max > 0 ? fmtTokenM(max) : "--";
+    const usedText = Number.isFinite(used) && used >= 0 ? fmtTokenK(used) : "--";
+    const maxText = Number.isFinite(max) && max > 0 ? fmtTokenK(max) : "--";
     return `${usedText} / ${maxText}`;
   }
 
@@ -449,22 +455,27 @@ export function createToolDetailModal({
     return `
       <div class="openclaw-agent-list">
         ${agents.map((agent) => {
+      const agentId = String(agent.agentId || agent.name || "").trim();
+      const isOpen = asBool(state.detailOpenClawAgentOpenIds[agentId]);
       const workspace = String(agent.workspaceDir || "--");
       const model = String(agent.model || "--");
       const recentPercent = Number(agent.latestPercentUsed);
       const recentTokens = Number(agent.latestTotalTokens);
       const recentText = Number.isFinite(recentPercent)
-        ? `${Math.trunc(recentPercent)}% · ${fmtTokenM(recentTokens)}`
-        : fmtTokenM(recentTokens);
+        ? `${Math.trunc(recentPercent)}% · ${fmtTokenK(recentTokens)}`
+        : fmtTokenK(recentTokens);
       return `
-        <details class="openclaw-agent-accordion">
-          <summary>
+        <article
+          class="openclaw-agent-accordion ${isOpen ? "open" : ""}"
+          data-openclaw-agent-toggle="${escapeHtml(agentId)}"
+        >
+          <div class="openclaw-agent-head">
             <div class="left">
-              <div class="name">${escapeHtml(String(agent.name || agent.agentId || "--"))}</div>
+              <div class="name">${escapeHtml(String(agent.name || agentId || "--"))}</div>
               ${asBool(agent.isDefault) ? '<span class="chip">默认</span>' : ""}
             </div>
             <div class="right">${escapeHtml(openClawAgentContextText(agent))}</div>
-          </summary>
+          </div>
           <div class="openclaw-agent-body">
             <div class="openclaw-list-item">
               <div class="name">模型</div>
@@ -487,7 +498,7 @@ export function createToolDetailModal({
               <div class="value openclaw-path">${escapeHtml(workspace)}</div>
             </div>
           </div>
-        </details>
+        </article>
       `;
     }).join("")}
       </div>
@@ -823,6 +834,7 @@ export function createToolDetailModal({
     const systemService = asMap(detailData.systemService);
     const memoryIndex = asListOfMap(systemService.memoryIndex);
     const security = asMap(systemService.securitySummary);
+    const findings = asListOfMap(systemService.securityFindings);
     const gatewayRuntime = asMap(systemService.gatewayRuntime);
     const health = asMap(systemService.healthSummary);
     const healthKnown = Object.keys(health).length > 0;
@@ -834,6 +846,11 @@ export function createToolDetailModal({
     const gatewayServiceText = String(gatewayRuntime.serviceStatus || gatewayRuntime.serviceState || "未知");
     const gatewayPid = Number(gatewayRuntime.pid);
     const gatewayPidText = Number.isFinite(gatewayPid) && gatewayPid > 0 ? `PID ${fmtInt(gatewayPid)}` : "PID 未上报";
+    const findingCount = Number.isFinite(Number(security.findingsCount))
+      ? Math.max(0, Math.trunc(Number(security.findingsCount)))
+      : findings.length;
+    const canExpandFindings = findingCount > 0 && findings.length > 0;
+    const expandedFindings = canExpandFindings && asBool(state.detailOpenClawSecurityExpanded);
 
     const memoryHtml = memoryIndex.length > 0
       ? memoryIndex.slice(0, 16).map((row) => {
@@ -882,7 +899,10 @@ export function createToolDetailModal({
         <div class="openclaw-list">${memoryHtml}</div>
       </div>
 
-      <div class="openclaw-section-block tone-security">
+      <div
+        class="openclaw-section-block tone-security ${canExpandFindings ? "clickable" : ""}"
+        ${canExpandFindings ? 'data-openclaw-security-toggle="1"' : ""}
+      >
         <div class="openclaw-subtitle">安全审计摘要</div>
         <div class="openclaw-list">
           <div class="openclaw-list-item">
@@ -893,9 +913,33 @@ export function createToolDetailModal({
           </div>
           <div class="openclaw-list-item">
             <div class="name">发现数量</div>
-            <div class="value">${escapeHtml(`${fmtInt(security.findingsCount)} 条`)}</div>
+            <div class="value">${escapeHtml(`${fmtInt(findingCount)} 条`)}</div>
           </div>
+          ${canExpandFindings ? `
+            <div class="openclaw-list-item">
+              <div class="name">点击查看</div>
+              <div class="value">${expandedFindings ? "收起审计详情" : "展开审计详情"}</div>
+            </div>
+          ` : ""}
         </div>
+        ${expandedFindings ? `
+          <div class="openclaw-security-findings">
+            ${findings.slice(0, 20).map((row) => {
+      const severity = String(row.severity || "info").trim().toLowerCase();
+      const title = String(row.title || row.checkId || "未命名检查");
+      const checkId = String(row.checkId || "--");
+      const detail = String(row.detail || "").trim();
+      const trimmedDetail = detail.length > 180 ? `${detail.slice(0, 180)}...` : detail;
+      return `
+                <div class="openclaw-security-item ${escapeHtml(severity)}">
+                  <div class="name">${escapeHtml(`${severity.toUpperCase()} · ${title}`)}</div>
+                  <div class="value">${escapeHtml(`checkId: ${checkId}`)}</div>
+                  ${trimmedDetail ? `<div class="value">${escapeHtml(trimmedDetail)}</div>` : ""}
+                </div>
+              `;
+    }).join("")}
+          </div>
+        ` : ""}
       </div>
     `;
   }
@@ -934,7 +978,6 @@ export function createToolDetailModal({
 
     const pagesHtml = pages.map((page) => `
       <article class="openclaw-page">
-        <h5 class="openclaw-page-title">${escapeHtml(page.title)}</h5>
         ${page.body}
       </article>
     `).join("");
@@ -1304,6 +1347,29 @@ export function createToolDetailModal({
           state.detailOpenClawSessionsSection = section;
           syncOpenClawSessionsSectionUi();
         }
+        return;
+      }
+
+      const securityToggle = target.closest("[data-openclaw-security-toggle]");
+      if (securityToggle instanceof Element) {
+        state.detailOpenClawSecurityExpanded = !asBool(state.detailOpenClawSecurityExpanded);
+        renderToolModal();
+        return;
+      }
+
+      const agentToggle = target.closest("[data-openclaw-agent-toggle]");
+      if (agentToggle instanceof Element) {
+        const agentId = String(agentToggle.getAttribute("data-openclaw-agent-toggle") || "").trim();
+        if (!agentId) {
+          return;
+        }
+        const next = !asBool(state.detailOpenClawAgentOpenIds[agentId]);
+        if (next) {
+          state.detailOpenClawAgentOpenIds[agentId] = true;
+        } else {
+          delete state.detailOpenClawAgentOpenIds[agentId];
+        }
+        renderToolModal();
       }
     });
 

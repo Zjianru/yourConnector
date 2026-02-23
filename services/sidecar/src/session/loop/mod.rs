@@ -91,6 +91,14 @@ async fn run_session(cfg: &Config) -> Result<()> {
             match next {
                 Ok(Message::Text(text)) => {
                     if let Some(command) = parse_sidecar_command(&text) {
+                        info!(
+                            "incoming command type={} event_id={} trace_id={} source_type={} source_device={}",
+                            command.event_type,
+                            command.event_id,
+                            command.trace_id,
+                            command.source_client_type,
+                            command.source_device_id
+                        );
                         if cmd_tx.send(command).is_err() {
                             break;
                         }
@@ -212,6 +220,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &cfg.system_id,
                     &mut seq,
                     "heartbeat",
+                    None,
                     json!({
                         "status": "ONLINE",
                         "latencyMs": 0,

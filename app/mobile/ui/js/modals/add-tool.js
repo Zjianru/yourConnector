@@ -14,6 +14,34 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
   let onConnectCandidateTool = null;
   let onOpenDebug = null;
 
+  /**
+   * 生成候选工具的工作目录文案，帮助用户区分同类多实例。
+   * @param {Record<string, any>} tool 候选工具。
+   * @returns {string}
+   */
+  function workspaceLabel(tool) {
+    const workspace = String(tool.workspaceDir || "").trim();
+    return workspace || "未识别工作目录";
+  }
+
+  /**
+   * 生成候选工具实例文案，优先展示 PID。
+   * @param {Record<string, any>} tool 候选工具。
+   * @returns {string}
+   */
+  function instanceLabel(tool) {
+    const pid = Number(tool.pid || 0);
+    if (pid > 0) {
+      return `PID ${pid}`;
+    }
+    const toolId = String(tool.toolId || "").trim();
+    if (!toolId) {
+      return "实例未命名";
+    }
+    const suffix = toolId.split("_").pop() || toolId;
+    return `实例 ${suffix}`;
+  }
+
   function openAddToolModal(hostId) {
     const host = hostById(hostId);
     if (!host) {
@@ -66,12 +94,28 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
       return;
     }
 
-    ui.candidateList.innerHTML = runtime.candidateTools
+    const sortedCandidates = [...runtime.candidateTools].sort((a, b) => {
+      const aName = String(a.name || "");
+      const bName = String(b.name || "");
+      const byName = aName.localeCompare(bName, "zh-Hans-CN");
+      if (byName !== 0) {
+        return byName;
+      }
+      const byWorkspace = workspaceLabel(a).localeCompare(workspaceLabel(b), "zh-Hans-CN");
+      if (byWorkspace !== 0) {
+        return byWorkspace;
+      }
+      return Number(a.pid || 0) - Number(b.pid || 0);
+    });
+
+    ui.candidateList.innerHTML = sortedCandidates
       .map((tool) => {
         const toolId = String(tool.toolId || "");
         const title = resolveToolDisplayName(state.addToolHostId, tool);
         const connecting = asBool(runtime.connectingToolIds[toolId]);
         const reason = String(tool.reason || "已发现可接入进程");
+        const workspace = workspaceLabel(tool);
+        const instance = instanceLabel(tool);
         return `
           <article class="candidate-item">
             <div class="candidate-head">
@@ -88,6 +132,16 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
               </div>
             </div>
             <div class="candidate-meta">${escapeHtml(reason)}</div>
+            <div class="candidate-extra">
+              <div class="candidate-extra-row">
+                <span class="candidate-extra-label">工作目录</span>
+                <span class="candidate-extra-value">${escapeHtml(workspace)}</span>
+              </div>
+              <div class="candidate-extra-row">
+                <span class="candidate-extra-label">实例</span>
+                <span class="candidate-extra-value">${escapeHtml(instance)}</span>
+              </div>
+            </div>
           </article>
         `;
       })

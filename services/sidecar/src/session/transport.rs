@@ -12,6 +12,7 @@ pub(crate) async fn send_event<W>(
     system_id: &str,
     seq: &mut u64,
     event_type: &str,
+    trace_id: Option<&str>,
     payload: Value,
 ) -> Result<()>
 where
@@ -21,6 +22,9 @@ where
     let mut env = EventEnvelope::new(event_type, system_id, payload);
     env.seq = Some(*seq);
     env.ts = now_rfc3339_nanos();
+    if let Some(value) = trace_id.map(str::trim).filter(|value| !value.is_empty()) {
+        env.trace_id = Some(value.to_string());
+    }
 
     let raw = serde_json::to_string(&env)?;
     futures_util::SinkExt::send(ws_writer, Message::Text(raw.into())).await?;

@@ -24,6 +24,20 @@ export function createToolsView(deps) {
     hostStatusLabel,
   } = deps;
   /**
+   * 根据可滑动宽度计算开合阈值。
+   * @param {number} maxOffset 最大左滑距离。
+   * @returns {{openThreshold:number, closeThreshold:number, settleOpenThreshold:number, settleCloseThreshold:number}}
+   */
+  function resolveSwipeThresholds(maxOffset) {
+    return {
+      openThreshold: Math.max(8, maxOffset * 0.12),
+      closeThreshold: Math.max(4, maxOffset * 0.08),
+      settleOpenThreshold: Math.max(10, maxOffset * 0.35),
+      settleCloseThreshold: Math.max(6, maxOffset * 0.18),
+    };
+  }
+
+  /**
    * 渲染工具左滑操作按钮（编辑/删除）。
    * @param {string} hostId 宿主机标识。
    * @param {string} toolId 工具标识。
@@ -160,8 +174,7 @@ export function createToolsView(deps) {
           const item = asMap(raw);
           const channel = String(item.displayLabel || item.channel || "Unknown").trim();
           const account = String(item.accountDisplay || item.username || item.accountId || "default").trim() || "default";
-          const status = asBool(item.running) ? "在线" : "离线";
-          return `${channel}@${account} · ${status}`;
+          return `${channel}@${account}`;
         })
         .filter((line) => line.trim().length > 0);
       const hidden = Math.max(0, channelIdentities.length - labels.length, channelHiddenCount);
@@ -496,7 +509,6 @@ export function createToolsView(deps) {
    */
   function renderHostGroup(host) {
     const runtime = ensureRuntime(host.hostId);
-    const canAddTool = runtime && runtime.connected;
     const status = hostStatusLabel(host.hostId);
     return `
       <article class="host-group" data-host-group-id="${escapeHtml(host.hostId)}">
@@ -508,7 +520,6 @@ export function createToolsView(deps) {
           <button
             class="btn btn-outline btn-sm"
             data-host-add-tool="${escapeHtml(host.hostId)}"
-            ${canAddTool ? "" : "disabled"}
           >
             + 工具
           </button>
@@ -534,6 +545,7 @@ export function createToolsView(deps) {
       const shouldOpen = Boolean(state.activeToolSwipeKey)
         && key === state.activeToolSwipeKey
         && maxOffset > 0;
+      swipe.classList.toggle("is-open", shouldOpen);
       if (shouldOpen) {
         activeExists = true;
         if (Math.abs(swipe.scrollLeft - maxOffset) > 1) {
@@ -604,9 +616,7 @@ export function createToolsView(deps) {
       return;
     }
 
-    // 左滑阈值采用比例 + 最小像素，兼顾不同机型和卡片宽度。
-    const openThreshold = Math.max(8, maxOffset * 0.12);
-    const closeThreshold = Math.max(4, maxOffset * 0.08);
+    const { openThreshold, closeThreshold } = resolveSwipeThresholds(maxOffset);
     if (swipe.scrollLeft >= openThreshold) {
       if (state.activeToolSwipeKey !== key) {
         state.activeToolSwipeKey = key;
@@ -620,10 +630,42 @@ export function createToolsView(deps) {
     }
   }
 
+  /**
+   * 指针抬起时执行“停留判定”，保证左滑后操作区可稳定停留。
+   * @param {Event} event 指针结束事件。
+   */
+  function onToolSwipePointerUp(event) {
+    const target = event.target;
+    if (!(target instanceof Element)) {
+      return;
+    }
+    const swipe = target.closest(".tool-swipe");
+    if (!(swipe instanceof HTMLElement)) {
+      return;
+    }
+    const key = String(swipe.getAttribute("data-tool-swipe-key") || "").trim();
+    const maxOffset = Math.max(0, swipe.scrollWidth - swipe.clientWidth);
+    if (!key || maxOffset <= 0) {
+      return;
+    }
+
+    const { settleOpenThreshold, settleCloseThreshold } = resolveSwipeThresholds(maxOffset);
+    if (swipe.scrollLeft >= settleOpenThreshold) {
+      state.activeToolSwipeKey = key;
+      syncToolSwipePositions();
+      return;
+    }
+    if (state.activeToolSwipeKey === key || swipe.scrollLeft <= settleCloseThreshold) {
+      state.activeToolSwipeKey = "";
+      syncToolSwipePositions();
+    }
+  }
+
   return {
     renderToolsByHost,
     onGlobalPointerDown,
     onToolSwipeScrollCapture,
+    onToolSwipePointerUp,
     closeActiveToolSwipe,
   };
 }

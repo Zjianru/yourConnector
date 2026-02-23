@@ -27,7 +27,16 @@ export function createConnectionAuth({ state, hostById, ensureRuntime, createEve
       runtime.credentialId = String(session.credentialId || "");
       return session;
     } catch (error) {
-      addLog(`load secure session failed (${host.displayName}): ${error}`);
+      addLog(`load secure session failed (${host.displayName}): ${error}`, {
+        level: "warn",
+        scope: "auth",
+        action: "load_session",
+        outcome: "failed",
+        hostId,
+        hostName: host.displayName,
+        systemId: host.systemId,
+        detail: String(error || ""),
+      });
       return null;
     }
   }
@@ -89,6 +98,16 @@ export function createConnectionAuth({ state, hostById, ensureRuntime, createEve
       if (!resp.ok || !body.ok) {
         addLog(
           `refresh skipped (${host.displayName}): ${body.code || resp.status} ${body.message || ""}`,
+          {
+            level: "warn",
+            scope: "auth",
+            action: "refresh_access_token",
+            outcome: "failed",
+            hostId,
+            hostName: host.displayName,
+            systemId: host.systemId,
+            detail: `${body.code || resp.status} ${body.message || ""}`.trim(),
+          },
         );
         return false;
       }
@@ -101,7 +120,16 @@ export function createConnectionAuth({ state, hostById, ensureRuntime, createEve
       await storeHostSession(hostId);
       return true;
     } catch (error) {
-      addLog(`refresh failed (${host.displayName}): ${error}`);
+      addLog(`refresh failed (${host.displayName}): ${error}`, {
+        level: "error",
+        scope: "auth",
+        action: "refresh_access_token",
+        outcome: "failed",
+        hostId,
+        hostName: host.displayName,
+        systemId: host.systemId,
+        detail: String(error || ""),
+      });
       return false;
     }
   }

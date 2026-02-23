@@ -44,6 +44,7 @@ where
         &cfg.system_id,
         seq,
         TOOLS_SNAPSHOT_EVENT,
+        None,
         serde_json::to_value(ToolsSnapshotPayload {
             tools: connected_tools.clone(),
         })?,
@@ -55,6 +56,7 @@ where
         &cfg.system_id,
         seq,
         TOOLS_CANDIDATES_EVENT,
+        None,
         serde_json::to_value(ToolsSnapshotPayload {
             tools: candidate_tools,
         })?,
@@ -66,6 +68,7 @@ where
         &cfg.system_id,
         seq,
         METRICS_SNAPSHOT_EVENT,
+        None,
         serde_json::to_value(collect_metrics_snapshot(sys, started_at, &connected_tools))?,
     )
     .await?;
@@ -88,6 +91,7 @@ where
         system_id,
         seq,
         TOOL_DETAILS_SNAPSHOT_EVENT,
+        None,
         serde_json::to_value(ToolDetailsSnapshotPayload {
             details: details.to_vec(),
         })?,
@@ -133,6 +137,8 @@ pub(crate) fn summarize_wire_payload(raw: &str) -> String {
         .get("type")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
+    let event_id = value.get("eventId").and_then(|v| v.as_str()).unwrap_or("");
+    let trace_id = value.get("traceId").and_then(|v| v.as_str()).unwrap_or("");
     let payload = value
         .get("payload")
         .and_then(|v| v.as_object())
@@ -151,6 +157,12 @@ pub(crate) fn summarize_wire_payload(raw: &str) -> String {
     }
     if !action.is_empty() {
         parts.push(format!("action={action}"));
+    }
+    if !event_id.is_empty() {
+        parts.push(format!("event_id={event_id}"));
+    }
+    if !trace_id.is_empty() {
+        parts.push(format!("trace_id={trace_id}"));
     }
     parts.join(" ")
 }

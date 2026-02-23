@@ -236,7 +236,8 @@
         display: flex;
         gap: 8px;
         overflow-x: auto;
-        scroll-snap-type: x mandatory;
+        overscroll-behavior-x: contain;
+        -webkit-overflow-scrolling: touch;
         border-radius: 24px;
       }
 
@@ -246,7 +247,10 @@
 
       .tool-swipe .tool-card {
         flex: 0 0 100%;
-        scroll-snap-align: start;
+      }
+
+      .tool-swipe.is-open {
+        background: rgba(255, 255, 255, 0.02);
       }
 
       .tool-swipe-actions {
@@ -445,6 +449,10 @@
         line-height: 1.32;
         word-break: break-word;
         overflow-wrap: anywhere;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
 
       .tool-metrics {
@@ -517,6 +525,8 @@
         color: var(--text-sub);
         font-size: 13px;
         line-height: 1.45;
+        overflow-wrap: anywhere;
+        word-break: break-word;
       }
 
       .field {
@@ -926,6 +936,31 @@
         line-height: 1.45;
       }
 
+      .candidate-extra {
+        margin-top: 8px;
+        display: grid;
+        gap: 5px;
+      }
+
+      .candidate-extra-row {
+        display: grid;
+        grid-template-columns: 64px 1fr;
+        gap: 8px;
+        align-items: start;
+      }
+
+      .candidate-extra-label {
+        color: var(--text-sub);
+        font-size: 11px;
+      }
+
+      .candidate-extra-value {
+        color: var(--text);
+        font-size: 12px;
+        line-height: 1.4;
+        word-break: break-all;
+      }
+
       .detail-title {
         margin: 0 0 8px;
         font-size: 17px;
@@ -1027,13 +1062,11 @@
       }
 
       .openclaw-pages-track {
-        display: grid;
-        grid-auto-flow: column;
-        grid-auto-columns: 100%;
+        display: flex;
         gap: 8px;
         overflow-x: auto;
         scroll-snap-type: x mandatory;
-        align-items: start;
+        align-items: flex-start;
       }
 
       .openclaw-pages-track::-webkit-scrollbar {
@@ -1041,15 +1074,15 @@
       }
 
       .openclaw-page {
+        flex: 0 0 100%;
         scroll-snap-align: center;
         border-radius: 14px;
         border: 1px solid var(--line-soft);
         background: rgba(255, 255, 255, 0.07);
         padding: 8px;
         display: grid;
-        gap: 6px;
+        gap: 4px;
         align-content: start;
-        align-self: start;
       }
 
       .openclaw-page-title {
@@ -1228,6 +1261,31 @@
           rgba(255, 255, 255, 0.05);
       }
 
+      .openclaw-section-block.tone-security.clickable {
+        cursor: pointer;
+      }
+
+      .openclaw-security-findings {
+        margin-top: 8px;
+        display: grid;
+        gap: 6px;
+      }
+
+      .openclaw-security-item {
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        padding: 7px 8px;
+        background: rgba(255, 255, 255, 0.04);
+      }
+
+      .openclaw-security-item.warning {
+        border-color: rgba(245, 158, 11, 0.35);
+      }
+
+      .openclaw-security-item.critical {
+        border-color: rgba(239, 68, 68, 0.4);
+      }
+
       .openclaw-list {
         display: grid;
         gap: 4px;
@@ -1266,20 +1324,19 @@
         border: 1px solid var(--line-soft);
         background: rgba(255, 255, 255, 0.08);
         overflow: hidden;
+        cursor: pointer;
       }
 
-      .openclaw-agent-accordion summary {
-        list-style: none;
+      .openclaw-agent-head {
         display: flex;
         align-items: center;
         justify-content: space-between;
         gap: 8px;
         padding: 8px 9px;
-        cursor: pointer;
       }
 
-      .openclaw-agent-accordion summary::-webkit-details-marker {
-        display: none;
+      .openclaw-agent-accordion.open .openclaw-agent-head {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.12);
       }
 
       .openclaw-agent-accordion .left {
@@ -1305,10 +1362,13 @@
       }
 
       .openclaw-agent-body {
-        border-top: 1px solid rgba(255, 255, 255, 0.12);
         padding: 7px 9px 8px;
-        display: grid;
+        display: none;
         gap: 5px;
+      }
+
+      .openclaw-agent-accordion.open .openclaw-agent-body {
+        display: grid;
       }
 
       .openclaw-path {

@@ -23,7 +23,9 @@ export function renderDebugPanel(state, ui, visibleHosts, hostById, ensureRuntim
       ? "Connecting"
       : "Disconnected";
   ui.debugStatus.textContent = `Status: ${status}`;
-  ui.debugEvents.textContent = `Events IN: ${state.eventIn} · OUT: ${state.eventOut}`;
+  const latestTrace = state.operationLogs.find((item) => String(item.traceId || "").trim());
+  const traceText = latestTrace ? ` · Latest Trace: ${latestTrace.traceId}` : "";
+  ui.debugEvents.textContent = `Events IN: ${state.eventIn} · OUT: ${state.eventOut} · Ops: ${state.operationLogs.length}${traceText}`;
   ui.debugIdentity.textContent = `Host: ${host ? host.displayName : "--"} · System: ${host ? host.systemId : "--"} · `
     + `AccessToken: ${maskSecret(runtime ? runtime.accessToken : "")} · Device: ${state.deviceId || "--"}`;
 

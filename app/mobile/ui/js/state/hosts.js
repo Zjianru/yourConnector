@@ -55,6 +55,44 @@ export function createHostState() {
     return out;
   }
 
+  function normalizeOperationLogs(rawValue) {
+    if (!Array.isArray(rawValue)) {
+      return [];
+    }
+    const out = [];
+    for (const item of rawValue) {
+      if (!item || typeof item !== "object") {
+        continue;
+      }
+      const record = {
+        ts: String(item.ts || ""),
+        level: String(item.level || "info"),
+        scope: String(item.scope || "app"),
+        action: String(item.action || ""),
+        outcome: String(item.outcome || "info"),
+        source: String(item.source || "mobile"),
+        direction: String(item.direction || ""),
+        traceId: String(item.traceId || ""),
+        eventId: String(item.eventId || ""),
+        eventType: String(item.eventType || ""),
+        hostId: String(item.hostId || ""),
+        hostName: String(item.hostName || ""),
+        toolId: String(item.toolId || ""),
+        systemId: String(item.systemId || ""),
+        sourceClientType: String(item.sourceClientType || ""),
+        sourceDeviceId: String(item.sourceDeviceId || ""),
+        seq: Number(item.seq || 0),
+        message: String(item.message || ""),
+        detail: String(item.detail || ""),
+      };
+      out.push(record);
+      if (out.length >= 500) {
+        break;
+      }
+    }
+    return out;
+  }
+
   function normalizeHostProfile(item) {
     const now = new Date().toISOString();
     const relayUrl = String(item.relayUrl || "").trim();
@@ -139,9 +177,15 @@ export function createHostState() {
       pendingHostDeletes: state.pendingHostDeletes,
       toolAliases: state.toolAliases,
       toolVisibility: state.toolVisibility,
+      operationLogs: state.operationLogs.slice(0, 500),
       message: state.message,
     };
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    } catch (error) {
+      // localStorage 写入失败不应阻断主流程（例如 iOS 存储策略限制）。
+      console.warn("[storage] persist config failed", error);
+    }
   }
 
   function migrateLegacyConfig() {
@@ -178,6 +222,7 @@ export function createHostState() {
         pendingHostDeletes: [],
         toolAliases: {},
         toolVisibility: {},
+        operationLogs: [],
         message: String(legacy.message || "tool_ping"),
       };
     } catch (_) {
@@ -219,6 +264,7 @@ export function createHostState() {
 
     state.toolAliases = normalizeToolMetaMap(parsed.toolAliases);
     state.toolVisibility = normalizeToolMetaMap(parsed.toolVisibility);
+    state.operationLogs = normalizeOperationLogs(parsed.operationLogs);
 
     recomputeSelections();
   }

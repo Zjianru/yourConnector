@@ -50,3 +50,9 @@ make simulate-ios-scan
 cd /Users/codez/develop/yourConnector
 find /Users/codez/develop/yourConnector/app/mobile/ui/js -name '*.js' -print0 | xargs -0 -I{} sh -c 'node --check "$$1" && node --check --input-type=module < "$$1"' _ "{}"
 ```
+
+## 调试日志（结构化）
+
+1. 调试页仍保留文本日志（`Logs`），同时会维护结构化日志队列（内存态）。
+2. 每条链路日志包含 `traceId/eventId/eventType/hostId/toolId` 等字段，便于跨端追踪。
+3. 调试页“复制结构化日志”可导出当前 JSON，用于问题复现与回归对比。

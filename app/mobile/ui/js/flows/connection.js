@@ -27,7 +27,6 @@ export function createConnectionFlow({
 }) {
   const hooks = {
     openHostNoticeModal: () => {},
-    closeAddToolModal: () => {},
     renderAddToolModal: () => {},
     connectCandidateTool: () => {},
   };
@@ -60,7 +59,6 @@ export function createConnectionFlow({
     requestControllerRebind: sendOps.requestControllerRebind,
     connectCandidateTool: (hostId, toolId) => hooks.connectCandidateTool(hostId, toolId),
     openHostNoticeModal: (...args) => hooks.openHostNoticeModal(...args),
-    closeAddToolModal: () => hooks.closeAddToolModal(),
     requestToolsRefresh: sendOps.requestToolsRefresh,
     renderAddToolModal: () => hooks.renderAddToolModal(),
     addLog,
@@ -92,7 +90,9 @@ export function createConnectionFlow({
       addLog("发送失败：请先选择调试宿主机");
       return;
     }
-    sendOps.sendSocketEvent(debugHostId, "chat_message", { text: message });
+    sendOps.sendSocketEvent(debugHostId, "chat_message", { text: message }, {
+      action: "send_test_event",
+    });
     render();
   }
 

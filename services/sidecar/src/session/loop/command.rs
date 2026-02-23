@@ -66,6 +66,20 @@ pub(crate) async fn handle_sidecar_command(
     whitelist: &mut ToolWhitelistStore,
     controllers: &mut ControllerDevicesStore,
 ) -> Result<SidecarCommandOutcome> {
+    let trace_id = if command_envelope.trace_id.trim().is_empty() {
+        None
+    } else {
+        Some(command_envelope.trace_id.clone())
+    };
+    info!(
+        "handle command type={} event_id={} trace_id={} source_type={} source_device={}",
+        command_envelope.event_type,
+        command_envelope.event_id,
+        command_envelope.trace_id,
+        command_envelope.source_client_type,
+        command_envelope.source_device_id
+    );
+
     if let SidecarCommand::RebindController { device_id } = &command_envelope.command {
         let device = device_id.trim();
         let (ok, changed, reason) = if command_envelope.source_client_type != "app" {
@@ -92,6 +106,7 @@ pub(crate) async fn handle_sidecar_command(
             &cfg.system_id,
             seq,
             CONTROLLER_BIND_UPDATED_EVENT,
+            trace_id.as_deref(),
             json!({
                 "ok": ok,
                 "changed": changed,
@@ -120,6 +135,7 @@ pub(crate) async fn handle_sidecar_command(
             &cfg.system_id,
             seq,
             TOOL_WHITELIST_UPDATED_EVENT,
+            trace_id.as_deref(),
             json!({
                 "action": action,
                 "toolId": tool_id,
@@ -161,6 +177,7 @@ pub(crate) async fn handle_sidecar_command(
                 &cfg.system_id,
                 seq,
                 TOOL_WHITELIST_UPDATED_EVENT,
+                trace_id.as_deref(),
                 json!({
                     "action": "connect",
                     "toolId": tool_id,
@@ -184,6 +201,7 @@ pub(crate) async fn handle_sidecar_command(
                 &cfg.system_id,
                 seq,
                 TOOL_WHITELIST_UPDATED_EVENT,
+                trace_id.as_deref(),
                 json!({
                     "action": "disconnect",
                     "toolId": tool_id,

@@ -17,7 +17,7 @@ use crate::{
     api::types::{PairBootstrapRequest, WsQuery},
     pairing::bootstrap::print_pairing_banner_from_relay,
     state::{AppState, ClientHandle},
-    ws::envelope::{sanitize_envelope, send_server_presence},
+    ws::envelope::{sanitize_envelope, send_server_presence, summarize_envelope},
 };
 
 /// WS 握手入口：校验 query 并升级连接。
@@ -124,6 +124,18 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
                 continue;
             }
         };
+
+        let summary = summarize_envelope(&sanitized);
+        info!(
+            "ws relay message system={} src_type={} src_device={} type={} event_id={} trace_id={} tool_id={}",
+            q.system_id,
+            q.client_type,
+            q.device_id,
+            summary.event_type,
+            summary.event_id,
+            summary.trace_id,
+            summary.tool_id
+        );
 
         state.broadcast(&q.system_id, client_id, sanitized).await;
     }

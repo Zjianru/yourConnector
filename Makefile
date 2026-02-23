@@ -13,6 +13,7 @@ PAIR_ARGS ?=
 .PHONY: install-tauri-cli boot-ios-sim stop-mobile-tauri-ios repair-ios-sim
 .PHONY: run-mobile-tauri-ios run-mobile-tauri-ios-dev run-mobile-tauri-ios-dev-clean
 .PHONY: pairing show-pairing show-pairing-code show-pairing-link show-pairing-qr show-pairing-json simulate-ios-scan
+.PHONY: self-debug-loop
 .PHONY: help
 
 help:
@@ -28,6 +29,7 @@ help:
 	@echo "  make show-pairing                   # 输出配对信息 + 终端二维码"
 	@echo "  make show-pairing-link              # 输出 yc://pair 链接"
 	@echo "  make simulate-ios-scan              # 模拟二维码扫码（simctl openurl）"
+	@echo "  make self-debug-loop                # 自动闭环：检查+服务+iOS启动+扫码+日志扫描"
 	@echo "  make repair-ios-sim                 # 修复模拟器异常状态"
 
 check:
@@ -139,3 +141,6 @@ show-pairing-json:
 
 simulate-ios-scan:
 	@$(MAKE) -s pairing PAIR_DIR="$(PAIR_DIR)" PAIR_RELAY_WS="$(PAIR_RELAY_WS)" PAIR_NAME="$(PAIR_NAME)" PAIR_ARGS="--show link --simulate-ios-scan"
+
+self-debug-loop:
+	@./scripts/self-debug-loop.sh

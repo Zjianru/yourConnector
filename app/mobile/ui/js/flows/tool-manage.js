@@ -2,7 +2,7 @@
 // 1. 管理工具接入/断开/改名与列表点击分发。
 // 2. 协调“候选工具弹窗”和“工具详情弹窗”的交互。
 
-import { asBool } from "../utils/type.js";
+import { createTraceId } from "../utils/log.js";
 
 /**
  * 创建工具管理流程（接入/断开/改名/列表交互）。
@@ -34,7 +34,7 @@ export function createToolManageFlow({
 }) {
   function shouldAutoRebindByReason(reason) {
     const text = String(reason || "");
-    return /未绑定控制设备|未被授权|未授权控制|控制设备/.test(text);
+    return /未绑定控制设备|未被授权|未授权控制|控制设备|控制端|未授权/.test(text);
   }
 
   function connectCandidateTool(hostId, toolId) {
@@ -42,39 +42,76 @@ export function createToolManageFlow({
     const runtime = ensureRuntime(hostId);
     const id = String(toolId || "").trim();
     if (!host || !runtime || !id || runtime.connectingToolIds[id]) return;
+    if (!runtime.toolConnectTraceIds) runtime.toolConnectTraceIds = {};
+    if (!runtime.toolConnectRetryCount) runtime.toolConnectRetryCount = {};
+    if (!runtime.toolConnectTimers) runtime.toolConnectTimers = {};
     if (!runtime.connected) {
-      addLog(`接入失败：宿主机未连接 (${host.displayName})`);
+      addLog(`接入失败：宿主机未连接 (${host.displayName})`, {
+        level: "warn",
+        scope: "tool_whitelist",
+        action: "connect_tool",
+        outcome: "failed",
+        hostId,
+        hostName: host.displayName,
+        toolId: id,
+      });
       return;
     }
 
     runtime.connectingToolIds[id] = true;
     setToolHidden(hostId, id, false);
     clearToolConnectTimer(runtime, id);
+    const traceId = createTraceId();
+    runtime.toolConnectTraceIds[id] = traceId;
     runtime.toolConnectTimers[id] = setTimeout(() => {
       const current = ensureRuntime(hostId);
       if (!current || !current.connectingToolIds[id]) return;
+      if (String(current.toolConnectTraceIds[id] || "") !== traceId) return;
       delete current.connectingToolIds[id];
       delete current.toolConnectRetryCount[id];
+      delete current.toolConnectTraceIds[id];
       clearToolConnectTimer(current, id);
+      requestToolsRefresh(hostId);
       renderAddToolModal();
-      openHostNoticeModal(
-        "工具接入未响应",
-        "工具“" + id + "”接入超时。请确认 relay/sidecar 正常连接后重试；必要时先重连宿主机。",
-      );
+      addLog(`工具接入等待超时，已自动刷新候选列表 (${host.displayName}): ${id}`, {
+        level: "warn",
+        scope: "tool_whitelist",
+        action: "connect_tool",
+        outcome: "timeout",
+        traceId,
+        hostId,
+        hostName: host.displayName,
+        toolId: id,
+      });
     }, 5000);
     renderAddToolModal();
 
-    const sent = sendSocketEvent(hostId, "tool_connect_request", { toolId: id });
+    const sent = sendSocketEvent(hostId, "tool_connect_request", { toolId: id }, {
+      action: "connect_tool",
+      traceId,
+      toolId: id,
+    });
     if (!sent) {
       delete runtime.connectingToolIds[id];
       delete runtime.toolConnectRetryCount[id];
+      delete runtime.toolConnectTraceIds[id];
       clearToolConnectTimer(runtime, id);
       openHostNoticeModal(
         "工具接入失败",
         `无法发送接入请求：工具“${id}”未接入。请先确认宿主机已连接。`,
       );
       render();
+      return;
     }
+    addLog(`已发送工具接入请求 (${host.displayName}): ${id}`, {
+      scope: "tool_whitelist",
+      action: "connect_tool",
+      outcome: "started",
+      traceId,
+      hostId,
+      hostName: host.displayName,
+      toolId: id,
+    });
   }
 
   function openToolAliasEditor(hostId, toolId) {
@@ -116,19 +153,43 @@ export function createToolManageFlow({
     runtime.tools = runtime.tools.filter((item) => String(item.toolId || "") !== toolId);
     render();
 
-    const sent = sendSocketEvent(hostId, "tool_disconnect_request", { toolId });
+    const traceId = createTraceId();
+    const sent = sendSocketEvent(hostId, "tool_disconnect_request", { toolId }, {
+      action: "disconnect_tool",
+      traceId,
+      toolId,
+    });
     if (!sent) {
       setToolHidden(hostId, toolId, false);
       requestToolsRefresh(hostId);
       render();
       return;
     }
-    addLog(`已请求断开工具 (${host.displayName}): ${toolId}`);
+    addLog(`已请求断开工具 (${host.displayName}): ${toolId}`, {
+      scope: "tool_whitelist",
+      action: "disconnect_tool",
+      outcome: "started",
+      traceId,
+      hostId,
+      hostName: host.displayName,
+      toolId,
+    });
     openHostNoticeModal("工具已断开", `工具“${name}”已从已接入列表移除，可在候选工具中重新接入。`);
     requestToolsRefresh(hostId);
   }
 
   function onToolsGroupedClick(event) {
+    const swipeContainer = event.target.closest(".tool-swipe");
+    if (swipeContainer) {
+      const swipeKey = String(swipeContainer.getAttribute("data-tool-swipe-key") || "").trim();
+      const activeSwipeKey = String(state.activeToolSwipeKey || "").trim();
+      const isActionClick = Boolean(event.target.closest("[data-tool-edit], [data-tool-delete]"));
+      // 左滑操作区展开时，优先保证操作按钮可点；阻止误触详情弹窗。
+      if (!isActionClick && activeSwipeKey && swipeKey === activeSwipeKey) {
+        return;
+      }
+    }
+
     const connectBtn = event.target.closest("[data-host-connect]");
     if (connectBtn) {
       const hostId = String(connectBtn.getAttribute("data-host-connect") || "");

@@ -9,6 +9,7 @@ use tracing::{error, info};
 
 mod config;
 mod control;
+mod logging;
 mod pairing;
 mod runtime;
 mod session;
@@ -30,9 +31,7 @@ pub(crate) use tooling::{
 /// Sidecar 入口：初始化日志、启动 health server、进入 relay 会话循环。
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let _log_runtime = logging::init("sidecar")?;
 
     let cfg = Config::from_env();
     info!(

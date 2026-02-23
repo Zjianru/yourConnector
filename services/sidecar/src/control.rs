@@ -24,6 +24,12 @@ pub(crate) const CONTROLLER_BIND_UPDATED_EVENT: &str = "controller_bind_updated"
 const SOURCE_CLIENT_TYPE_FIELD: &str = "sourceClientType";
 /// Relay 注入的可信来源设备 ID 字段。
 const SOURCE_DEVICE_ID_FIELD: &str = "sourceDeviceId";
+/// 统一事件字段：事件类型。
+const EVENT_TYPE_FIELD: &str = "type";
+/// 统一事件字段：事件 ID。
+const EVENT_ID_FIELD: &str = "eventId";
+/// 统一事件字段：链路追踪 ID。
+const TRACE_ID_FIELD: &str = "traceId";
 /// 兼容字段：旧链路通过 peerId 携带来源设备 ID。
 const PEER_ID_FIELD: &str = "peerId";
 
@@ -48,6 +54,12 @@ pub(crate) enum SidecarCommand {
 /// 命令与来源信息封装，用于权限判断与审计日志。
 #[derive(Debug)]
 pub(crate) struct SidecarCommandEnvelope {
+    /// 原始事件类型。
+    pub(crate) event_type: String,
+    /// 原始事件 ID。
+    pub(crate) event_id: String,
+    /// 链路追踪 ID。
+    pub(crate) trace_id: String,
     /// 解析出的控制命令。
     pub(crate) command: SidecarCommand,
     /// 来源客户端类型（app/sidecar）。
@@ -60,10 +72,22 @@ pub(crate) struct SidecarCommandEnvelope {
 pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope> {
     let event: Value = serde_json::from_str(raw).ok()?;
     let event_type = event
-        .get("type")
+        .get(EVENT_TYPE_FIELD)
         .and_then(Value::as_str)
         .map(str::trim)
         .unwrap_or_default();
+    let event_id = event
+        .get(EVENT_ID_FIELD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    let trace_id = event
+        .get(TRACE_ID_FIELD)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
     let payload = event
         .get("payload")
         .and_then(Value::as_object)
@@ -133,6 +157,9 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
     }?;
 
     Some(SidecarCommandEnvelope {
+        event_type: event_type.to_string(),
+        event_id,
+        trace_id,
         command,
         source_client_type,
         source_device_id,

@@ -3,6 +3,7 @@
 mod api;
 mod app;
 mod auth;
+mod logging;
 mod pairing;
 mod state;
 mod ws;
@@ -10,5 +11,6 @@ mod ws;
 #[tokio::main]
 /// 启动 Relay 服务。
 async fn main() -> anyhow::Result<()> {
+    let _log_runtime = logging::init("relay")?;
     app::run().await
 }

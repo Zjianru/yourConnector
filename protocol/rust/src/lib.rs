@@ -15,6 +15,9 @@ pub struct EventEnvelope {
     #[serde(rename = "eventId")]
     // 事件唯一 ID。
     pub event_id: String,
+    #[serde(rename = "traceId", skip_serializing_if = "Option::is_none")]
+    // 分布式链路追踪 ID（可选）。
+    pub trace_id: Option<String>,
     #[serde(rename = "type")]
     // 事件类型。
     pub event_type: String,
@@ -58,6 +61,7 @@ impl EventEnvelope {
         Self {
             v: 1,
             event_id: format!("evt_{}", Uuid::new_v4()),
+            trace_id: Some(format!("trc_{}", Uuid::new_v4())),
             event_type: event_type.into(),
             system_id: system_id.into(),
             tool_id: None,

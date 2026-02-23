@@ -105,6 +105,79 @@ const toolDetailModal = createToolDetailModal({
   requestToolDetailsRefresh: connectionFlow.requestToolDetailsRefresh,
 });
 
+/**
+ * 统一关闭弹窗栈，避免多个 modal 叠加导致“关一个露一个”。
+ * @param {"none"|"pairFailure"|"pairFlow"|"toolDetail"|"addTool"|"hostManage"|"hostEdit"|"hostMetrics"|"hostNotice"} keep 保留的弹窗类型。
+ */
+function closeModalStack(keep = "none") {
+  if (keep !== "pairFailure") pairFailureModal.closePairFailureModal();
+  if (keep !== "pairFlow") pairingFlow.closePairFlow();
+  if (keep !== "toolDetail") toolDetailModal.closeToolDetail();
+  if (keep !== "addTool") addToolModal.closeAddToolModal();
+  if (keep !== "hostManage" && hostManageFlowRef) hostManageFlowRef.closeHostManageModal();
+  if (keep !== "hostEdit" && hostManageFlowRef) hostManageFlowRef.closeHostEditModal();
+  if (keep !== "hostMetrics" && hostManageFlowRef) hostManageFlowRef.closeHostMetricsModal();
+  if (keep !== "hostNotice") noticeModal.closeHostNoticeModal();
+}
+
+/** 打开宿主管理弹窗（互斥模式）。 */
+function openHostManageModalGuard() {
+  closeModalStack("hostManage");
+  if (hostManageFlowRef) hostManageFlowRef.openHostManageModal();
+}
+
+/**
+ * 打开配对流程弹窗（互斥模式）。
+ * @param {string} step 配对步骤。
+ * @param {string} targetHostId 目标宿主机。
+ */
+function openPairFlowGuard(step, targetHostId = "") {
+  closeModalStack("pairFlow");
+  pairingFlow.openPairFlow(step, targetHostId);
+}
+
+/**
+ * 打开添加工具弹窗（互斥模式）。
+ * @param {string} hostId 宿主机标识。
+ */
+function openAddToolModalGuard(hostId) {
+  closeModalStack("addTool");
+  addToolModal.openAddToolModal(hostId);
+}
+
+/**
+ * 打开工具详情弹窗（互斥模式）。
+ * @param {string} hostId 宿主机标识。
+ * @param {string} toolId 工具标识。
+ */
+function openToolDetailGuard(hostId, toolId) {
+  closeModalStack("toolDetail");
+  toolDetailModal.openToolDetail(hostId, toolId);
+}
+
+/**
+ * 打开宿主机负载弹窗（互斥模式）。
+ * @param {string} hostId 宿主机标识。
+ */
+function openHostMetricsModalGuard(hostId) {
+  closeModalStack("hostMetrics");
+  if (hostManageFlowRef) hostManageFlowRef.openHostMetricsModal(hostId);
+}
+
+/**
+ * 打开提示弹窗（互斥模式）。
+ * @param {string} title 标题。
+ * @param {string} body 正文。
+ * @param {object|string} options 选项。
+ */
+function openHostNoticeModalGuard(title, body, options = {}) {
+  const keepAddToolOpen = Boolean(
+    options && typeof options === "object" && options.keepAddToolOpen,
+  );
+  closeModalStack(keepAddToolOpen ? "addTool" : "hostNotice");
+  noticeModal.openHostNoticeModal(title, body, options);
+}
+
 const toolManageFlow = createToolManageFlow({
   state,
   hostById: hostState.hostById,
@@ -121,12 +194,12 @@ const toolManageFlow = createToolManageFlow({
   connectHost: connectionFlow.connectHost,
   reconnectHost: connectionFlow.reconnectHost,
   disconnectHost: connectionFlow.disconnectHost,
-  openHostNoticeModal: noticeModal.openHostNoticeModal,
-  openAddToolModal: addToolModal.openAddToolModal,
+  openHostNoticeModal: openHostNoticeModalGuard,
+  openAddToolModal: openAddToolModalGuard,
   renderAddToolModal: addToolModal.renderAddToolModal,
   closeAddToolModal: addToolModal.closeAddToolModal,
-  openToolDetail: toolDetailModal.openToolDetail,
-  openHostManageModal: () => hostManageFlowRef && hostManageFlowRef.openHostManageModal(),
+  openToolDetail: openToolDetailGuard,
+  openHostManageModal: openHostManageModalGuard,
   render,
 });
 
@@ -145,11 +218,11 @@ hostManageFlowRef = createHostManageFlow({
   clearToolMetaForHost: runtimeState.clearToolMetaForHost,
   clearHostSession: authFlow.clearHostSession,
   addLog,
-  openHostNoticeModal: noticeModal.openHostNoticeModal,
+  openHostNoticeModal: openHostNoticeModalGuard,
   connectHost: connectionFlow.connectHost,
   reconnectHost: connectionFlow.reconnectHost,
   disconnectHost: connectionFlow.disconnectHost,
-  openPairFlow: pairingFlow.openPairFlow,
+  openPairFlow: openPairFlowGuard,
   render,
 });
 
@@ -158,128 +231,229 @@ addToolModal.setHandlers({
   openDebug: () => switchTab("debug"),
 });
 connectionFlow.setHooks({
-  openHostNoticeModal: noticeModal.openHostNoticeModal,
-  closeAddToolModal: addToolModal.closeAddToolModal,
+  openHostNoticeModal: openHostNoticeModalGuard,
   renderAddToolModal: addToolModal.renderAddToolModal,
   connectCandidateTool: toolManageFlow.connectCandidateTool,
 });
 
-function addLog(text) {
-  pushLog(state, text);
+/**
+ * 写入统一日志（文本 + 结构化）。
+ * @param {string} text 文本日志。
+ * @param {Record<string, any>} options 结构化字段。
+ */
+function addLog(text, options = {}) {
+  pushLog(state, text, options);
 }
 
 function formatWireLog(direction, hostName, rawText) {
   return formatWireLogRaw(direction, hostName, rawText, RAW_PAYLOAD_DEBUG);
 }
 
+/**
+ * 记录前端异常，避免异常直接中断交互链路。
+ * @param {string} scope 异常来源范围。
+ * @param {unknown} error 异常对象。
+ */
+function reportUiError(scope, error) {
+  const message = String(error && typeof error === "object" && "message" in error ? error.message : error || "未知异常");
+  addLog(`[ui_error] ${scope}: ${message}`, {
+    level: "error",
+    scope: "ui",
+    action: scope,
+    outcome: "failed",
+    detail: message,
+  });
+  console.error(`[ui_error] ${scope}`, error);
+}
+
+/**
+ * 保护 UI 事件处理器，捕获同步/异步异常。
+ * @param {string} scope 异常来源范围。
+ * @param {(event?: Event)=>unknown} handler 原始处理器。
+ * @returns {(event?: Event)=>void}
+ */
+function guardUiHandler(scope, handler) {
+  return (event) => {
+    try {
+      const result = handler(event);
+      if (result && typeof result.then === "function") {
+        void result.catch((error) => reportUiError(scope, error));
+      }
+    } catch (error) {
+      reportUiError(scope, error);
+    }
+  };
+}
+
 function switchTab(tab) {
+  // 切页前先释放输入焦点，避免 iOS 底部输入附件条遮挡交互。
+  if (document.activeElement instanceof HTMLElement) {
+    document.activeElement.blur();
+  }
   state.activeTab = tab;
   render();
 }
 
 function render() {
-  hostState.recomputeSelections();
-  renderTabsView(state, ui);
-  const hostCount = hostState.visibleHosts().length;
-  renderTopActionsView(ui, hostCount, connectionFlow.hasConnectableHost(), connectionFlow.isAnyHostConnected());
-  renderHostStageView(ui, hostState.visibleHosts().length > 0);
-  renderBannerView(ui, hostState.visibleHosts(), state.bannerActiveIndex, runtimeState.hostStatusLabel, escapeHtml);
-  toolsView.renderToolsByHost(hostState.visibleHosts());
-  renderDebugPanelView(state, ui, hostState.visibleHosts, hostState.hostById, runtimeState.ensureRuntime, maskSecret, escapeHtml);
-  toolDetailModal.renderToolModal();
-  addToolModal.renderAddToolModal();
-  hostManageFlowRef.renderHostManageModal();
-  hostManageFlowRef.renderHostMetricsModal();
+  try {
+    hostState.recomputeSelections();
+    renderTabsView(state, ui);
+    const hostCount = hostState.visibleHosts().length;
+    renderTopActionsView(ui, hostCount, connectionFlow.hasConnectableHost(), connectionFlow.isAnyHostConnected());
+    renderHostStageView(ui, hostState.visibleHosts().length > 0);
+    renderBannerView(ui, hostState.visibleHosts(), state.bannerActiveIndex, runtimeState.hostStatusLabel, escapeHtml);
+    toolsView.renderToolsByHost(hostState.visibleHosts());
+    renderDebugPanelView(state, ui, hostState.visibleHosts, hostState.hostById, runtimeState.ensureRuntime, maskSecret, escapeHtml);
+    toolDetailModal.renderToolModal();
+    addToolModal.renderAddToolModal();
+    hostManageFlowRef.renderHostManageModal();
+    hostManageFlowRef.renderHostMetricsModal();
+  } catch (error) {
+    reportUiError("render", error);
+  }
 }
 
 function bindEvents() {
-  ui.tabOps.addEventListener("click", () => switchTab("ops"));
-  ui.tabDebug.addEventListener("click", () => switchTab("debug"));
-  ui.connectBtnTop.addEventListener("click", connectionFlow.connectAllHosts);
-  ui.disconnectBtnTop.addEventListener("click", connectionFlow.disconnectAllHosts);
-  ui.replaceHostBtnTop.addEventListener("click", hostManageFlowRef.openHostManageModal);
+  ui.tabOps.addEventListener("click", guardUiHandler("tab_ops", () => switchTab("ops")));
+  ui.tabDebug.addEventListener("click", guardUiHandler("tab_debug", () => switchTab("debug")));
+  ui.connectBtnTop.addEventListener("click", guardUiHandler("connect_all_hosts", () => connectionFlow.connectAllHosts()));
+  ui.disconnectBtnTop.addEventListener("click", guardUiHandler("disconnect_all_hosts", () => connectionFlow.disconnectAllHosts()));
+  ui.replaceHostBtnTop.addEventListener("click", guardUiHandler("open_host_manage", openHostManageModalGuard));
 
-  ui.importPairLinkBtn.addEventListener("click", () => pairingFlow.openPairFlow("import", ""));
-  ui.openManualPairBtn.addEventListener("click", () => pairingFlow.openPairFlow("manual", ""));
+  ui.importPairLinkBtn.addEventListener("click", guardUiHandler("pair_flow_import", () => openPairFlowGuard("import", "")));
+  ui.openManualPairBtn.addEventListener("click", guardUiHandler("pair_flow_manual", () => openPairFlowGuard("manual", "")));
 
-  ui.connectBtnDebug.addEventListener("click", () => connectionFlow.connectHost(state.debugHostId, { manual: true, resetRetry: true }));
-  ui.disconnectBtnDebug.addEventListener("click", () => connectionFlow.disconnectHost(state.debugHostId, { triggerReconnect: false }));
-  ui.rebindControllerBtn.addEventListener("click", () => connectionFlow.requestControllerRebind(state.debugHostId));
-  ui.debugHostSelect.addEventListener("change", () => {
+  ui.connectBtnDebug.addEventListener("click", guardUiHandler(
+    "connect_debug_host",
+    () => connectionFlow.connectHost(state.debugHostId, { manual: true, resetRetry: true }),
+  ));
+  ui.disconnectBtnDebug.addEventListener("click", guardUiHandler(
+    "disconnect_debug_host",
+    () => connectionFlow.disconnectHost(state.debugHostId, { triggerReconnect: false }),
+  ));
+  ui.rebindControllerBtn.addEventListener("click", guardUiHandler(
+    "rebind_controller",
+    () => connectionFlow.requestControllerRebind(state.debugHostId),
+  ));
+  ui.debugHostSelect.addEventListener("change", guardUiHandler("change_debug_host", () => {
     state.debugHostId = String(ui.debugHostSelect.value || "");
     render();
-  });
+  }));
 
-  ui.messageInput.addEventListener("input", () => {
+  ui.messageInput.addEventListener("input", guardUiHandler("update_message", () => {
     state.message = ui.messageInput.value;
     hostState.persistConfig();
     render();
-  });
-  ui.sendBtn.addEventListener("click", () => connectionFlow.sendTestEvent(state.debugHostId, state.message));
+  }));
+  ui.sendBtn.addEventListener("click", guardUiHandler("send_test_event", () => {
+    connectionFlow.sendTestEvent(state.debugHostId, state.message);
+  }));
+  ui.copyOpLogsBtn.addEventListener("click", guardUiHandler("copy_operation_logs", async () => {
+    const content = JSON.stringify(state.operationLogs, null, 2);
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(content);
+      addLog(`已复制结构化日志（${state.operationLogs.length} 条）`, {
+        scope: "debug",
+        action: "copy_operation_logs",
+        outcome: "success",
+      });
+      return;
+    }
+    addLog("复制失败：当前环境不支持 clipboard 接口", {
+      level: "warn",
+      scope: "debug",
+      action: "copy_operation_logs",
+      outcome: "failed",
+    });
+  }));
+  ui.clearLogsBtn.addEventListener("click", guardUiHandler("clear_logs", () => {
+    state.logs = [];
+    state.operationLogs = [];
+    addLog("已清空调试日志", {
+      scope: "debug",
+      action: "clear_logs",
+      outcome: "success",
+    });
+    render();
+  }));
 
-  ui.toolsGroupedList.addEventListener("click", toolManageFlow.onToolsGroupedClick);
+  ui.toolsGroupedList.addEventListener("click", guardUiHandler("tools_group_click", toolManageFlow.onToolsGroupedClick));
   ui.toolsGroupedList.addEventListener("scroll", toolsView.onToolSwipeScrollCapture, true);
-  ui.hostBannerTrack.addEventListener("scroll", () => syncBannerActiveIndex(ui, state));
-  ui.hostBannerTrack.addEventListener("click", (event) => {
+  ui.toolsGroupedList.addEventListener("pointerup", toolsView.onToolSwipePointerUp, true);
+  ui.toolsGroupedList.addEventListener("touchend", toolsView.onToolSwipePointerUp, true);
+  ui.toolsGroupedList.addEventListener("mouseup", toolsView.onToolSwipePointerUp, true);
+  ui.hostBannerTrack.addEventListener("scroll", guardUiHandler("host_banner_scroll", () => syncBannerActiveIndex(ui, state)));
+  ui.hostBannerTrack.addEventListener("click", guardUiHandler("host_banner_click", (event) => {
     const hostId = extractBannerHostId(event);
     if (!hostId) return;
-    hostManageFlowRef.openHostMetricsModal(hostId);
-  });
+    openHostMetricsModalGuard(hostId);
+  }));
 
-  pairingFlow.bindPairFlowEvents({ onOpenDebugTab: () => switchTab("debug") });
+  pairingFlow.bindPairFlowEvents({ onOpenDebugTab: guardUiHandler("pair_open_debug_tab", () => {
+    closeModalStack("none");
+    switchTab("debug");
+  }) });
   pairFailureModal.bindPairFailureModalEvents({ onPrimaryAction: pairingFlow.bindFailureActionHandler() });
-  noticeModal.bindHostNoticeModalEvents({ onEditHost: hostManageFlowRef.openHostEditModal });
+  noticeModal.bindHostNoticeModalEvents({ onEditHost: (hostId) => {
+    closeModalStack("hostEdit");
+    if (hostManageFlowRef) hostManageFlowRef.openHostEditModal(hostId);
+  } });
   addToolModal.bindAddToolModalEvents();
   toolDetailModal.bindToolDetailModalEvents();
 
-  ui.hostManageClose.addEventListener("click", hostManageFlowRef.closeHostManageModal);
-  ui.hostManageModal.addEventListener("click", (event) => {
+  ui.hostManageClose.addEventListener("click", guardUiHandler("close_host_manage", hostManageFlowRef.closeHostManageModal));
+  ui.hostManageModal.addEventListener("click", guardUiHandler("backdrop_host_manage", (event) => {
     if (event.target === ui.hostManageModal) hostManageFlowRef.closeHostManageModal();
-  });
-  ui.hostManageAddBtn.addEventListener("click", () => {
+  }));
+  ui.hostManageAddBtn.addEventListener("click", guardUiHandler("host_manage_add", () => {
     hostManageFlowRef.closeHostManageModal();
-    pairingFlow.openPairFlow("import", "");
-  });
-  ui.hostManageDebugBtn.addEventListener("click", () => {
+    openPairFlowGuard("import", "");
+  }));
+  ui.hostManageDebugBtn.addEventListener("click", guardUiHandler("host_manage_open_debug", () => {
     hostManageFlowRef.closeHostManageModal();
     switchTab("debug");
-  });
-  ui.hostManageList.addEventListener("click", (event) => hostManageFlowRef.onHostManageListClick(event, (hostId) => {
-    state.debugHostId = hostId;
-    state.activeTab = "debug";
   }));
-  ui.pendingDeleteList.addEventListener("click", hostManageFlowRef.onPendingDeleteListClick);
+  ui.hostManageList.addEventListener(
+    "click",
+    guardUiHandler(
+      "host_manage_list_click",
+      (event) => hostManageFlowRef.onHostManageListClick(event, (hostId) => {
+        state.debugHostId = hostId;
+        state.activeTab = "debug";
+      }),
+    ),
+  );
+  ui.pendingDeleteList.addEventListener("click", guardUiHandler("pending_delete_list_click", hostManageFlowRef.onPendingDeleteListClick));
 
-  ui.hostEditClose.addEventListener("click", hostManageFlowRef.closeHostEditModal);
-  ui.hostEditCancelBtn.addEventListener("click", hostManageFlowRef.closeHostEditModal);
-  ui.hostEditSaveBtn.addEventListener("click", hostManageFlowRef.saveHostEdit);
-  ui.hostEditModal.addEventListener("click", (event) => {
+  ui.hostEditClose.addEventListener("click", guardUiHandler("close_host_edit", hostManageFlowRef.closeHostEditModal));
+  ui.hostEditCancelBtn.addEventListener("click", guardUiHandler("cancel_host_edit", hostManageFlowRef.closeHostEditModal));
+  ui.hostEditSaveBtn.addEventListener("click", guardUiHandler("save_host_edit", hostManageFlowRef.saveHostEdit));
+  ui.hostEditModal.addEventListener("click", guardUiHandler("backdrop_host_edit", (event) => {
     if (event.target === ui.hostEditModal) hostManageFlowRef.closeHostEditModal();
-  });
+  }));
 
-  ui.hostMetricsClose.addEventListener("click", hostManageFlowRef.closeHostMetricsModal);
-  ui.hostMetricsModal.addEventListener("click", (event) => {
+  ui.hostMetricsClose.addEventListener("click", guardUiHandler("close_host_metrics", hostManageFlowRef.closeHostMetricsModal));
+  ui.hostMetricsModal.addEventListener("click", guardUiHandler("backdrop_host_metrics", (event) => {
     if (event.target === ui.hostMetricsModal) hostManageFlowRef.closeHostMetricsModal();
-  });
+  }));
 
   document.addEventListener("pointerdown", toolsView.onGlobalPointerDown, true);
-  document.addEventListener("keydown", (event) => {
+  document.addEventListener("keydown", guardUiHandler("global_keydown", (event) => {
     if (event.key !== "Escape") return;
-    pairFailureModal.closePairFailureModal();
-    pairingFlow.closePairFlow();
-    toolDetailModal.closeToolDetail();
-    addToolModal.closeAddToolModal();
-    hostManageFlowRef.closeHostManageModal();
-    hostManageFlowRef.closeHostEditModal();
-    hostManageFlowRef.closeHostMetricsModal();
-    noticeModal.closeHostNoticeModal();
+    closeModalStack("none");
     toolsView.closeActiveToolSwipe();
-  });
+  }));
 }
 
 function init() {
   hostState.restoreConfig();
   hostState.ensureIdentity();
+  window.addEventListener("error", (event) => {
+    reportUiError("window_error", event.error || event.message || "unknown error");
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    reportUiError("unhandled_rejection", event.reason || "unknown rejection");
+  });
   pairingFlow.bindPairingLinkBridge();
   pairingFlow.tryApplyLaunchPairingLink();
   ui.messageInput.value = state.message;

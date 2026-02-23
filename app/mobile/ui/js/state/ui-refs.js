@@ -40,6 +40,8 @@ export function createUiRefs() {
     rebindControllerBtn: document.getElementById("rebindControllerBtn"),
     messageInput: document.getElementById("messageInput"),
     sendBtn: document.getElementById("sendBtn"),
+    copyOpLogsBtn: document.getElementById("copyOpLogsBtn"),
+    clearLogsBtn: document.getElementById("clearLogsBtn"),
     logBox: document.getElementById("logBox"),
 
     // 工具详情。

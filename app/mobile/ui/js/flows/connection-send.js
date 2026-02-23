@@ -24,34 +24,77 @@ export function createConnectionSendOps({
    * @param {object} payload 事件载荷。
    * @returns {boolean} 是否发送成功。
    */
-  function sendSocketEvent(hostId, type, payload) {
+  function sendSocketEvent(hostId, type, payload, options = {}) {
     const host = hostById(hostId);
     const runtime = ensureRuntime(hostId);
+    const eventType = String(type || "").trim();
+    const payloadMap = asMap(payload);
+    const traceId = String(options.traceId || "").trim() || createEventId().replace(/^evt_/, "trc_");
+    const eventId = createEventId();
+    const toolId = String(options.toolId || payloadMap.toolId || "").trim();
+    const action = String(options.action || eventType || "send_event").trim();
     if (!host || !runtime || !runtime.socket || !runtime.connected) {
-      addLog(`send skipped: host not connected (${host ? host.displayName : hostId})`);
+      addLog(`send skipped: host not connected (${host ? host.displayName : hostId})`, {
+        level: "warn",
+        scope: "ws_out",
+        action,
+        outcome: "skipped",
+        traceId,
+        eventId,
+        eventType,
+        hostId,
+        hostName: host ? host.displayName : "",
+        toolId,
+      });
       return false;
     }
 
     const event = {
       v: 1,
-      eventId: createEventId(),
-      type,
+      eventId,
+      traceId,
+      type: eventType,
       systemId: host.systemId,
       seq: Date.now(),
       ts: new Date().toISOString(),
-      payload: asMap(payload),
+      payload: payloadMap,
     };
     const encoded = JSON.stringify(event);
 
     try {
       runtime.socket.send(encoded);
     } catch (error) {
-      addLog(`send failed (${host.displayName}): ${error}`);
+      addLog(`send failed (${host.displayName}): ${error}`, {
+        level: "error",
+        scope: "ws_out",
+        action,
+        outcome: "failed",
+        traceId,
+        eventId,
+        eventType,
+        hostId,
+        hostName: host.displayName,
+        toolId,
+        detail: String(error || ""),
+      });
       return false;
     }
 
     state.eventOut += 1;
-    addLog(formatWireLog("OUT", host.displayName, encoded));
+    addLog(formatWireLog("OUT", host.displayName, encoded), {
+      scope: "ws_out",
+      action,
+      outcome: "sent",
+      direction: "OUT",
+      traceId,
+      eventId,
+      eventType,
+      hostId,
+      hostName: host.displayName,
+      toolId,
+      systemId: host.systemId,
+      seq: event.seq,
+    });
     return true;
   }
 
@@ -60,7 +103,7 @@ export function createConnectionSendOps({
    * @param {string} hostId 宿主机标识。
    */
   function requestToolsRefresh(hostId) {
-    sendSocketEvent(hostId, "tools_refresh_request", {});
+    sendSocketEvent(hostId, "tools_refresh_request", {}, { action: "refresh_tools" });
   }
 
   /**
@@ -77,7 +120,10 @@ export function createConnectionSendOps({
     if (normalizedToolId) {
       payload.toolId = normalizedToolId;
     }
-    sendSocketEvent(hostId, "tool_details_refresh_request", payload);
+    sendSocketEvent(hostId, "tool_details_refresh_request", payload, {
+      action: "refresh_tool_details",
+      toolId: normalizedToolId,
+    });
   }
 
   /**
@@ -95,8 +141,19 @@ export function createConnectionSendOps({
       addLog(`重绑失败：宿主机未连接 (${host.displayName})`);
       return;
     }
-    if (sendSocketEvent(hostId, "controller_rebind_request", { deviceId: state.deviceId })) {
-      addLog(`已请求重绑控制端 (${host.displayName})`);
+    const traceId = createEventId().replace(/^evt_/, "trc_");
+    if (sendSocketEvent(hostId, "controller_rebind_request", { deviceId: state.deviceId }, {
+      action: "rebind_controller",
+      traceId,
+    })) {
+      addLog(`已请求重绑控制端 (${host.displayName})`, {
+        scope: "controller",
+        action: "rebind_controller",
+        outcome: "started",
+        traceId,
+        hostId,
+        hostName: host.displayName,
+      });
     }
   }
 

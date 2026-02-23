@@ -43,7 +43,22 @@ export function extractBannerHostId(event) {
   }
   const card = target.closest("[data-banner-host-id]");
   if (!card) {
-    return "";
+    const track = event.currentTarget instanceof Element
+      ? event.currentTarget
+      : target.closest(".host-banner-track");
+    if (!(track instanceof HTMLElement)) {
+      return "";
+    }
+    const active = deriveBannerActiveIndex(track);
+    if (!active) {
+      return "";
+    }
+    const cards = Array.from(track.querySelectorAll("[data-banner-host-id]"));
+    const activeCard = cards[active.index];
+    if (!(activeCard instanceof Element)) {
+      return "";
+    }
+    return String(activeCard.getAttribute("data-banner-host-id") || "").trim();
   }
   return String(card.getAttribute("data-banner-host-id") || "").trim();
 }

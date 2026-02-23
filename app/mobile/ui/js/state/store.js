@@ -11,6 +11,8 @@ export const DEFAULT_RELAY_WS_URL = "ws://127.0.0.1:18080/v1/ws";
 export const RECONNECT_INTERVAL_MS = 2000;
 export const MAX_RECONNECT_ATTEMPTS = 5;
 export const DELETE_RETRY_INTERVAL_MS = 2000;
+export const MAX_PLAIN_LOGS = 300;
+export const MAX_OPERATION_LOGS = 1500;
 
 export const RAW_PAYLOAD_DEBUG = (() => {
   try {
@@ -58,6 +60,7 @@ export function createRuntime() {
     tools: [],
     candidateTools: [],
     connectingToolIds: {},
+    toolConnectTraceIds: {},
     toolConnectRetryCount: {},
     toolConnectTimers: {},
 
@@ -83,6 +86,7 @@ export const state = {
   activeTab: "ops",
   bannerActiveIndex: 0,
   logs: [],
+  operationLogs: [],
   eventIn: 0,
   eventOut: 0,
   message: "tool_ping",
@@ -94,6 +98,8 @@ export const state = {
   detailExpanded: false,
   detailOpenClawPageIndex: 0,
   detailOpenClawSessionsSection: "diagnostics",
+  detailOpenClawAgentOpenIds: {},
+  detailOpenClawSecurityExpanded: false,
   addToolHostId: "",
   pairingBusy: false,
   pairFlowStep: "import",

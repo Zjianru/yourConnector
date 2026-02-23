@@ -78,7 +78,15 @@ export function createConnectionSocketOps({
       runtime.manualReconnectRequired = true;
       runtime.status = "DISCONNECTED";
       runtime.lastError = `重连失败已达 ${MAX_RECONNECT_ATTEMPTS} 次`;
-      addLog(`reconnect paused (${host.displayName}): 超过 ${MAX_RECONNECT_ATTEMPTS} 次失败，请手动重连`);
+      addLog(`reconnect paused (${host.displayName}): 超过 ${MAX_RECONNECT_ATTEMPTS} 次失败，请手动重连`, {
+        level: "warn",
+        scope: "connection",
+        action: "reconnect_host",
+        outcome: "paused",
+        hostId,
+        hostName: host.displayName,
+        detail: reason,
+      });
       return;
     }
 
@@ -87,7 +95,14 @@ export function createConnectionSocketOps({
       runtime.reconnectTimer = null;
       void connectHost(hostId, { manual: manualTriggered, resetRetry: false });
     }, RECONNECT_INTERVAL_MS);
-    addLog(`reconnect scheduled (${host.displayName}) #${runtime.retryCount}: ${reason}`);
+    addLog(`reconnect scheduled (${host.displayName}) #${runtime.retryCount}: ${reason}`, {
+      scope: "connection",
+      action: "reconnect_host",
+      outcome: "scheduled",
+      hostId,
+      hostName: host.displayName,
+      detail: reason,
+    });
   }
 
   /**
@@ -109,6 +124,16 @@ export function createConnectionSocketOps({
       clearReconnectTimer(runtime);
     }
     if (runtime.connecting || runtime.connected) return;
+    const traceId = createEventId().replace(/^evt_/, "trc_");
+    addLog(`connect started (${host.displayName})`, {
+      scope: "connection",
+      action: "connect_host",
+      outcome: "started",
+      traceId,
+      hostId,
+      hostName: host.displayName,
+      systemId: host.systemId,
+    });
 
     runtime.connecting = true;
     runtime.status = "CONNECTING";
@@ -122,7 +147,17 @@ export function createConnectionSocketOps({
         runtime.status = "AUTH_EXPIRED";
         runtime.manualReconnectRequired = true;
         runtime.lastError = "缺少设备凭证，请重新配对";
-        addLog(`connect skipped (${host.displayName}): 缺少可用凭证，请先完成配对`);
+        addLog(`connect skipped (${host.displayName}): 缺少可用凭证，请先完成配对`, {
+          level: "warn",
+          scope: "connection",
+          action: "connect_host",
+          outcome: "failed",
+          traceId,
+          hostId,
+          hostName: host.displayName,
+          systemId: host.systemId,
+          detail: "missing_session",
+        });
         render();
         return;
       }
@@ -173,7 +208,17 @@ export function createConnectionSocketOps({
       runtime.socket = null;
       runtime.status = "RELAY_UNREACHABLE";
       runtime.lastError = String(error || "connect failed");
-      addLog(`connect failed (${host.displayName}): ${error}`);
+      addLog(`connect failed (${host.displayName}): ${error}`, {
+        level: "error",
+        scope: "connection",
+        action: "connect_host",
+        outcome: "failed",
+        traceId,
+        hostId,
+        hostName: host.displayName,
+        systemId: host.systemId,
+        detail: String(error || ""),
+      });
       scheduleReconnect(hostId, String(error || "connect failed"), manual);
       render();
     }
@@ -203,6 +248,7 @@ export function createConnectionSocketOps({
     runtime.lastHeartbeatAt = null;
     runtime.candidateTools = [];
     runtime.connectingToolIds = {};
+    runtime.toolConnectTraceIds = {};
     runtime.toolConnectRetryCount = {};
     Object.keys(runtime.toolConnectTimers || {}).forEach((toolId) => clearToolConnectTimer(runtime, toolId));
     runtime.toolDetailsById = {};
@@ -210,7 +256,14 @@ export function createConnectionSocketOps({
     runtime.toolDetailUpdatedAtById = {};
 
     const host = hostById(hostId);
-    addLog(`disconnected host: ${host ? host.displayName : hostId}`);
+    addLog(`disconnected host: ${host ? host.displayName : hostId}`, {
+      scope: "connection",
+      action: "disconnect_host",
+      outcome: "success",
+      hostId,
+      hostName: host ? host.displayName : "",
+      systemId: host ? host.systemId : "",
+    });
     if (triggerReconnect) scheduleReconnect(hostId, "manual disconnect", true);
     render();
   }

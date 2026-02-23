@@ -3,7 +3,21 @@
 use axum::extract::ws::Message;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
+use uuid::Uuid;
 use yc_shared_protocol::{EventEnvelope, now_rfc3339_nanos};
+
+/// 事件摘要：用于日志追踪，避免打印完整 payload。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EnvelopeSummary {
+    /// 事件类型。
+    pub(crate) event_type: String,
+    /// 事件 ID。
+    pub(crate) event_id: String,
+    /// 链路追踪 ID。
+    pub(crate) trace_id: String,
+    /// 目标工具 ID（可选）。
+    pub(crate) tool_id: String,
+}
 
 /// 校验并修正上行 envelope。
 pub(crate) fn sanitize_envelope(
@@ -19,6 +33,32 @@ pub(crate) fn sanitize_envelope(
 
     if !obj.contains_key("v") {
         obj.insert("v".to_string(), json!(1));
+    }
+
+    let event_id_empty = obj
+        .get("eventId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::is_empty)
+        .unwrap_or(true);
+    if event_id_empty {
+        obj.insert(
+            "eventId".to_string(),
+            Value::String(format!("evt_{}", Uuid::new_v4())),
+        );
+    }
+
+    let trace_id_empty = obj
+        .get("traceId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::is_empty)
+        .unwrap_or(true);
+    if trace_id_empty {
+        obj.insert(
+            "traceId".to_string(),
+            Value::String(format!("trc_{}", Uuid::new_v4())),
+        );
     }
 
     let event_type = obj
@@ -65,6 +105,41 @@ pub(crate) fn sanitize_envelope(
     }
 
     serde_json::to_string(&env).map_err(|err| err.to_string())
+}
+
+/// 提取日志摘要字段，供 relay/sidecar 记录链路日志。
+pub(crate) fn summarize_envelope(raw: &str) -> EnvelopeSummary {
+    let parsed = serde_json::from_str::<Value>(raw);
+    let Ok(value) = parsed else {
+        return EnvelopeSummary::default();
+    };
+    let payload = value
+        .get("payload")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    EnvelopeSummary {
+        event_type: value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        event_id: value
+            .get("eventId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        trace_id: value
+            .get("traceId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        tool_id: payload
+            .get("toolId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    }
 }
 
 /// 连接成功后回推 server_presence。
