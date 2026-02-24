@@ -71,15 +71,17 @@ jobs:
             --name "oss-payload" \
             --dir dist
           ls -la dist
+          ls -la dist/payload
+          ls -la dist/dist-release
           (
-            cd dist
+            cd dist/payload
             sha256sum -c checksums.txt
           )
 
       - name: Resolve tag from release manifest
         id: tag
         run: |
-          manifest_tag="$(jq -r '.tag // empty' dist/release-manifest.json)"
+          manifest_tag="$(jq -r '.tag // empty' dist/dist-release/release-manifest.json)"
           if [[ -n "${manifest_tag}" ]]; then
             echo "value=${manifest_tag}" >> "$GITHUB_OUTPUT"
             exit 0
@@ -109,18 +111,18 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.value }}"
           OSS_BASE="oss://${OSS_BUCKET}/${OSS_PREFIX}/${TAG}"
-          ./ossutil64 cp dist/yc-relay.sh "${OSS_BASE}/yc-relay.sh" -f
-          ./ossutil64 cp dist/yc-sidecar.sh "${OSS_BASE}/yc-sidecar.sh" -f
-          ./ossutil64 cp dist/release-manifest.json "${OSS_BASE}/release-manifest.json" -f
-          ./ossutil64 cp dist/yc-relay-linux-amd64.tar.gz "${OSS_BASE}/yc-relay-linux-amd64.tar.gz" -f
-          ./ossutil64 cp dist/yc-relay-linux-arm64.tar.gz "${OSS_BASE}/yc-relay-linux-arm64.tar.gz" -f
-          ./ossutil64 cp dist/yc-relay-macos-amd64.tar.gz "${OSS_BASE}/yc-relay-macos-amd64.tar.gz" -f
-          ./ossutil64 cp dist/yc-relay-macos-arm64.tar.gz "${OSS_BASE}/yc-relay-macos-arm64.tar.gz" -f
-          ./ossutil64 cp dist/yc-sidecar-linux-amd64.tar.gz "${OSS_BASE}/yc-sidecar-linux-amd64.tar.gz" -f
-          ./ossutil64 cp dist/yc-sidecar-linux-arm64.tar.gz "${OSS_BASE}/yc-sidecar-linux-arm64.tar.gz" -f
-          ./ossutil64 cp dist/yc-sidecar-macos-amd64.tar.gz "${OSS_BASE}/yc-sidecar-macos-amd64.tar.gz" -f
-          ./ossutil64 cp dist/yc-sidecar-macos-arm64.tar.gz "${OSS_BASE}/yc-sidecar-macos-arm64.tar.gz" -f
-          ./ossutil64 cp dist/checksums.txt "${OSS_BASE}/checksums.txt" -f
+          ./ossutil64 cp dist/dist-release/yc-relay.sh "${OSS_BASE}/yc-relay.sh" -f
+          ./ossutil64 cp dist/dist-release/yc-sidecar.sh "${OSS_BASE}/yc-sidecar.sh" -f
+          ./ossutil64 cp dist/dist-release/release-manifest.json "${OSS_BASE}/release-manifest.json" -f
+          ./ossutil64 cp dist/payload/yc-relay-linux-amd64.tar.gz "${OSS_BASE}/yc-relay-linux-amd64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-relay-linux-arm64.tar.gz "${OSS_BASE}/yc-relay-linux-arm64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-relay-macos-amd64.tar.gz "${OSS_BASE}/yc-relay-macos-amd64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-relay-macos-arm64.tar.gz "${OSS_BASE}/yc-relay-macos-arm64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-sidecar-linux-amd64.tar.gz "${OSS_BASE}/yc-sidecar-linux-amd64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-sidecar-linux-arm64.tar.gz "${OSS_BASE}/yc-sidecar-linux-arm64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-sidecar-macos-amd64.tar.gz "${OSS_BASE}/yc-sidecar-macos-amd64.tar.gz" -f
+          ./ossutil64 cp dist/payload/yc-sidecar-macos-arm64.tar.gz "${OSS_BASE}/yc-sidecar-macos-arm64.tar.gz" -f
+          ./ossutil64 cp dist/payload/checksums.txt "${OSS_BASE}/checksums.txt" -f
 
       - name: Upload latest.json
         run: |
