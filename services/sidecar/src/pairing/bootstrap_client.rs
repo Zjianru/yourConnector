@@ -11,6 +11,7 @@ struct PairBootstrapRequest {
     system_id: String,
     pair_token: String,
     host_name: String,
+    relay_ws_url: String,
     include_code: bool,
 }
 
@@ -78,6 +79,7 @@ pub(crate) async fn fetch_pair_bootstrap(
         system_id: system_id.to_string(),
         pair_token: pair_token.to_string(),
         host_name: host_name.to_string(),
+        relay_ws_url: relay_ws_url.to_string(),
         include_code: true,
     };
 

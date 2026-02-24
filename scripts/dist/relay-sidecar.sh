@@ -431,7 +431,7 @@ write_nginx_acme_conf() {
   cat > "$NGINX_CONF" <<CONF
 server {
     listen 80 default_server;
-    server_name _;
+    server_name ${PUBLIC_IP};
 
     location ^~ /.well-known/acme-challenge/ {
         root ${WEBROOT_DIR};
@@ -453,7 +453,7 @@ write_nginx_full_conf() {
   cat > "$NGINX_CONF" <<CONF
 server {
     listen 80 default_server;
-    server_name _;
+    server_name ${PUBLIC_IP};
 
     location ^~ /.well-known/acme-challenge/ {
         root ${WEBROOT_DIR};
@@ -467,7 +467,7 @@ server {
 
 server {
     listen 443 ssl default_server;
-    server_name _;
+    server_name ${PUBLIC_IP};
 
     ssl_certificate ${TLS_ACTIVE_LINK}/fullchain.pem;
     ssl_certificate_key ${TLS_ACTIVE_LINK}/privkey.pem;
@@ -531,6 +531,7 @@ Group=${SERVICE_GROUP}
 WorkingDirectory=${WORK_ROOT}
 Environment=HOME=${WORK_ROOT}
 Environment=RELAY_ADDR=127.0.0.1:18080
+Environment=RELAY_PUBLIC_WS_URL=wss://${PUBLIC_IP}/v1/ws
 ExecStart=${BIN_DIR}/yc-relay
 Restart=always
 RestartSec=2
