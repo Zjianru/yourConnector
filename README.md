@@ -26,32 +26,34 @@ make show-pairing-link
 make simulate-ios-scan
 ```
 
-## Linux 分发脚本（v3.3）
+## 安装流程（A/B 宿主机）
 
 ```bash
-# 网关+执行机（一体节点）
-sudo bash /path/to/relay-sidecar.sh install \
-  --version vX.Y.Z \
-  --asset-base https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX> \
-  --acme-email you@example.com
+# A机：先安装 relay
+sudo bash /path/to/yc-relay.sh install \
+  --acme-email you@example.com \
+  --public-ip <公网IPv4>
 
-# 执行机（连接远端 Relay）
-sudo bash /path/to/sidecar.sh install \
-  --version vX.Y.Z \
-  --asset-base https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX> \
-  --relay wss://<公网IPv4>/v1/ws
+# A机：再安装 sidecar（接入本机 relay）
+sudo bash /path/to/yc-sidecar.sh install \
+  --relay-ip <公网IPv4>
+
+# B机：只安装 sidecar（接入 A 机 relay）
+sudo bash /path/to/yc-sidecar.sh install \
+  --relay-ip <公网IPv4>
 ```
 
 说明：
 
 1. 公网默认仅支持 `wss://.../v1/ws`，`ws://` 仅用于开发调试开关。
-2. 一体节点脚本强制使用 Let’s Encrypt shortlived IP 证书（HTTP-01 + webroot）。
-3. 详细参数、卸载与 `doctor/status` 见 `docs/分发安装与卸载-v1.md`。
-4. GitHub Actions 已支持“打 tag 自动构建发布资产（amd64）”，工作流见 `.github/workflows/release-linux.yml`。
-5. Release 资产同时包含安装脚本：`relay-sidecar.sh`、`sidecar.sh`。
-6. GitHub Actions 已支持“按 tag 同步发布资产到阿里云 OSS（国内下载）”，工作流见 `.github/workflows/sync-release-to-oss.yml`。
-7. 国内下载地址模板：`https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX>/<tag>/<file>`
-8. iOS App 当前不在 Release 资产中分发；上线形态以 App Store/TestFlight 为准。
+2. 安装脚本面向用户输入统一为公网 IPv4；脚本内部自动拼接标准 Relay 地址。
+3. `yc-relay.sh` 在 Linux 上使用 Let’s Encrypt shortlived IP 证书（HTTP-01 + webroot）。
+4. 详细参数、卸载与 `doctor/status` 见 `docs/分发安装与卸载-v1.md`。
+5. GitHub Actions 已支持“打 tag 自动构建多平台发布资产”，工作流见 `.github/workflows/release-linux.yml`。
+6. Release 资产仅包含安装脚本与清单：`yc-relay.sh`、`yc-sidecar.sh`、`release-manifest.json`、`release-checksums.txt`。
+7. GitHub Actions 已支持“按 tag 同步发布资产到阿里云 OSS（国内下载）”，工作流见 `.github/workflows/sync-release-to-oss.yml`。
+8. 国内下载地址模板：`https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX>/<tag>/<file>`
+9. iOS App 当前不在 Release 资产中分发；上线形态以 App Store/TestFlight 为准。
 
 ## 质量门禁
 

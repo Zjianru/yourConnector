@@ -1,28 +1,28 @@
 name: sync-release-to-oss
 
 on:
-  release:
-    types: [published]
   workflow_run:
     workflows: ["release-linux"]
     types: [completed]
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.3.3"
+        description: "Release tag, for example v0.4.0"
         required: true
+        type: string
+      run_id:
+        description: "Optional release-linux run id (for manual replay)"
+        required: false
         type: string
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   sync:
     if: |
-      github.event_name != 'workflow_run' || (
-        github.event.workflow_run.conclusion == 'success' &&
-        startsWith(github.event.workflow_run.head_branch, 'v')
-      )
+      github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     env:
       OSS_BUCKET: ${{ vars.ALIYUN_OSS_BUCKET || 'your-connector' }}
@@ -32,15 +32,19 @@ jobs:
       ALIYUN_ACCESS_KEY_ID: ${{ secrets.ALIYUN_ACCESS_KEY_ID }}
       ALIYUN_ACCESS_KEY_SECRET: ${{ secrets.ALIYUN_ACCESS_KEY_SECRET }}
     steps:
-      - name: Resolve tag
-        id: tag
+      - name: Resolve tag and source run id
+        id: meta
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
-            echo "value=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_run" ]]; then
-            echo "value=${{ github.event.workflow_run.head_branch }}" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            echo "tag_input=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            if [[ -n "${{ github.event.inputs.run_id }}" ]]; then
+              echo "run_id=${{ github.event.inputs.run_id }}" >> "$GITHUB_OUTPUT"
+            else
+              echo "run_id=" >> "$GITHUB_OUTPUT"
+            fi
           else
-            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+            echo "tag_input=" >> "$GITHUB_OUTPUT"
+            echo "run_id=${{ github.event.workflow_run.id }}" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Validate OSS credentials
@@ -52,23 +56,40 @@ jobs:
           [[ -n "${OSS_DOMAIN}" ]] || { echo "missing var: ALIYUN_OSS_DOMAIN"; exit 1; }
           [[ -n "${OSS_PREFIX}" ]] || { echo "missing var: ALIYUN_OSS_PREFIX"; exit 1; }
 
-      - name: Download release assets from GitHub
+      - name: Download oss-payload artifact from release-linux run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          RUN_ID="${{ steps.meta.outputs.run_id }}"
           mkdir -p dist
-          gh release download "${{ steps.tag.outputs.value }}" \
+          if [[ -z "${RUN_ID}" ]]; then
+            echo "manual mode without run_id is unsupported; please provide run_id"
+            exit 1
+          fi
+          gh run download "${RUN_ID}" \
             --repo "${GITHUB_REPOSITORY}" \
-            --dir dist \
-            --pattern "relay-sidecar.sh" \
-            --pattern "sidecar.sh" \
-            --pattern "yc-relay-linux-amd64.tar.gz" \
-            --pattern "yc-sidecar-linux-amd64.tar.gz" \
-            --pattern "checksums.txt"
+            --name "oss-payload" \
+            --dir dist
+          ls -la dist
           (
             cd dist
             sha256sum -c checksums.txt
           )
+
+      - name: Resolve tag from release manifest
+        id: tag
+        run: |
+          manifest_tag="$(jq -r '.tag // empty' dist/release-manifest.json)"
+          if [[ -n "${manifest_tag}" ]]; then
+            echo "value=${manifest_tag}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "${{ steps.meta.outputs.tag_input }}" ]]; then
+            echo "value=${{ steps.meta.outputs.tag_input }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "cannot determine tag from manifest or inputs"
+          exit 1
 
       - name: Install ossutil
         run: |
@@ -84,14 +105,21 @@ jobs:
             -k "${ALIYUN_ACCESS_KEY_SECRET}" \
             -L CH
 
-      - name: Upload artifacts to OSS by tag
+      - name: Upload binaries and checksums to OSS by tag
         run: |
           TAG="${{ steps.tag.outputs.value }}"
           OSS_BASE="oss://${OSS_BUCKET}/${OSS_PREFIX}/${TAG}"
-          ./ossutil64 cp dist/relay-sidecar.sh "${OSS_BASE}/relay-sidecar.sh" -f
-          ./ossutil64 cp dist/sidecar.sh "${OSS_BASE}/sidecar.sh" -f
+          ./ossutil64 cp dist/yc-relay.sh "${OSS_BASE}/yc-relay.sh" -f
+          ./ossutil64 cp dist/yc-sidecar.sh "${OSS_BASE}/yc-sidecar.sh" -f
+          ./ossutil64 cp dist/release-manifest.json "${OSS_BASE}/release-manifest.json" -f
           ./ossutil64 cp dist/yc-relay-linux-amd64.tar.gz "${OSS_BASE}/yc-relay-linux-amd64.tar.gz" -f
+          ./ossutil64 cp dist/yc-relay-linux-arm64.tar.gz "${OSS_BASE}/yc-relay-linux-arm64.tar.gz" -f
+          ./ossutil64 cp dist/yc-relay-macos-amd64.tar.gz "${OSS_BASE}/yc-relay-macos-amd64.tar.gz" -f
+          ./ossutil64 cp dist/yc-relay-macos-arm64.tar.gz "${OSS_BASE}/yc-relay-macos-arm64.tar.gz" -f
           ./ossutil64 cp dist/yc-sidecar-linux-amd64.tar.gz "${OSS_BASE}/yc-sidecar-linux-amd64.tar.gz" -f
+          ./ossutil64 cp dist/yc-sidecar-linux-arm64.tar.gz "${OSS_BASE}/yc-sidecar-linux-arm64.tar.gz" -f
+          ./ossutil64 cp dist/yc-sidecar-macos-amd64.tar.gz "${OSS_BASE}/yc-sidecar-macos-amd64.tar.gz" -f
+          ./ossutil64 cp dist/yc-sidecar-macos-arm64.tar.gz "${OSS_BASE}/yc-sidecar-macos-arm64.tar.gz" -f
           ./ossutil64 cp dist/checksums.txt "${OSS_BASE}/checksums.txt" -f
 
       - name: Upload latest.json
@@ -100,14 +128,7 @@ jobs:
           cat > dist/latest.json <<JSON
           {
             "tag": "${TAG}",
-            "ossBaseUrl": "https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}",
-            "files": [
-              "relay-sidecar.sh",
-              "sidecar.sh",
-              "yc-relay-linux-amd64.tar.gz",
-              "yc-sidecar-linux-amd64.tar.gz",
-              "checksums.txt"
-            ]
+            "ossBaseUrl": "https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
           }
           JSON
           ./ossutil64 cp dist/latest.json "oss://${OSS_BUCKET}/${OSS_PREFIX}/latest.json" -f
@@ -118,12 +139,18 @@ jobs:
           BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
           cat > dist/oss-download-urls.txt <<TXT
           yourConnector ${TAG} 国内下载地址
-          relay-sidecar script: ${BASE}/relay-sidecar.sh
-          sidecar script:       ${BASE}/sidecar.sh
-          relay:   ${BASE}/yc-relay-linux-amd64.tar.gz
-          sidecar: ${BASE}/yc-sidecar-linux-amd64.tar.gz
-          sum:     ${BASE}/checksums.txt
-          latest:  https://${OSS_DOMAIN}/${OSS_PREFIX}/latest.json
+          yc-relay.sh: ${BASE}/yc-relay.sh
+          yc-sidecar.sh: ${BASE}/yc-sidecar.sh
+          yc-relay-linux-amd64: ${BASE}/yc-relay-linux-amd64.tar.gz
+          yc-relay-linux-arm64: ${BASE}/yc-relay-linux-arm64.tar.gz
+          yc-relay-macos-amd64: ${BASE}/yc-relay-macos-amd64.tar.gz
+          yc-relay-macos-arm64: ${BASE}/yc-relay-macos-arm64.tar.gz
+          yc-sidecar-linux-amd64: ${BASE}/yc-sidecar-linux-amd64.tar.gz
+          yc-sidecar-linux-arm64: ${BASE}/yc-sidecar-linux-arm64.tar.gz
+          yc-sidecar-macos-amd64: ${BASE}/yc-sidecar-macos-amd64.tar.gz
+          yc-sidecar-macos-arm64: ${BASE}/yc-sidecar-macos-arm64.tar.gz
+          checksums: ${BASE}/checksums.txt
+          latest: https://${OSS_DOMAIN}/${OSS_PREFIX}/latest.json
           TXT
 
       - name: Upload URL file to GitHub Release assets
@@ -141,12 +168,10 @@ jobs:
           {
             echo "## OSS 下载地址"
             echo ""
-            echo "- relay-sidecar 脚本: \`${BASE}/relay-sidecar.sh\`"
-            echo "- sidecar 脚本: \`${BASE}/sidecar.sh\`"
-            echo "- relay: \`${BASE}/yc-relay-linux-amd64.tar.gz\`"
-            echo "- sidecar: \`${BASE}/yc-sidecar-linux-amd64.tar.gz\`"
+            echo "- 安装脚本: \`${BASE}/yc-relay.sh\`"
+            echo "- 安装脚本: \`${BASE}/yc-sidecar.sh\`"
+            echo "- 二进制: \`${BASE}/yc-relay-linux-amd64.tar.gz\`"
+            echo "- 二进制: \`${BASE}/yc-sidecar-linux-amd64.tar.gz\`"
             echo "- checksums: \`${BASE}/checksums.txt\`"
-            echo "- latest 元数据: \`https://${OSS_DOMAIN}/${OSS_PREFIX}/latest.json\`"
-            echo ""
-            echo "Release 资产中也已附带：\`oss-download-urls.txt\`。"
+            echo "- latest: \`https://${OSS_DOMAIN}/${OSS_PREFIX}/latest.json\`"
           } >> "$GITHUB_STEP_SUMMARY"

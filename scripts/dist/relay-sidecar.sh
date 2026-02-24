@@ -61,7 +61,7 @@ Options:
   --version <tag>         Required for install. Example: v0.1.0
   --asset-base <url>      Optional release base URL, example: https://<domain>/releases
   --acme-email <email>    Required for install (or env YC_ACME_EMAIL)
-  --public-ip <ipv4>      Optional public IPv4 override
+  --public-ip <ipv4>      Public IPv4. Omit to input interactively during install
   --acme-staging          Use Let's Encrypt staging endpoint
   --dry-run               Print checks/actions without changing system
   --yes                   Skip interactive confirmations
@@ -842,16 +842,37 @@ acquire_public_ip() {
     return 0
   fi
 
-  local from_state
+  local from_state input prompt
   from_state="$(state_get public_ip || true)"
-  if [[ -n "$from_state" ]] && is_valid_ipv4 "$from_state"; then
-    PUBLIC_IP="$from_state"
-    return 0
+
+  if [[ "$YES" -eq 1 ]]; then
+    if [[ -n "$from_state" ]] && is_valid_ipv4 "$from_state"; then
+      PUBLIC_IP="$from_state"
+      return 0
+    fi
+    fail "--public-ip <ipv4> is required when --yes is set and no previous value exists" 2
   fi
 
-  PUBLIC_IP="$(detect_public_ipv4 || true)"
-  [[ -n "$PUBLIC_IP" ]] || fail "cannot detect public IPv4"
-  is_valid_ipv4 "$PUBLIC_IP" || fail "detected public IP is invalid: ${PUBLIC_IP}"
+  [[ -t 0 ]] || fail "--public-ip <ipv4> is required in non-interactive mode" 2
+
+  while true; do
+    if [[ -n "$from_state" ]] && is_valid_ipv4 "$from_state"; then
+      prompt="输入公网 IPv4（直接回车复用 ${from_state}）: "
+    else
+      prompt="输入公网 IPv4: "
+    fi
+    read -r -p "$prompt" input
+    input="${input//[[:space:]]/}"
+    if [[ -z "$input" ]] && [[ -n "$from_state" ]] && is_valid_ipv4 "$from_state"; then
+      PUBLIC_IP="$from_state"
+      return 0
+    fi
+    if is_valid_ipv4 "$input"; then
+      PUBLIC_IP="$input"
+      return 0
+    fi
+    log "输入无效，请输入可公网访问的 IPv4（例如 47.95.30.225）"
+  done
 }
 
 issue_initial_cert() {

@@ -222,10 +222,7 @@ mod tests {
     #[test]
     fn discover_keeps_wrapper_and_standalone_runtime_instances() {
         let mut all = HashMap::new();
-        all.insert(
-            100,
-            proc(100, "/opt/homebrew/bin/opencode", "/workspace/a"),
-        );
+        all.insert(100, proc(100, "/opt/homebrew/bin/opencode", "/workspace/a"));
         all.insert(
             101,
             proc(

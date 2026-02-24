@@ -21,6 +21,7 @@ LOG_FILE="${LOG_DIR}/sidecar.log"
 COMMAND=""
 VERSION=""
 RELAY_URL=""
+RELAY_IP=""
 DRY_RUN=0
 YES=0
 PURGE=0
@@ -46,7 +47,8 @@ Commands:
 Options:
   --version <tag>         Required for install. Example: v0.1.0
   --asset-base <url>      Optional release base URL, example: https://<domain>/releases
-  --relay <wss-url>       Required for install unless already set
+  --relay-ip <ipv4>       Preferred: relay public IPv4, script builds wss://<ip>/v1/ws
+  --relay <wss-url>       Backward-compatible full relay URL
   --allow-insecure-ws     Allow ws:// relay (debug only)
   --dry-run               Print actions only
   --yes                   Skip confirmations
@@ -101,6 +103,10 @@ parse_args() {
         ;;
       --relay)
         RELAY_URL="${2:-}"
+        shift 2
+        ;;
+      --relay-ip)
+        RELAY_IP="${2:-}"
         shift 2
         ;;
       --asset-base)
@@ -163,6 +169,24 @@ confirm() {
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing command: $1"
+}
+
+is_valid_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  IFS='.' read -r o1 o2 o3 o4 <<<"$ip"
+  for o in "$o1" "$o2" "$o3" "$o4"; do
+    (( o >= 0 && o <= 255 )) || return 1
+  done
+  if (( o1 == 10 )); then return 1; fi
+  if (( o1 == 127 )); then return 1; fi
+  if (( o1 == 0 )); then return 1; fi
+  if (( o1 == 169 && o2 == 254 )); then return 1; fi
+  if (( o1 == 172 && o2 >= 16 && o2 <= 31 )); then return 1; fi
+  if (( o1 == 192 && o2 == 168 )); then return 1; fi
+  if (( o1 == 100 && o2 >= 64 && o2 <= 127 )); then return 1; fi
+  if (( o1 >= 224 )); then return 1; fi
+  return 0
 }
 
 run_as_service_user() {
@@ -291,7 +315,18 @@ read_persisted_relay_url() {
   sed -n 's/.*"relayWsUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$config_path" | head -n1
 }
 
+relay_url_from_ip() {
+  local ip="$1"
+  echo "wss://${ip}/v1/ws"
+}
+
 resolve_install_relay_url() {
+  if [[ -n "$RELAY_IP" ]]; then
+    is_valid_ipv4 "$RELAY_IP" || fail "--relay-ip must be a valid public IPv4"
+    EFFECTIVE_RELAY_URL="$(relay_url_from_ip "$RELAY_IP")"
+    return 0
+  fi
+
   if [[ -n "$RELAY_URL" ]]; then
     EFFECTIVE_RELAY_URL="$RELAY_URL"
     return 0
@@ -304,7 +339,21 @@ resolve_install_relay_url() {
     return 0
   fi
 
-  fail "--relay <wss-url> is required for install when no persisted relay exists"
+  if [[ "$YES" -eq 1 ]]; then
+    fail "--relay-ip <ipv4> is required when --yes is set and no persisted relay exists" 2
+  fi
+  [[ -t 0 ]] || fail "--relay-ip <ipv4> is required in non-interactive mode" 2
+
+  local input
+  while true; do
+    read -r -p "输入 relay 公网 IPv4: " input
+    input="${input//[[:space:]]/}"
+    if is_valid_ipv4 "$input"; then
+      EFFECTIVE_RELAY_URL="$(relay_url_from_ip "$input")"
+      return 0
+    fi
+    log "输入无效，请输入可公网访问的 IPv4（例如 47.95.30.225）"
+  done
 }
 
 set_relay_config() {

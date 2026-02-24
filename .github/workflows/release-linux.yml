@@ -7,60 +7,20 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag, for example v0.3.3"
+        description: "Release tag, for example v0.4.0"
         required: true
         type: string
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
-  build-and-release:
+  resolve-tag:
     runs-on: ubuntu-latest
-    env:
-      RUSTFLAGS: "-D warnings"
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-musl
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install musl toolchain
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build release binaries (amd64)
-        run: |
-          cargo build --release --target x86_64-unknown-linux-musl -p yc-relay
-          cargo build --release --target x86_64-unknown-linux-musl -p yc-sidecar
-
-      - name: Package tarballs
-        run: |
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/yc-relay dist/yc-relay
-          cp target/x86_64-unknown-linux-musl/release/yc-sidecar dist/yc-sidecar
-          cp scripts/dist/relay-sidecar.sh dist/relay-sidecar.sh
-          cp scripts/dist/sidecar.sh dist/sidecar.sh
-          chmod +x dist/relay-sidecar.sh dist/sidecar.sh
-          tar -C dist -czf dist/yc-relay-linux-amd64.tar.gz yc-relay
-          tar -C dist -czf dist/yc-sidecar-linux-amd64.tar.gz yc-sidecar
-          (
-            cd dist
-            sha256sum \
-              relay-sidecar.sh \
-              sidecar.sh \
-              yc-relay-linux-amd64.tar.gz \
-              yc-sidecar-linux-amd64.tar.gz \
-              > checksums.txt
-          )
-
       - name: Resolve release tag
         id: tag
         run: |
@@ -70,11 +30,156 @@ jobs:
             echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
 
+  build-binaries:
+    needs: resolve-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            asset_suffix: linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            asset_suffix: linux-arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset_suffix: macos-arm64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            asset_suffix: macos-amd64
+    runs-on: ${{ matrix.os }}
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Zig
+        if: startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'x86_64-unknown-linux')
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        if: startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'x86_64-unknown-linux')
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Build relay+sidecar (linux via zigbuild)
+        if: startsWith(matrix.target, 'aarch64-unknown-linux') || startsWith(matrix.target, 'x86_64-unknown-linux')
+        run: |
+          cargo zigbuild --release --target "${{ matrix.target }}" -p yc-relay
+          cargo zigbuild --release --target "${{ matrix.target }}" -p yc-sidecar
+
+      - name: Build relay+sidecar (macOS)
+        if: startsWith(matrix.target, 'aarch64-apple') || startsWith(matrix.target, 'x86_64-apple')
+        run: |
+          cargo build --release --target "${{ matrix.target }}" -p yc-relay
+          cargo build --release --target "${{ matrix.target }}" -p yc-sidecar
+
+      - name: Package target tarballs
+        run: |
+          mkdir -p out
+          cp "target/${{ matrix.target }}/release/yc-relay" out/yc-relay
+          cp "target/${{ matrix.target }}/release/yc-sidecar" out/yc-sidecar
+          tar -C out -czf "out/yc-relay-${{ matrix.asset_suffix }}.tar.gz" yc-relay
+          tar -C out -czf "out/yc-sidecar-${{ matrix.asset_suffix }}.tar.gz" yc-sidecar
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.asset_suffix }}
+          path: |
+            out/yc-relay-${{ matrix.asset_suffix }}.tar.gz
+            out/yc-sidecar-${{ matrix.asset_suffix }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [resolve-tag, build-binaries]
+    runs-on: ubuntu-latest
+    env:
+      OSS_DOMAIN: ${{ vars.ALIYUN_OSS_DOMAIN || 'your-connector.oss-cn-beijing.aliyuncs.com' }}
+      OSS_PREFIX: ${{ vars.ALIYUN_OSS_PREFIX || 'releases' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Flatten artifact paths
+        run: |
+          mkdir -p payload
+          find dist -type f -name '*.tar.gz' -exec cp {} payload/ \;
+          ls -la payload
+
+      - name: Render install scripts (embed tag/base)
+        run: |
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}"
+          mkdir -p dist-release
+          sed \
+            -e "s|__YC_RELEASE_TAG__|${TAG}|g" \
+            -e "s|__YC_ASSET_BASE__|${BASE}|g" \
+            scripts/dist/yc-relay.sh > dist-release/yc-relay.sh
+          sed \
+            -e "s|__YC_RELEASE_TAG__|${TAG}|g" \
+            -e "s|__YC_ASSET_BASE__|${BASE}|g" \
+            scripts/dist/yc-sidecar.sh > dist-release/yc-sidecar.sh
+          chmod +x dist-release/yc-relay.sh dist-release/yc-sidecar.sh
+
+      - name: Build release manifest
+        run: |
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
+          BASE="https://${OSS_DOMAIN}/${OSS_PREFIX}/${TAG}"
+          cat > dist-release/release-manifest.json <<JSON
+          {
+            "tag": "${TAG}",
+            "ossBaseUrl": "${BASE}",
+            "installScripts": [
+              "yc-relay.sh",
+              "yc-sidecar.sh"
+            ],
+            "binaryFiles": [
+              "yc-relay-linux-amd64.tar.gz",
+              "yc-relay-linux-arm64.tar.gz",
+              "yc-relay-macos-amd64.tar.gz",
+              "yc-relay-macos-arm64.tar.gz",
+              "yc-sidecar-linux-amd64.tar.gz",
+              "yc-sidecar-linux-arm64.tar.gz",
+              "yc-sidecar-macos-amd64.tar.gz",
+              "yc-sidecar-macos-arm64.tar.gz",
+              "checksums.txt"
+            ]
+          }
+          JSON
+
+      - name: Create checksums
+        run: |
+          (
+            cd dist-release
+            sha256sum yc-relay.sh yc-sidecar.sh release-manifest.json > release-checksums.txt
+          )
+          (
+            cd payload
+            sha256sum *.tar.gz > checksums.txt
+          )
+
       - name: Generate release notes from commits
         run: |
-          TAG="${{ steps.tag.outputs.value }}"
-          mkdir -p dist
-
+          TAG="${{ needs.resolve-tag.outputs.tag }}"
           PREV_TAG="$(git tag --sort=-v:refname | awk -v t="${TAG}" '$0 != t { print; exit }')"
           if [[ -n "${PREV_TAG}" ]]; then
             RANGE="${PREV_TAG}..${TAG}"
@@ -83,25 +188,38 @@ jobs:
             RANGE="${TAG}"
             CHANGELOG_URL="https://github.com/${GITHUB_REPOSITORY}/commits/${TAG}"
           fi
-
           {
             echo "## 版本说明（${TAG}）"
             echo
             echo "### 代码提交"
             git log --no-merges --pretty='- %s (%h)' "${RANGE}" || echo "- 无提交记录"
             echo
+            echo "### 安装入口"
+            echo "- yc-relay.sh"
+            echo "- yc-sidecar.sh"
+            echo
             echo "### 完整变更"
             echo "Full Changelog: ${CHANGELOG_URL}"
-          } > dist/release-notes.md
+          } > dist-release/release-notes.md
 
-      - name: Create/Update GitHub Release
+      - name: Create/Update GitHub Release (scripts + manifest only)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.value }}
-          body_path: dist/release-notes.md
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          body_path: dist-release/release-notes.md
           files: |
-            dist/relay-sidecar.sh
-            dist/sidecar.sh
-            dist/yc-relay-linux-amd64.tar.gz
-            dist/yc-sidecar-linux-amd64.tar.gz
-            dist/checksums.txt
+            dist-release/yc-relay.sh
+            dist-release/yc-sidecar.sh
+            dist-release/release-manifest.json
+            dist-release/release-checksums.txt
+
+      - name: Upload OSS payload artifact for follow-up workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: oss-payload
+          path: |
+            payload/*
+            dist-release/release-manifest.json
+            dist-release/yc-relay.sh
+            dist-release/yc-sidecar.sh
+          if-no-files-found: error
