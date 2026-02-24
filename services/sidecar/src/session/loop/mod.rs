@@ -71,6 +71,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
 
     match fetch_pair_bootstrap(
         &cfg.relay_ws_url,
+        None,
         &cfg.system_id,
         &cfg.pair_token,
         &cfg.host_name,

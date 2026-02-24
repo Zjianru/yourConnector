@@ -11,7 +11,8 @@ struct PairBootstrapRequest {
     system_id: String,
     pair_token: String,
     host_name: String,
-    relay_ws_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relay_ws_url: Option<String>,
     include_code: bool,
 }
 
@@ -65,6 +66,7 @@ fn relay_api_base(relay_ws_url: &str) -> anyhow::Result<Url> {
 /// 请求 relay 签发配对信息。
 pub(crate) async fn fetch_pair_bootstrap(
     relay_ws_url: &str,
+    relay_ws_url_for_link: Option<&str>,
     system_id: &str,
     pair_token: &str,
     host_name: &str,
@@ -79,7 +81,7 @@ pub(crate) async fn fetch_pair_bootstrap(
         system_id: system_id.to_string(),
         pair_token: pair_token.to_string(),
         host_name: host_name.to_string(),
-        relay_ws_url: relay_ws_url.to_string(),
+        relay_ws_url: relay_ws_url_for_link.map(ToString::to_string),
         include_code: true,
     };
 

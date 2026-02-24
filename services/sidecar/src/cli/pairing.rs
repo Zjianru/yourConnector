@@ -57,9 +57,11 @@ pub(crate) async fn execute_show(command: PairingShowCommand) -> anyhow::Result<
     } else {
         cfg.relay_ws_url.clone()
     };
+    let relay_ws_url_for_link = command.relay_override.as_ref().map(|_| relay_ws_url.as_str());
 
     let data = fetch_pair_bootstrap(
         &relay_ws_url,
+        relay_ws_url_for_link,
         &cfg.system_id,
         &cfg.pair_token,
         &cfg.host_name,
