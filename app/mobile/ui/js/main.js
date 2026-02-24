@@ -222,6 +222,7 @@ hostManageFlowRef = createHostManageFlow({
   connectHost: connectionFlow.connectHost,
   reconnectHost: connectionFlow.reconnectHost,
   disconnectHost: connectionFlow.disconnectHost,
+  sendSocketEvent: connectionFlow.sendSocketEvent,
   openPairFlow: openPairFlowGuard,
   render,
 });

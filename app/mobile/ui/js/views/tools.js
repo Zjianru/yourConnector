@@ -6,7 +6,7 @@
 import { fmt2 } from "../utils/format.js";
 import { asMap, asBool } from "../utils/type.js";
 import { escapeHtml } from "../utils/dom.js";
-import { localizedCategory } from "../utils/host-format.js";
+import { localizedCategory, relayGatewayHint } from "../utils/host-format.js";
 
 /**
  * 创建工具分组视图能力（含左滑操作区管理）。
@@ -392,6 +392,22 @@ export function createToolsView(deps) {
             <div class="tool-logo openclaw">CL</div>
             <div class="tool-name">${escapeHtml(displayName)}</div>
             <span class="chip">${escapeHtml(mode.toUpperCase())}</span>
+            <div class="tool-quick-actions">
+              <button
+                type="button"
+                class="tool-quick-btn restart"
+                data-tool-process-restart="${escapeHtml(`${hostId}::${toolId}`)}"
+              >
+                重启
+              </button>
+              <button
+                type="button"
+                class="tool-quick-btn stop"
+                data-tool-process-stop="${escapeHtml(`${hostId}::${toolId}`)}"
+              >
+                停止
+              </button>
+            </div>
           </div>
           <div class="chip-wrap">
             <span class="chip">${escapeHtml(String(metric.status ?? tool.status ?? "UNKNOWN"))}</span>
@@ -516,6 +532,7 @@ export function createToolsView(deps) {
           <div class="host-group-title">${escapeHtml(host.displayName)}</div>
           <span class="host-status-chip">${escapeHtml(status)}</span>
         </div>
+        <div class="host-group-relay">${escapeHtml(relayGatewayHint(host.relayUrl))}</div>
         <div class="host-group-actions" style="grid-template-columns: 1fr">
           <button
             class="btn btn-outline btn-sm"

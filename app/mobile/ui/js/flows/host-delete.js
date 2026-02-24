@@ -12,6 +12,8 @@ import { createHostDeleteRemote } from "./host-delete-remote.js";
 /** 创建宿主机删除补偿流程。 */
 export function createHostDeleteFlow({
   hostById,
+  ensureRuntime,
+  sendSocketEvent,
   disposeRuntime,
   clearToolMetaForHost,
   recomputeSelections,
@@ -30,12 +32,49 @@ export function createHostDeleteFlow({
   });
 
   /**
+   * 删除宿主机前，尽量让 sidecar 清空工具白名单，避免重配后“历史已接入工具自动回流”。
+   * @param {string} hostId 宿主机标识。
+   * @param {object} host 宿主机配置。
+   */
+  async function resetToolWhitelistBeforeDelete(hostId, host) {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime || !runtime.connected) {
+      addLog(`删除前跳过白名单清理（宿主机未连接）: ${host.displayName}`);
+      return;
+    }
+
+    const toolIds = Array.isArray(runtime.tools)
+      ? runtime.tools
+          .map((item) => String(item?.toolId || "").trim())
+          .filter((id) => id.length > 0)
+      : [];
+
+    for (const toolId of toolIds) {
+      sendSocketEvent(hostId, "tool_disconnect_request", { toolId }, {
+        action: "disconnect_tool_on_host_delete",
+        toolId,
+      });
+    }
+
+    const sent = sendSocketEvent(hostId, "tool_whitelist_reset_request", {}, {
+      action: "reset_tool_whitelist_on_host_delete",
+    });
+    if (sent) {
+      addLog(`删除前已请求清空工具白名单: ${host.displayName} (${toolIds.length} tools)`);
+    } else {
+      addLog(`删除前清空白名单请求发送失败: ${host.displayName}`);
+    }
+  }
+
+  /**
    * 发起删除：先隐藏宿主机，再进入补偿队列。
    * @param {string} hostId 宿主机标识。
    */
   async function deleteHostWithCompensation(hostId) {
     const host = hostById(hostId);
     if (!host) return;
+
+    await resetToolWhitelistBeforeDelete(hostId, host);
 
     let expectedCredentialId = "";
     let expectedKeyId = "";

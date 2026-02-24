@@ -6,7 +6,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -87,8 +87,15 @@ pub(crate) fn discover(context: &ToolDiscoveryContext<'_>) -> Vec<ToolRuntimePay
     pids.sort_unstable();
     pids.dedup();
 
+    // `openclaw` 常作为父进程拉起 `openclaw-gateway`；
+    // 当父子同时存在时，只保留 gateway，避免候选列表重复与闪烁。
+    let shadowed_cli_pids = find_gateway_shadowed_cli_pids(&pids, context);
+
     let mut tools = Vec::with_capacity(pids.len());
     for pid in pids {
+        if shadowed_cli_pids.contains(&pid) {
+            continue;
+        }
         let Some(info) = context.all.get(&pid) else {
             continue;
         };
@@ -132,6 +139,47 @@ pub(crate) fn discover(context: &ToolDiscoveryContext<'_>) -> Vec<ToolRuntimePay
     }
 
     tools
+}
+
+/// 在候选进程集合中找出应被 gateway 子进程覆盖的 openclaw 父进程。
+fn find_gateway_shadowed_cli_pids(
+    candidate_pids: &[i32],
+    context: &ToolDiscoveryContext<'_>,
+) -> HashSet<i32> {
+    let mut shadowed = HashSet::new();
+    for pid in candidate_pids {
+        let Some(parent_info) = context.all.get(pid) else {
+            continue;
+        };
+        let parent_cmd_lower = parent_info.cmd.to_lowercase();
+        if !crate::is_openclaw_candidate_command(&parent_cmd_lower)
+            || is_openclaw_gateway_process(&parent_cmd_lower)
+        {
+            continue;
+        }
+        let has_gateway_child = context
+            .children_by_ppid
+            .get(pid)
+            .map(|children| {
+                children.iter().any(|child_pid| {
+                    context
+                        .all
+                        .get(child_pid)
+                        .map(|child| is_openclaw_gateway_process(&child.cmd.to_lowercase()))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if has_gateway_child {
+            shadowed.insert(*pid);
+        }
+    }
+    shadowed
+}
+
+/// 判断进程命令是否为 openclaw gateway。
+fn is_openclaw_gateway_process(cmd_lower: &str) -> bool {
+    cmd_lower.contains("openclaw-gateway")
 }
 
 /// 判断指定工具是否归属于 OpenClaw 适配器。
@@ -2540,12 +2588,13 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        attach_agent_context_metrics, build_model_lookup, build_sessions_payload,
+        attach_agent_context_metrics, build_model_lookup, build_sessions_payload, discover,
         parse_auth_user_by_provider, parse_channel_identities, parse_profile_key_from_cmd,
         parse_status_default_agent_id, parse_status_recent_sessions, parse_usage_windows,
         resolve_profile_state_dir, select_agents_by_workspace, select_sessions_by_agents,
         to_percent,
     };
+    use crate::{ProcInfo, tooling::core::types::ToolDiscoveryContext};
 
     #[test]
     fn parse_profile_key_supports_dev_profile_and_default() {
@@ -2710,5 +2759,66 @@ mod tests {
         assert_eq!(to_percent(0, 0), 0);
         assert_eq!(to_percent(5, 0), 0);
         assert_eq!(to_percent(1, 4), 25);
+    }
+
+    #[test]
+    fn discover_prefers_gateway_child_over_parent_openclaw() {
+        let mut all = HashMap::new();
+        all.insert(
+            57565,
+            ProcInfo {
+                pid: 57565,
+                cmd: "openclaw".to_string(),
+                cwd: "/workspace/demo".to_string(),
+                cpu_percent: 0.1,
+                memory_mb: 10.0,
+            },
+        );
+        all.insert(
+            57567,
+            ProcInfo {
+                pid: 57567,
+                cmd: "openclaw-gateway --port 18789".to_string(),
+                cwd: "/workspace/demo".to_string(),
+                cpu_percent: 0.2,
+                memory_mb: 11.0,
+            },
+        );
+        let mut children_by_ppid = HashMap::new();
+        children_by_ppid.insert(57565, vec![57567]);
+        let context = ToolDiscoveryContext {
+            all: &all,
+            children_by_ppid: &children_by_ppid,
+        };
+
+        let discovered = discover(&context);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].pid, Some(57567));
+        assert!(discovered[0].tool_id.ends_with("_gw"));
+    }
+
+    #[test]
+    fn discover_keeps_openclaw_when_gateway_child_missing() {
+        let mut all = HashMap::new();
+        all.insert(
+            57565,
+            ProcInfo {
+                pid: 57565,
+                cmd: "openclaw --profile team".to_string(),
+                cwd: "/workspace/demo".to_string(),
+                cpu_percent: 0.1,
+                memory_mb: 10.0,
+            },
+        );
+        let children_by_ppid = HashMap::new();
+        let context = ToolDiscoveryContext {
+            all: &all,
+            children_by_ppid: &children_by_ppid,
+        };
+
+        let discovered = discover(&context);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].pid, Some(57565));
+        assert!(!discovered[0].tool_id.ends_with("_gw"));
     }
 }

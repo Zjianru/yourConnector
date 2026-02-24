@@ -58,3 +58,39 @@ export function localizedCategory(rawValue) {
   }
   return raw || "--";
 }
+
+/**
+ * 从 Relay WS URL 提取网关展示名（优先主机名/IP，必要时带端口）。
+ * @param {unknown} relayUrl Relay WS URL。
+ * @returns {string}
+ */
+export function relayGatewayName(relayUrl) {
+  const raw = String(relayUrl || "").trim();
+  if (!raw) {
+    return "Relay";
+  }
+  try {
+    const url = new URL(raw);
+    const host = String(url.hostname || "").trim().toLowerCase();
+    const protocol = String(url.protocol || "").toLowerCase();
+    const port = String(url.port || "").trim();
+    const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+    const hostLabel = isLoopback ? "本机" : (host || "Relay");
+    const defaultPort = protocol === "wss:" ? "443" : "80";
+    if (!port || port === defaultPort || hostLabel === "本机") {
+      return hostLabel;
+    }
+    return `${hostLabel}:${port}`;
+  } catch (_) {
+    return raw;
+  }
+}
+
+/**
+ * Relay 网关提示文案。
+ * @param {unknown} relayUrl Relay WS URL。
+ * @returns {string}
+ */
+export function relayGatewayHint(relayUrl) {
+  return `通过 ${relayGatewayName(relayUrl)} 的 Relay 网关连接`;
+}

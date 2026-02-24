@@ -43,6 +43,10 @@ export function createRuntimeState({ persistConfig }) {
     if (!runtime) {
       return;
     }
+    if (runtime.candidateRefreshTimer) {
+      clearTimeout(runtime.candidateRefreshTimer);
+      runtime.candidateRefreshTimer = null;
+    }
     runtime.connectionEpoch += 1;
     clearReconnectTimer(runtime);
     if (runtime.socket) {

@@ -278,13 +278,22 @@ fn collect_process_snapshot(sys: &mut System) -> (HashMap<i32, ProcInfo>, HashMa
             .parent()
             .map(|parent| parent.as_u32() as i32)
             .unwrap_or(0);
-        let cmd = process
-            .cmd()
-            .iter()
-            .map(|item| item.to_string_lossy().to_string())
-            .collect::<Vec<String>>()
-            .join(" ");
-        if cmd.is_empty() {
+        let cmd = {
+            let joined = process
+                .cmd()
+                .iter()
+                .map(|item| item.to_string_lossy().to_string())
+                .collect::<Vec<String>>()
+                .join(" ");
+            if joined.trim().is_empty() {
+                // macOS 某些 launchd 托管进程可能拿不到完整 cmdline，
+                // 回退到进程名，避免工具发现“偶发空白”。
+                process.name().to_string_lossy().to_string()
+            } else {
+                joined
+            }
+        };
+        if cmd.trim().is_empty() {
             continue;
         }
         let cwd = process

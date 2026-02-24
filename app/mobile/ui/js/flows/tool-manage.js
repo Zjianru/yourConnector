@@ -32,9 +32,65 @@ export function createToolManageFlow({
   openHostManageModal,
   render,
 }) {
+  function isOpenClawTool(tool) {
+    const toolId = String(tool?.toolId || "").toLowerCase();
+    const name = String(tool?.name || "").toLowerCase();
+    const vendor = String(tool?.vendor || "").toLowerCase();
+    return toolId.startsWith("openclaw_") || name.includes("openclaw") || vendor.includes("openclaw");
+  }
+
   function shouldAutoRebindByReason(reason) {
     const text = String(reason || "");
     return /未绑定控制设备|未被授权|未授权控制|控制设备|控制端|未授权/.test(text);
+  }
+
+  function requestOpenClawProcessControl(hostId, toolId, action) {
+    const host = hostById(hostId);
+    const runtime = ensureRuntime(hostId);
+    const normalizedToolId = String(toolId || "").trim();
+    const normalizedAction = String(action || "").trim().toLowerCase();
+    if (!host || !runtime || !normalizedToolId) return;
+    if (!runtime.connected) {
+      openHostNoticeModal("当前宿主机未连接", "请先连接宿主机后再执行启停操作。");
+      return;
+    }
+
+    const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === normalizedToolId);
+    if (!connectedTool || !isOpenClawTool(connectedTool)) {
+      openHostNoticeModal("操作失败", "当前仅支持对已接入的 OpenClaw 执行一键停止/重启。");
+      return;
+    }
+
+    const traceId = createTraceId();
+    const sent = sendSocketEvent(
+      hostId,
+      "tool_process_control_request",
+      {
+        toolId: normalizedToolId,
+        action: normalizedAction,
+      },
+      {
+        action: normalizedAction === "restart" ? "restart_tool_process" : "stop_tool_process",
+        traceId,
+        toolId: normalizedToolId,
+      },
+    );
+    if (!sent) {
+      openHostNoticeModal("发送失败", "无法发送工具进程控制命令，请检查宿主机连接状态。");
+      return;
+    }
+
+    const actionLabel = normalizedAction === "restart" ? "重启" : "停止";
+    addLog(`已发送 OpenClaw ${actionLabel}请求 (${host.displayName}): ${normalizedToolId}`, {
+      scope: "tool_process",
+      action: normalizedAction === "restart" ? "restart_tool_process" : "stop_tool_process",
+      outcome: "started",
+      traceId,
+      hostId,
+      hostName: host.displayName,
+      toolId: normalizedToolId,
+    });
+    openHostNoticeModal("已发出命令", `已请求${actionLabel}工具进程，完成后会自动刷新状态。`);
   }
 
   function connectCandidateTool(hostId, toolId) {
@@ -183,11 +239,29 @@ export function createToolManageFlow({
     if (swipeContainer) {
       const swipeKey = String(swipeContainer.getAttribute("data-tool-swipe-key") || "").trim();
       const activeSwipeKey = String(state.activeToolSwipeKey || "").trim();
-      const isActionClick = Boolean(event.target.closest("[data-tool-edit], [data-tool-delete]"));
+      const isActionClick = Boolean(
+        event.target.closest(
+          "[data-tool-edit], [data-tool-delete], [data-tool-process-stop], [data-tool-process-restart]",
+        ),
+      );
       // 左滑操作区展开时，优先保证操作按钮可点；阻止误触详情弹窗。
       if (!isActionClick && activeSwipeKey && swipeKey === activeSwipeKey) {
         return;
       }
+    }
+
+    const restartBtn = event.target.closest("[data-tool-process-restart]");
+    if (restartBtn) {
+      const [hostId, toolId] = String(restartBtn.getAttribute("data-tool-process-restart") || "").split("::");
+      if (hostId && toolId) requestOpenClawProcessControl(hostId, toolId, "restart");
+      return;
+    }
+
+    const stopBtn = event.target.closest("[data-tool-process-stop]");
+    if (stopBtn) {
+      const [hostId, toolId] = String(stopBtn.getAttribute("data-tool-process-stop") || "").split("::");
+      if (hostId && toolId) requestOpenClawProcessControl(hostId, toolId, "stop");
+      return;
     }
 
     const connectBtn = event.target.closest("[data-host-connect]");

@@ -11,10 +11,16 @@ pub(crate) const TOOL_CONNECT_REQUEST_EVENT: &str = "tool_connect_request";
 pub(crate) const TOOL_DISCONNECT_REQUEST_EVENT: &str = "tool_disconnect_request";
 /// 请求 sidecar 立即刷新工具快照。
 pub(crate) const TOOLS_REFRESH_REQUEST_EVENT: &str = "tools_refresh_request";
+/// 请求 sidecar 清空工具白名单（删除宿主机时使用）。
+pub(crate) const TOOL_WHITELIST_RESET_REQUEST_EVENT: &str = "tool_whitelist_reset_request";
 /// 请求 sidecar 立即刷新工具详情（支持指定 toolId）。
 pub(crate) const TOOL_DETAILS_REFRESH_REQUEST_EVENT: &str = "tool_details_refresh_request";
 /// sidecar 返回工具白名单更新结果。
 pub(crate) const TOOL_WHITELIST_UPDATED_EVENT: &str = "tool_whitelist_updated";
+/// 请求 sidecar 控制工具进程（停止/重启）。
+pub(crate) const TOOL_PROCESS_CONTROL_REQUEST_EVENT: &str = "tool_process_control_request";
+/// sidecar 返回工具进程控制结果。
+pub(crate) const TOOL_PROCESS_CONTROL_UPDATED_EVENT: &str = "tool_process_control_updated";
 /// 请求把当前（或指定）设备重绑为控制端。
 pub(crate) const CONTROLLER_REBIND_REQUEST_EVENT: &str = "controller_rebind_request";
 /// sidecar 返回控制端绑定更新结果。
@@ -42,13 +48,39 @@ pub(crate) enum SidecarCommand {
     ConnectTool { tool_id: String },
     /// 将工具移出白名单并回到 Candidates 列表。
     DisconnectTool { tool_id: String },
+    /// 清空全部工具白名单，断开全部已接入工具。
+    ResetToolWhitelist,
     /// 刷新工具详情（可指定单工具）。
     RefreshToolDetails {
         tool_id: Option<String>,
         force: bool,
     },
+    /// 控制工具进程：当前仅支持 OpenClaw 的停止/重启。
+    ControlToolProcess {
+        tool_id: String,
+        action: ToolProcessAction,
+    },
     /// 将控制端设备重绑为指定 deviceId。
     RebindController { device_id: String },
+}
+
+/// 工具进程控制动作枚举。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolProcessAction {
+    /// 停止目标进程。
+    Stop,
+    /// 重启目标进程。
+    Restart,
+}
+
+impl ToolProcessAction {
+    /// 把动作枚举转成协议字符串。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Restart => "restart",
+        }
+    }
 }
 
 /// 命令与来源信息封装，用于权限判断与审计日志。
@@ -125,6 +157,7 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
             .map(|tool_id| SidecarCommand::DisconnectTool {
                 tool_id: tool_id.to_string(),
             }),
+        TOOL_WHITELIST_RESET_REQUEST_EVENT => Some(SidecarCommand::ResetToolWhitelist),
         TOOL_DETAILS_REFRESH_REQUEST_EVENT => {
             let tool_id = payload
                 .get("toolId")
@@ -137,6 +170,25 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             Some(SidecarCommand::RefreshToolDetails { tool_id, force })
+        }
+        TOOL_PROCESS_CONTROL_REQUEST_EVENT => {
+            let tool_id = payload
+                .get("toolId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let action = payload
+                .get("action")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(|value| value.to_ascii_lowercase())
+                .and_then(|value| match value.as_str() {
+                    "stop" => Some(ToolProcessAction::Stop),
+                    "restart" => Some(ToolProcessAction::Restart),
+                    _ => None,
+                })?;
+            Some(SidecarCommand::ControlToolProcess { tool_id, action })
         }
         CONTROLLER_REBIND_REQUEST_EVENT => payload
             .get("deviceId")
@@ -172,8 +224,12 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
         SidecarCommand::Refresh => ("refresh", String::new()),
         SidecarCommand::ConnectTool { tool_id } => ("connect", tool_id.clone()),
         SidecarCommand::DisconnectTool { tool_id } => ("disconnect", tool_id.clone()),
+        SidecarCommand::ResetToolWhitelist => ("reset", String::new()),
         SidecarCommand::RefreshToolDetails { tool_id, .. } => {
             ("refresh-details", tool_id.clone().unwrap_or_default())
+        }
+        SidecarCommand::ControlToolProcess { tool_id, action } => {
+            (action.as_str(), tool_id.clone())
         }
         SidecarCommand::RebindController { device_id } => {
             ("rebind-controller", device_id.to_string())
@@ -181,9 +237,17 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
     }
 }
 
+/// 根据命令类型返回回执事件名。
+pub(crate) fn command_feedback_event(command: &SidecarCommand) -> &'static str {
+    match command {
+        SidecarCommand::ControlToolProcess { .. } => TOOL_PROCESS_CONTROL_UPDATED_EVENT,
+        _ => TOOL_WHITELIST_UPDATED_EVENT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SidecarCommand, parse_sidecar_command};
+    use super::{SidecarCommand, ToolProcessAction, parse_sidecar_command};
 
     #[test]
     fn parse_rebind_command_prefers_payload_device_id() {
@@ -236,6 +300,41 @@ mod tests {
                 assert_eq!(tool_id.unwrap_or_default(), "openclaw_xxx");
                 assert!(force);
             }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_process_control_command_restart() {
+        let raw = r#"{
+            "type":"tool_process_control_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{"toolId":"openclaw_xxx","action":"restart"}
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ControlToolProcess { tool_id, action } => {
+                assert_eq!(tool_id, "openclaw_xxx");
+                assert_eq!(action, ToolProcessAction::Restart);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_whitelist_reset_command() {
+        let raw = r#"{
+            "type":"tool_whitelist_reset_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{}
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ResetToolWhitelist => {}
             _ => panic!("unexpected command"),
         }
     }

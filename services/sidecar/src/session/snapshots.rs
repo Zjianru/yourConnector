@@ -3,6 +3,7 @@
 use anyhow::Result;
 use futures_util::Sink;
 use serde_json::json;
+use std::collections::HashSet;
 use sysinfo::{Disks, ProcessesToUpdate, System};
 use tokio_tungstenite::tungstenite::Message;
 use yc_shared_protocol::{
@@ -107,16 +108,74 @@ fn split_discovered_tools(
 ) -> (Vec<ToolRuntimePayload>, Vec<ToolRuntimePayload>) {
     let mut connected = Vec::new();
     let mut candidates = Vec::new();
+    let mut connected_identity_keys = HashSet::new();
 
     for tool in discovered_tools.iter().cloned() {
-        if whitelist.contains(&tool.tool_id) {
+        if whitelist.contains_compatible(&tool.tool_id) {
+            connected_identity_keys.insert(tool_identity_key(&tool.tool_id));
             connected.push(tool);
         } else {
             candidates.push(tool);
         }
     }
 
+    // 已接入工具即使当前进程暂时不可见，也应继续展示在 connected 列表。
+    for tool_id in whitelist.list_ids() {
+        let identity_key = tool_identity_key(&tool_id);
+        if connected_identity_keys.contains(&identity_key) {
+            continue;
+        }
+        connected.push(build_whitelist_placeholder_tool(&tool_id));
+        connected_identity_keys.insert(identity_key);
+    }
+
     (connected, candidates)
+}
+
+/// 生成白名单离线占位工具，保证“仅左滑删除才从 connected 消失”。
+fn build_whitelist_placeholder_tool(tool_id: &str) -> ToolRuntimePayload {
+    let (name, vendor, category, mode) = if tool_id.starts_with("openclaw_") {
+        ("OpenClaw", "OpenClaw", "CLI", "CLI")
+    } else if tool_id.starts_with("opencode_") {
+        ("OpenCode", "OpenCode", "TUI", "TUI")
+    } else {
+        ("Connected Tool", "Unknown", "UNKNOWN", "-")
+    };
+
+    ToolRuntimePayload {
+        tool_id: tool_id.to_string(),
+        name: name.to_string(),
+        category: category.to_string(),
+        vendor: vendor.to_string(),
+        mode: mode.to_string(),
+        status: "OFFLINE".to_string(),
+        connected: true,
+        reason: Some("已接入，当前进程未运行。重新启动后会自动恢复。".to_string()),
+        source: Some("whitelist-placeholder".to_string()),
+        collected_at: Some(now_rfc3339_nanos()),
+        ..ToolRuntimePayload::default()
+    }
+}
+
+/// 生成白名单匹配身份键，用于兼容 OpenClaw gateway 旧/新 toolId 形态。
+fn tool_identity_key(tool_id: &str) -> String {
+    let Some(rest) = tool_id.strip_prefix("openclaw_") else {
+        return tool_id.to_string();
+    };
+
+    if let Some(hash) = rest.strip_suffix("_gw") {
+        return format!("openclaw::{hash}");
+    }
+
+    if let Some((hash, pid_text)) = rest.rsplit_once("_p")
+        && !hash.trim().is_empty()
+        && !pid_text.trim().is_empty()
+        && pid_text.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return format!("openclaw::{hash}");
+    }
+
+    tool_id.to_string()
 }
 
 /// 判定是否为 fallback 占位工具（不可接入）。
@@ -242,5 +301,49 @@ fn collect_metrics_snapshot(
                 tool
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_discovered_tools;
+    use crate::stores::ToolWhitelistStore;
+    use yc_shared_protocol::ToolRuntimePayload;
+
+    fn make_tool(tool_id: &str) -> ToolRuntimePayload {
+        ToolRuntimePayload {
+            tool_id: tool_id.to_string(),
+            name: "OpenClaw".to_string(),
+            category: "CLI".to_string(),
+            vendor: "OpenClaw".to_string(),
+            mode: "CLI".to_string(),
+            status: "RUNNING".to_string(),
+            connected: true,
+            ..ToolRuntimePayload::default()
+        }
+    }
+
+    #[test]
+    fn whitelisted_tool_without_running_process_should_remain_connected() {
+        let whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_gw"]);
+        let discovered = Vec::<ToolRuntimePayload>::new();
+
+        let (connected, candidates) = split_discovered_tools(&discovered, &whitelist);
+        assert_eq!(candidates.len(), 0);
+        assert_eq!(connected.len(), 1);
+        assert_eq!(connected[0].tool_id, "openclaw_abcd1234ef56_gw");
+        assert_eq!(connected[0].status, "OFFLINE");
+        assert!(connected[0].connected);
+    }
+
+    #[test]
+    fn openclaw_gateway_legacy_and_stable_ids_should_not_duplicate() {
+        let whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_p1024"]);
+        let discovered = vec![make_tool("openclaw_abcd1234ef56_gw")];
+
+        let (connected, candidates) = split_discovered_tools(&discovered, &whitelist);
+        assert_eq!(candidates.len(), 0);
+        assert_eq!(connected.len(), 1);
+        assert_eq!(connected[0].tool_id, "openclaw_abcd1234ef56_gw");
     }
 }

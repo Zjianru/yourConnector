@@ -73,11 +73,26 @@ export function createConnectionEvents({
 
       if (type === "tools_candidates") {
         runtime.candidateTools = sanitizeTools(hostId, asListOfMap(payload.tools), true);
+        runtime.candidateSnapshotVersion = Number(runtime.candidateSnapshotVersion || 0) + 1;
+        if (runtime.candidateRefreshTimer) {
+          clearTimeout(runtime.candidateRefreshTimer);
+          runtime.candidateRefreshTimer = null;
+        }
+        const expectedVersion = Number(runtime.candidateExpectedVersion || 0);
+        if (runtime.candidateRefreshPending && (!expectedVersion || runtime.candidateSnapshotVersion >= expectedVersion)) {
+          runtime.candidateRefreshPending = false;
+          runtime.candidateExpectedVersion = 0;
+        }
         return;
       }
 
       if (type === "tool_whitelist_updated") {
         handleToolWhitelistUpdated(hostId, payload, { traceId, eventId, eventType: type });
+        return;
+      }
+
+      if (type === "tool_process_control_updated") {
+        handleToolProcessControlUpdated(hostId, payload, { traceId, eventId, eventType: type });
         return;
       }
 
@@ -108,8 +123,15 @@ export function createConnectionEvents({
     const toolId = String(payload.toolId || "");
     const ok = asBool(payload.ok);
     const reason = String(payload.reason || "");
-    const action = String(payload.action || "connect");
+    const rawAction = String(payload.action || "connect");
+    const action = ["connect", "disconnect", "refresh", "reset"].includes(rawAction)
+      ? rawAction
+      : "connect";
     const host = hostById(hostId);
+    const isConnect = action === "connect";
+    const isDisconnect = action === "disconnect";
+    const isRefresh = action === "refresh";
+    const isReset = action === "reset";
 
     const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
     const candidateTool = runtime.candidateTools.find((item) => String(item.toolId || "") === toolId);
@@ -118,7 +140,7 @@ export function createConnectionEvents({
       connectedTool || candidateTool || { name: toolId, toolId },
     );
 
-    if (action === "connect" && toolId) {
+    if (isConnect && toolId) {
       const pendingTraceId = String(runtime.toolConnectTraceIds[toolId] || "");
       const incomingTraceId = String(eventMeta.traceId || "");
       if (pendingTraceId && incomingTraceId && pendingTraceId !== incomingTraceId) {
@@ -145,22 +167,77 @@ export function createConnectionEvents({
     if (toolId) {
       delete runtime.connectingToolIds[toolId];
       clearToolConnectTimer(runtime, toolId);
-      if (action === "connect") {
+      if (isConnect) {
         delete runtime.toolConnectTraceIds[toolId];
       }
     }
 
     if (!ok) {
-      if (action === "disconnect" && toolId) {
+      if (isDisconnect && toolId) {
         setToolHidden(hostId, toolId, false);
       }
-      const actionLabel = action === "disconnect" ? "断开" : "接入";
+
+      if (isRefresh) {
+        addLog(
+          `工具列表刷新失败 (${host ? host.displayName : hostId}): ${reason || "--"}`,
+          {
+            level: "warn",
+            scope: "tool_whitelist",
+            action: "refresh_tools",
+            outcome: "failed",
+            traceId: String(eventMeta.traceId || ""),
+            eventId: String(eventMeta.eventId || ""),
+            eventType: String(eventMeta.eventType || ""),
+            hostId,
+            hostName: host ? host.displayName : "",
+            detail: reason,
+          },
+        );
+        if (shouldAutoRebindByReason(reason)) {
+          requestControllerRebind(hostId);
+          requestToolsRefresh(hostId);
+          openHostNoticeModal(
+            "当前设备未授权",
+            "已自动尝试重绑控制端并刷新工具列表；如仍失败，请在调试入口手动绑定当前设备。",
+          );
+        } else {
+          openHostNoticeModal(
+            "工具列表刷新失败",
+            reason || "请检查宿主机连接状态后重试。",
+          );
+        }
+        renderAddToolModal();
+        return;
+      }
+
+      if (isReset) {
+        addLog(
+          `工具白名单清理失败 (${host ? host.displayName : hostId}): ${reason || "--"}`,
+          {
+            level: "warn",
+            scope: "tool_whitelist",
+            action: "reset_tool_whitelist",
+            outcome: "failed",
+            traceId: String(eventMeta.traceId || ""),
+            eventId: String(eventMeta.eventId || ""),
+            eventType: String(eventMeta.eventType || ""),
+            hostId,
+            hostName: host ? host.displayName : "",
+            detail: reason,
+          },
+        );
+        openHostNoticeModal("清理已接入工具失败", reason || "请稍后重试。");
+        renderAddToolModal();
+        return;
+      }
+
+      const actionLabel = isDisconnect ? "断开" : "接入";
       addLog(
         `${actionLabel}工具失败 (${host ? host.displayName : hostId}): ${toolId || "--"} ${reason}`,
         {
           level: "warn",
           scope: "tool_whitelist",
-          action: action === "disconnect" ? "disconnect_tool" : "connect_tool",
+          action: isDisconnect ? "disconnect_tool" : "connect_tool",
           outcome: "failed",
           traceId: String(eventMeta.traceId || ""),
           eventId: String(eventMeta.eventId || ""),
@@ -218,25 +295,37 @@ export function createConnectionEvents({
           delete runtime.toolConnectRetryCount[toolId];
         }
         openHostNoticeModal(
-          action === "disconnect" ? "工具断开失败" : "工具接入失败",
+          isDisconnect ? "工具断开失败" : "工具接入失败",
           reason || `工具“${toolName}”未接入成功，请检查宿主机连接状态后重试。`,
         );
       }
+    } else if (isReset) {
+      addLog(`工具白名单已清空 (${host ? host.displayName : hostId})`, {
+        scope: "tool_whitelist",
+        action: "reset_tool_whitelist",
+        outcome: "success",
+        traceId: String(eventMeta.traceId || ""),
+        eventId: String(eventMeta.eventId || ""),
+        eventType: String(eventMeta.eventType || ""),
+        hostId,
+        hostName: host ? host.displayName : "",
+      });
+      requestToolsRefresh(hostId);
     } else if (toolId) {
       delete runtime.toolConnectRetryCount[toolId];
-      if (action === "connect") {
+      if (isConnect) {
         setToolHidden(hostId, toolId, false);
         openHostNoticeModal("添加成功", `工具“${toolName}”已接入。`, {
           keepAddToolOpen: true,
         });
-      } else if (action === "disconnect") {
+      } else if (isDisconnect) {
         openHostNoticeModal("断开成功", `工具“${toolName}”已断开。`);
       }
       addLog(
-        `工具${action === "disconnect" ? "断开" : "接入"}已生效 (${host ? host.displayName : hostId}): ${toolId}`,
+        `工具${isDisconnect ? "断开" : "接入"}已生效 (${host ? host.displayName : hostId}): ${toolId}`,
         {
           scope: "tool_whitelist",
-          action: action === "disconnect" ? "disconnect_tool" : "connect_tool",
+          action: isDisconnect ? "disconnect_tool" : "connect_tool",
           outcome: "success",
           traceId: String(eventMeta.traceId || ""),
           eventId: String(eventMeta.eventId || ""),
@@ -294,6 +383,68 @@ export function createConnectionEvents({
         hostName: host ? host.displayName : "",
       });
     }
+  }
+
+  function handleToolProcessControlUpdated(hostId, payload, eventMeta = {}) {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime) return;
+
+    const host = hostById(hostId);
+    const toolId = String(payload.toolId || "");
+    const action = String(payload.action || "").toLowerCase() === "restart" ? "restart" : "stop";
+    const ok = asBool(payload.ok);
+    const changed = asBool(payload.changed);
+    const reason = String(payload.reason || "");
+
+    const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
+    const candidateTool = runtime.candidateTools.find((item) => String(item.toolId || "") === toolId);
+    const toolName = resolveToolDisplayName(
+      hostId,
+      connectedTool || candidateTool || { name: toolId || "OpenClaw", toolId },
+    );
+    const actionLabel = action === "restart" ? "重启" : "停止";
+
+    if (!ok) {
+      addLog(`工具${actionLabel}失败 (${host ? host.displayName : hostId}): ${toolId || "--"} ${reason}`, {
+        level: "warn",
+        scope: "tool_process",
+        action: action === "restart" ? "restart_tool_process" : "stop_tool_process",
+        outcome: "failed",
+        traceId: String(eventMeta.traceId || ""),
+        eventId: String(eventMeta.eventId || ""),
+        eventType: String(eventMeta.eventType || ""),
+        hostId,
+        hostName: host ? host.displayName : "",
+        toolId,
+        detail: reason,
+      });
+      openHostNoticeModal(
+        `${actionLabel}失败`,
+        reason || `工具“${toolName}”${actionLabel}失败，请稍后重试。`,
+      );
+      return;
+    }
+
+    addLog(`工具${actionLabel}已执行 (${host ? host.displayName : hostId}): ${toolId || "--"}`, {
+      scope: "tool_process",
+      action: action === "restart" ? "restart_tool_process" : "stop_tool_process",
+      outcome: changed ? "success" : "noop",
+      traceId: String(eventMeta.traceId || ""),
+      eventId: String(eventMeta.eventId || ""),
+      eventType: String(eventMeta.eventType || ""),
+      hostId,
+      hostName: host ? host.displayName : "",
+      toolId,
+      detail: reason,
+    });
+
+    openHostNoticeModal(
+      `${actionLabel}成功`,
+      changed
+        ? `工具“${toolName}”已完成${actionLabel}。`
+        : `工具“${toolName}”当前无需${actionLabel}。`,
+    );
+    requestToolsRefresh(hostId);
   }
 
   function applyMetricsSnapshot(hostId, payload) {

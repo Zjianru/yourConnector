@@ -72,6 +72,32 @@ impl ToolWhitelistStore {
         self.ids.contains(tool_id)
     }
 
+    /// 返回当前白名单工具 ID（已排序），用于快照补齐离线占位项。
+    pub(crate) fn list_ids(&self) -> Vec<String> {
+        let mut ids = self.ids.iter().cloned().collect::<Vec<String>>();
+        ids.sort();
+        ids
+    }
+
+    /// 兼容 OpenClaw gateway 的历史实例 ID：
+    /// 老版本使用 `openclaw_<hash>_p<pid>`，新版本使用 `openclaw_<hash>_gw`。
+    /// 该方法在白名单判断时提供平滑过渡，避免升级后工具“看似掉线”。
+    pub(crate) fn contains_compatible(&self, tool_id: &str) -> bool {
+        if self.contains(tool_id) {
+            return true;
+        }
+
+        let Some(hash) = tool_id
+            .strip_prefix("openclaw_")
+            .and_then(|rest| rest.strip_suffix("_gw"))
+        else {
+            return false;
+        };
+
+        let legacy_prefix = format!("openclaw_{hash}_p");
+        self.ids.iter().any(|id| id.starts_with(&legacy_prefix))
+    }
+
     /// 将工具加入白名单并立即落盘；返回是否实际发生变更。
     pub(crate) fn add(&mut self, tool_id: &str) -> anyhow::Result<bool> {
         if !self.ids.insert(tool_id.to_string()) {
@@ -88,6 +114,17 @@ impl ToolWhitelistStore {
         }
         self.save()?;
         Ok(true)
+    }
+
+    /// 清空白名单并落盘；返回本次移除的工具数量。
+    pub(crate) fn clear(&mut self) -> anyhow::Result<usize> {
+        let removed = self.ids.len();
+        if removed == 0 {
+            return Ok(0);
+        }
+        self.ids.clear();
+        self.save()?;
+        Ok(removed)
     }
 
     /// 持久化白名单：创建目录、排序后写入 JSON。
@@ -109,6 +146,19 @@ impl ToolWhitelistStore {
         let bytes = serde_json::to_vec_pretty(&ToolWhitelistFile { tool_ids })?;
         fs::write(path, bytes)?;
         Ok(())
+    }
+
+    #[cfg(test)]
+    /// 测试辅助：从给定工具 ID 构造内存白名单（不落盘）。
+    pub(crate) fn from_ids_for_test(ids: &[&str]) -> Self {
+        Self {
+            path: None,
+            ids: ids
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect(),
+        }
     }
 }
 

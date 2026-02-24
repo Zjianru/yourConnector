@@ -2,6 +2,8 @@
 // 1. 渲染宿主机 Banner 与白点索引。
 // 2. 处理 Banner 横向滚动与索引更新。
 
+import { relayGatewayHint } from "../utils/host-format.js";
+
 /**
  * 根据是否存在宿主机切换“配对卡”与“总览区”显示。
  * @param {Record<string, HTMLElement>} ui 页面节点集合。
@@ -43,6 +45,7 @@ export function renderBanner(ui, hosts, activeIndex, hostStatusLabel, escapeHtml
             <span class="host-status-light ${statusClass}"></span>
             ${escapeHtml(status)}
           </div>
+          <div class="host-banner-relay">${escapeHtml(relayGatewayHint(host.relayUrl))}</div>
         </article>
       `;
     })

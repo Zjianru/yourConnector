@@ -44,16 +44,43 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
 
   function openAddToolModal(hostId) {
     const host = hostById(hostId);
+    const runtime = ensureRuntime(hostId);
     if (!host) {
       return;
     }
     state.addToolHostId = hostId;
     ui.addToolModal.classList.add("show");
+    if (runtime) {
+      runtime.candidateRefreshPending = true;
+      runtime.candidateExpectedVersion = Number(runtime.candidateSnapshotVersion || 0) + 1;
+      if (runtime.candidateRefreshTimer) {
+        clearTimeout(runtime.candidateRefreshTimer);
+      }
+      runtime.candidateRefreshTimer = setTimeout(() => {
+        const latest = ensureRuntime(hostId);
+        if (!latest || !latest.candidateRefreshPending) {
+          return;
+        }
+        latest.candidateRefreshPending = false;
+        latest.candidateExpectedVersion = 0;
+        latest.candidateRefreshTimer = null;
+        renderAddToolModal();
+      }, 3000);
+    }
     requestToolsRefresh(hostId);
     renderAddToolModal();
   }
 
   function closeAddToolModal() {
+    const runtime = ensureRuntime(state.addToolHostId);
+    if (runtime && runtime.candidateRefreshTimer) {
+      clearTimeout(runtime.candidateRefreshTimer);
+      runtime.candidateRefreshTimer = null;
+    }
+    if (runtime) {
+      runtime.candidateRefreshPending = false;
+      runtime.candidateExpectedVersion = 0;
+    }
     ui.addToolModal.classList.remove("show");
     state.addToolHostId = "";
   }
@@ -84,6 +111,11 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
 
     if (!runtime.connected) {
       ui.candidateList.innerHTML = '<div class="empty">请先连接该宿主机，再添加工具。</div>';
+      return;
+    }
+
+    if (runtime.candidateRefreshPending) {
+      ui.candidateList.innerHTML = '<div class="empty">正在刷新候选工具，请稍候...</div>';
       return;
     }
 

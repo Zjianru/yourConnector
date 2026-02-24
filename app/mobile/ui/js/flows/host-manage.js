@@ -3,7 +3,7 @@
 // 2. 协调删除补偿子流程与重名提示。
 
 import { asMap } from "../utils/type.js";
-import { formatDurationShort, formatGbFromMb } from "../utils/host-format.js";
+import { formatDurationShort, formatGbFromMb, relayGatewayHint } from "../utils/host-format.js";
 import { renderRows } from "../utils/rows.js";
 import { fmt2 } from "../utils/format.js";
 import { escapeHtml } from "../utils/dom.js";
@@ -32,6 +32,7 @@ export function createHostManageFlow({
   connectHost,
   reconnectHost,
   disconnectHost,
+  sendSocketEvent,
   openPairFlow,
   render,
 }) {
@@ -48,6 +49,8 @@ export function createHostManageFlow({
     clearHostSession,
     addLog,
     openHostNoticeModal,
+    ensureRuntime,
+    sendSocketEvent,
   });
 
   function openHostManageModal() {
@@ -81,6 +84,7 @@ export function createHostManageFlow({
               <div class="host-manage-sub">
                 状态: ${escapeHtml(hostStatusLabel(host.hostId))}${escapeHtml(note)}
               </div>
+              <div class="host-manage-sub host-manage-relay">${escapeHtml(relayGatewayHint(host.relayUrl))}</div>
               <div class="host-manage-actions">
                 <button class="btn btn-primary btn-sm" data-manage-connect="${escapeHtml(host.hostId)}">
                   ${escapeHtml(connectLabel)}

@@ -324,6 +324,35 @@
         gap: 10px;
       }
 
+      .tool-quick-actions {
+        margin-left: auto;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .tool-quick-btn {
+        border: 1px solid rgba(255, 255, 255, 0.22);
+        border-radius: 999px;
+        background: rgba(8, 20, 35, 0.58);
+        color: rgba(255, 248, 241, 0.95);
+        font-size: 10px;
+        font-weight: 760;
+        line-height: 1;
+        padding: 6px 10px;
+        cursor: pointer;
+      }
+
+      .tool-quick-btn.restart {
+        border-color: rgba(56, 189, 248, 0.45);
+        color: #bce8ff;
+      }
+
+      .tool-quick-btn.stop {
+        border-color: rgba(239, 68, 68, 0.42);
+        color: #fecaca;
+      }
+
       .tool-logo {
         width: 42px;
         height: 42px;
@@ -722,6 +751,14 @@
         font-size: 12px;
       }
 
+      .host-banner-relay {
+        margin-top: 6px;
+        color: var(--text-sub);
+        font-size: 11px;
+        line-height: 1.35;
+        word-break: break-word;
+      }
+
       .host-status-light {
         width: 9px;
         height: 9px;
@@ -777,6 +814,14 @@
         font-weight: 800;
       }
 
+      .host-group-relay {
+        margin-top: 4px;
+        color: var(--text-sub);
+        font-size: 11px;
+        line-height: 1.35;
+        word-break: break-word;
+      }
+
       .host-status-chip {
         margin-left: auto;
         border-radius: 999px;
@@ -820,6 +865,12 @@
         margin-top: 4px;
         color: var(--text-sub);
         font-size: 12px;
+      }
+
+      .host-manage-relay {
+        font-size: 11px;
+        line-height: 1.35;
+        word-break: break-word;
       }
 
       .host-manage-actions {

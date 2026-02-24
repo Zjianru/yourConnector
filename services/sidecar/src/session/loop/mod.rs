@@ -264,7 +264,7 @@ fn build_details_collect_request(
 ) -> ToolDetailsCollectRequest {
     let tools = discovered_tools
         .iter()
-        .filter(|tool| whitelist.contains(&tool.tool_id))
+        .filter(|tool| whitelist.contains_compatible(&tool.tool_id))
         .cloned()
         .collect::<Vec<ToolRuntimePayload>>();
 
