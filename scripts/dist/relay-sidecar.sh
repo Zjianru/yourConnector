@@ -477,14 +477,14 @@ server {
     ssl_prefer_server_ciphers off;
 
     location = /healthz {
-        proxy_pass http://127.0.0.1:18789/healthz;
+        proxy_pass http://127.0.0.1:18080/healthz;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
     location /v1/ws {
-        proxy_pass http://127.0.0.1:18789/v1/ws;
+        proxy_pass http://127.0.0.1:18080/v1/ws;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -494,7 +494,7 @@ server {
     }
 
     location / {
-        proxy_pass http://127.0.0.1:18789;
+        proxy_pass http://127.0.0.1:18080;
         proxy_set_header Host \$host;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -530,7 +530,7 @@ User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${WORK_ROOT}
 Environment=HOME=${WORK_ROOT}
-Environment=RELAY_ADDR=127.0.0.1:18789
+Environment=RELAY_ADDR=127.0.0.1:18080
 ExecStart=${BIN_DIR}/yc-relay
 Restart=always
 RestartSec=2
@@ -551,7 +551,7 @@ User=${SERVICE_USER}
 Group=${SERVICE_GROUP}
 WorkingDirectory=${WORK_ROOT}
 Environment=HOME=${WORK_ROOT}
-Environment=RELAY_WS_URL=ws://127.0.0.1:18789/v1/ws
+Environment=RELAY_WS_URL=ws://127.0.0.1:18080/v1/ws
 Environment=HOST_NAME=${host_name}
 Environment=YC_ALLOW_INSECURE_WS=1
 ExecStart=${BIN_DIR}/yc-sidecar run
