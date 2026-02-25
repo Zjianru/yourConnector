@@ -10,9 +10,10 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
     process::{Child, Command},
     sync::{mpsc, watch},
-    time::timeout,
+    time::{Instant, sleep, timeout},
 };
 use tracing::{debug, warn};
+use uuid::Uuid;
 use yc_shared_protocol::ToolRuntimePayload;
 
 use crate::control::{TOOL_CHAT_CHUNK_EVENT, TOOL_CHAT_FINISHED_EVENT, TOOL_CHAT_STARTED_EVENT};
@@ -376,20 +377,18 @@ async fn run_openclaw_request(
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<ChatExecutionResult, ChatExecError> {
     let route = resolve_openclaw_route(tool).await;
-    let channel_attempt = run_openclaw_once(request, tool, &route, false, cancel_rx).await;
-    let result = match decide_openclaw_route(&channel_attempt) {
-        OpenClawRouteDecision::UseChannel => match channel_attempt {
+    let result = if is_openclaw_slash_command(request.text.as_str()) {
+        match run_openclaw_slash_request(request, tool, &route, cancel_rx).await {
             Ok(ok) => ok,
-            Err(_) => {
-                return Err(ChatExecError::Failed(
-                    "openclaw route decision mismatch".to_string(),
-                ));
+            Err(ChatExecError::Failed(reason))
+                if should_fallback_openclaw_slash_to_agent(reason.as_str()) =>
+            {
+                run_openclaw_agent_request(request, tool, &route, cancel_rx).await?
             }
-        },
-        OpenClawRouteDecision::RetryLocal => {
-            run_openclaw_once(request, tool, &route, true, cancel_rx).await?
+            Err(err) => return Err(err),
         }
-        OpenClawRouteDecision::Cancelled => return Err(ChatExecError::Cancelled),
+    } else {
+        run_openclaw_agent_request(request, tool, &route, cancel_rx).await?
     };
 
     emit_chunk(
@@ -409,6 +408,7 @@ async fn run_openclaw_request(
 #[derive(Debug, Clone)]
 struct OpenClawRoute {
     session_id: String,
+    session_key: String,
     agent_id: String,
 }
 
@@ -425,12 +425,27 @@ enum OpenClawRouteDecision {
     Cancelled,
 }
 
+#[derive(Debug, Clone)]
+enum OpenClawControlCommand {
+    Compact { instructions: Option<String> },
+}
+
+const OPENCLAW_CHAT_HISTORY_LIMIT: usize = 120;
+const OPENCLAW_CHAT_POLL_INTERVAL: Duration = Duration::from_millis(700);
+const OPENCLAW_CHAT_POLL_TIMEOUT: Duration = Duration::from_secs(12);
+
+#[derive(Debug, Clone, Copy, Default)]
+struct OpenClawHistoryAnchor {
+    latest_timestamp: i64,
+}
+
 async fn resolve_openclaw_route(tool: &ToolRuntimePayload) -> OpenClawRoute {
     let mut command = Command::new("openclaw");
     apply_openclaw_profile(tool, &mut command);
     command.arg("status").arg("--json");
     let output = timeout(Duration::from_secs(5), command.output()).await;
     let mut session_id = String::new();
+    let mut session_key = String::new();
     let mut agent_id = "main".to_string();
 
     if let Ok(Ok(raw)) = output
@@ -440,6 +455,11 @@ async fn resolve_openclaw_route(tool: &ToolRuntimePayload) -> OpenClawRoute {
         if let Some(value) = extract_json_payload(&stdout) {
             session_id = value
                 .pointer("/sessions/recent/0/sessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            session_key = value
+                .pointer("/sessions/recent/0/key")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
@@ -457,8 +477,440 @@ async fn resolve_openclaw_route(tool: &ToolRuntimePayload) -> OpenClawRoute {
 
     OpenClawRoute {
         session_id,
+        session_key,
         agent_id,
     }
+}
+
+async fn run_openclaw_agent_request(
+    request: &ChatRequestInput,
+    tool: &ToolRuntimePayload,
+    route: &OpenClawRoute,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<OpenClawAttemptResult, ChatExecError> {
+    let channel_attempt = run_openclaw_once(request, tool, route, false, cancel_rx).await;
+    match decide_openclaw_route(&channel_attempt) {
+        OpenClawRouteDecision::UseChannel => match channel_attempt {
+            Ok(ok) => Ok(ok),
+            Err(_) => Err(ChatExecError::Failed(
+                "openclaw route decision mismatch".to_string(),
+            )),
+        },
+        OpenClawRouteDecision::RetryLocal => {
+            run_openclaw_once(request, tool, route, true, cancel_rx).await
+        }
+        OpenClawRouteDecision::Cancelled => Err(ChatExecError::Cancelled),
+    }
+}
+
+async fn run_openclaw_slash_request(
+    request: &ChatRequestInput,
+    tool: &ToolRuntimePayload,
+    route: &OpenClawRoute,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<OpenClawAttemptResult, ChatExecError> {
+    if cancelled(cancel_rx) {
+        return Err(ChatExecError::Cancelled);
+    }
+
+    let command_token =
+        extract_openclaw_command_token(request.text.as_str()).unwrap_or_else(|| "/".to_string());
+    let compact_command = parse_openclaw_control_command(request.text.as_str());
+    let session_key = resolve_openclaw_compact_session_key(route);
+    let history_anchor = run_openclaw_chat_history(tool, session_key.as_str(), cancel_rx)
+        .await
+        .map(|payload| capture_openclaw_history_anchor(&payload))
+        .unwrap_or_default();
+    let run_id = format!("sidecar-chat-{}", Uuid::new_v4());
+
+    let mut send_payload = run_openclaw_chat_send(
+        tool,
+        session_key.as_str(),
+        request.text.as_str(),
+        run_id.as_str(),
+        cancel_rx,
+    )
+    .await?;
+    let poll_started_at = Instant::now();
+    let mut status = openclaw_chat_status(&send_payload).to_string();
+
+    while status != "ok" && status != "error" {
+        if poll_started_at.elapsed() >= OPENCLAW_CHAT_POLL_TIMEOUT {
+            break;
+        }
+        if cancelled(cancel_rx) {
+            let _ = run_openclaw_chat_abort(tool, session_key.as_str(), run_id.as_str()).await;
+            return Err(ChatExecError::Cancelled);
+        }
+        sleep(OPENCLAW_CHAT_POLL_INTERVAL).await;
+        send_payload = run_openclaw_chat_send(
+            tool,
+            session_key.as_str(),
+            request.text.as_str(),
+            run_id.as_str(),
+            cancel_rx,
+        )
+        .await?;
+        status = openclaw_chat_status(&send_payload).to_string();
+    }
+
+    if status == "error" {
+        let summary = send_payload
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        if let Some(command) = compact_command.as_ref() {
+            return run_openclaw_control_command(command, tool, route, cancel_rx).await;
+        }
+        return Err(ChatExecError::Failed(format!(
+            "openclaw slash command 执行失败（{command_token}）: {summary}"
+        )));
+    }
+
+    if status != "ok" {
+        if let Some(command) = compact_command.as_ref() {
+            let _ = run_openclaw_chat_abort(tool, session_key.as_str(), run_id.as_str()).await;
+            return run_openclaw_control_command(command, tool, route, cancel_rx).await;
+        }
+
+        let text = format!(
+            "命令 {command_token} 已下发，当前仍在执行中，请稍后在 OpenClaw 会话中查看结果。"
+        );
+        return Ok(OpenClawAttemptResult {
+            text,
+            meta: json!({
+                "command": command_token,
+                "runId": run_id,
+                "sessionKey": session_key,
+                "status": status,
+                "source": "gateway.chat.send",
+            }),
+        });
+    }
+
+    let history_payload = run_openclaw_chat_history(tool, session_key.as_str(), cancel_rx).await?;
+    if let Some(reply_text) = extract_openclaw_chat_reply_after(&history_payload, history_anchor) {
+        return Ok(OpenClawAttemptResult {
+            text: reply_text,
+            meta: json!({
+                "command": command_token,
+                "runId": run_id,
+                "sessionKey": session_key,
+                "status": status,
+                "source": "gateway.chat.send",
+            }),
+        });
+    }
+
+    if let Some(command) = compact_command.as_ref() {
+        return run_openclaw_control_command(command, tool, route, cancel_rx).await;
+    }
+
+    let text = format!("已执行 {command_token}。");
+    Ok(OpenClawAttemptResult {
+        text,
+        meta: json!({
+            "command": command_token,
+            "runId": run_id,
+            "sessionKey": session_key,
+            "status": status,
+            "source": "gateway.chat.send",
+        }),
+    })
+}
+
+async fn run_openclaw_chat_send(
+    tool: &ToolRuntimePayload,
+    session_key: &str,
+    message: &str,
+    idempotency_key: &str,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<Value, ChatExecError> {
+    let params = json!({
+        "sessionKey": session_key,
+        "message": message,
+        "idempotencyKey": idempotency_key,
+    });
+    run_openclaw_gateway_call(tool, "chat.send", params, cancel_rx, "chat.send").await
+}
+
+async fn run_openclaw_chat_history(
+    tool: &ToolRuntimePayload,
+    session_key: &str,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<Value, ChatExecError> {
+    let params = json!({
+        "sessionKey": session_key,
+        "limit": OPENCLAW_CHAT_HISTORY_LIMIT,
+    });
+    run_openclaw_gateway_call(tool, "chat.history", params, cancel_rx, "chat.history").await
+}
+
+async fn run_openclaw_gateway_call(
+    tool: &ToolRuntimePayload,
+    method: &str,
+    params: Value,
+    cancel_rx: &mut watch::Receiver<bool>,
+    action_name: &str,
+) -> Result<Value, ChatExecError> {
+    if cancelled(cancel_rx) {
+        return Err(ChatExecError::Cancelled);
+    }
+
+    let mut command = Command::new("openclaw");
+    apply_openclaw_profile(tool, &mut command);
+    command
+        .arg("gateway")
+        .arg("call")
+        .arg(method)
+        .arg("--json")
+        .arg("--params")
+        .arg(params.to_string());
+    if let Some(workspace) = tool
+        .workspace_dir
+        .as_ref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        command.current_dir(workspace);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = command
+        .spawn()
+        .map_err(|err| ChatExecError::Failed(format!("启动 openclaw {action_name} 失败: {err}")))?;
+    let output = collect_child_output_with_cancel(child, cancel_rx).await?;
+    if !output.success {
+        return Err(ChatExecError::Failed(format!(
+            "openclaw {action_name} 执行失败: {}",
+            shorten_error(&output.stderr)
+        )));
+    }
+
+    extract_json_payload(&output.stdout)
+        .ok_or_else(|| ChatExecError::Failed(format!("openclaw {action_name} 返回非 JSON 输出")))
+}
+
+async fn run_openclaw_chat_abort(
+    tool: &ToolRuntimePayload,
+    session_key: &str,
+    run_id: &str,
+) -> Result<(), ChatExecError> {
+    let params = json!({
+        "sessionKey": session_key,
+        "runId": run_id,
+    });
+    let mut command = Command::new("openclaw");
+    apply_openclaw_profile(tool, &mut command);
+    command
+        .arg("gateway")
+        .arg("call")
+        .arg("chat.abort")
+        .arg("--json")
+        .arg("--params")
+        .arg(params.to_string());
+    if let Some(workspace) = tool
+        .workspace_dir
+        .as_ref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        command.current_dir(workspace);
+    }
+
+    let outcome = timeout(Duration::from_secs(3), command.output()).await;
+    match outcome {
+        Ok(Ok(output)) if output.status.success() => Ok(()),
+        Ok(Ok(output)) => Err(ChatExecError::Failed(format!(
+            "openclaw chat.abort 执行失败: {}",
+            shorten_error(&String::from_utf8_lossy(&output.stderr))
+        ))),
+        Ok(Err(err)) => Err(ChatExecError::Failed(format!(
+            "启动 openclaw chat.abort 失败: {err}"
+        ))),
+        Err(_) => Err(ChatExecError::Failed(
+            "openclaw chat.abort 超时".to_string(),
+        )),
+    }
+}
+
+fn capture_openclaw_history_anchor(payload: &Value) -> OpenClawHistoryAnchor {
+    let latest_timestamp = payload
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|rows| {
+            rows.iter()
+                .filter_map(|row| row.get("timestamp").and_then(Value::as_i64))
+                .max()
+        })
+        .unwrap_or(0)
+        .max(0);
+    OpenClawHistoryAnchor { latest_timestamp }
+}
+
+fn extract_openclaw_chat_reply_after(
+    payload: &Value,
+    anchor: OpenClawHistoryAnchor,
+) -> Option<String> {
+    let rows = payload.get("messages").and_then(Value::as_array)?;
+    let mut assistant_reply: Option<String> = None;
+    let mut tool_reply: Option<String> = None;
+
+    for row in rows {
+        let timestamp = row
+            .get("timestamp")
+            .and_then(Value::as_i64)
+            .unwrap_or(0)
+            .max(0);
+        if timestamp <= anchor.latest_timestamp {
+            continue;
+        }
+        let text = extract_openclaw_chat_message_text(row);
+        if text.is_empty() {
+            continue;
+        }
+        let role = row.get("role").and_then(Value::as_str).unwrap_or_default();
+        if role == "assistant" {
+            assistant_reply = Some(text);
+        } else if role == "toolResult" {
+            tool_reply = Some(text);
+        }
+    }
+
+    assistant_reply.or(tool_reply)
+}
+
+fn extract_openclaw_chat_message_text(row: &Value) -> String {
+    let from_content = row
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| part.get("text").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    if !from_content.is_empty() {
+        return from_content;
+    }
+    row.get("text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn openclaw_chat_status(payload: &Value) -> &str {
+    payload
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+}
+
+async fn run_openclaw_control_command(
+    command: &OpenClawControlCommand,
+    tool: &ToolRuntimePayload,
+    route: &OpenClawRoute,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<OpenClawAttemptResult, ChatExecError> {
+    match command {
+        OpenClawControlCommand::Compact { instructions } => {
+            run_openclaw_compact_command(tool, route, instructions.as_deref(), cancel_rx).await
+        }
+    }
+}
+
+async fn run_openclaw_compact_command(
+    tool: &ToolRuntimePayload,
+    route: &OpenClawRoute,
+    instructions: Option<&str>,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<OpenClawAttemptResult, ChatExecError> {
+    if cancelled(cancel_rx) {
+        return Err(ChatExecError::Cancelled);
+    }
+
+    let session_key = resolve_openclaw_compact_session_key(route);
+    let params = json!({
+        "key": session_key,
+    });
+
+    let mut command = Command::new("openclaw");
+    apply_openclaw_profile(tool, &mut command);
+    command
+        .arg("gateway")
+        .arg("call")
+        .arg("sessions.compact")
+        .arg("--json")
+        .arg("--params")
+        .arg(params.to_string());
+    if let Some(workspace) = tool
+        .workspace_dir
+        .as_ref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        command.current_dir(workspace);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = command
+        .spawn()
+        .map_err(|err| ChatExecError::Failed(format!("启动 openclaw compact 失败: {err}")))?;
+    let output = collect_child_output_with_cancel(child, cancel_rx).await?;
+    if !output.success {
+        return Err(ChatExecError::Failed(format!(
+            "openclaw compact 执行失败: {}",
+            shorten_error(&output.stderr)
+        )));
+    }
+
+    let parsed = extract_json_payload(&output.stdout)
+        .ok_or_else(|| ChatExecError::Failed("openclaw compact 返回非 JSON 输出".to_string()))?;
+    if !parsed.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        let reason = parsed
+            .get("reason")
+            .and_then(Value::as_str)
+            .filter(|raw| !raw.trim().is_empty())
+            .unwrap_or("unknown reason");
+        return Err(ChatExecError::Failed(format!(
+            "openclaw compact 返回失败: {reason}"
+        )));
+    }
+
+    let compacted = parsed
+        .get("compacted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let kept = parsed
+        .get("kept")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let reason = parsed
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = format_openclaw_compact_reply(compacted, kept, reason, instructions);
+    let meta = json!({
+        "command": "compact",
+        "sessionKey": parsed
+            .get("key")
+            .and_then(Value::as_str)
+            .filter(|raw| !raw.trim().is_empty())
+            .unwrap_or(session_key.as_str()),
+        "compacted": compacted,
+        "kept": kept,
+        "reason": reason,
+        "instructions": instructions.unwrap_or(""),
+        "instructionsIgnored": instructions
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false),
+    });
+
+    Ok(OpenClawAttemptResult { text, meta })
 }
 
 async fn run_openclaw_once(
@@ -787,6 +1239,103 @@ fn extract_openclaw_text(payload: &Value) -> Option<String> {
     None
 }
 
+fn extract_openclaw_command_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if !trimmed.starts_with('/') || trimmed.len() <= 1 {
+        return None;
+    }
+    let token = trimmed.split_whitespace().next().unwrap_or_default().trim();
+    if token.len() <= 1 || !token.starts_with('/') {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+fn is_openclaw_slash_command(raw: &str) -> bool {
+    extract_openclaw_command_token(raw).is_some()
+}
+
+fn parse_openclaw_control_command(raw: &str) -> Option<OpenClawControlCommand> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if !trimmed.to_ascii_lowercase().starts_with("/compact") {
+        return None;
+    }
+    let rest = &trimmed["/compact".len()..];
+    if let Some(first) = rest.chars().next()
+        && first != ':'
+        && !first.is_whitespace()
+    {
+        return None;
+    }
+
+    let instructions_raw = if let Some(stripped) = rest.trim_start().strip_prefix(':') {
+        stripped.trim()
+    } else {
+        rest.trim()
+    };
+    let instructions = if instructions_raw.is_empty() {
+        None
+    } else {
+        Some(instructions_raw.to_string())
+    };
+    Some(OpenClawControlCommand::Compact { instructions })
+}
+
+fn resolve_openclaw_compact_session_key(route: &OpenClawRoute) -> String {
+    let session_key = route.session_key.trim();
+    if !session_key.is_empty() {
+        return session_key.to_string();
+    }
+    let agent_id = route.agent_id.trim();
+    if !agent_id.is_empty() {
+        return format!("agent:{agent_id}:main");
+    }
+    "agent:main:main".to_string()
+}
+
+fn should_fallback_openclaw_slash_to_agent(reason: &str) -> bool {
+    let normalized = reason.to_ascii_lowercase();
+    normalized.contains("unknown method: chat.send")
+        || normalized.contains("invalid chat.send")
+        || normalized.contains("unknown method: chat.history")
+        || normalized.contains("invalid chat.history")
+}
+
+fn format_openclaw_compact_reply(
+    compacted: bool,
+    kept: i64,
+    reason: &str,
+    instructions: Option<&str>,
+) -> String {
+    let mut text = if compacted {
+        if kept > 0 {
+            format!("已执行 /compact：会话已压缩，当前保留最近 {kept} 行。")
+        } else {
+            "已执行 /compact：会话已压缩。".to_string()
+        }
+    } else {
+        match reason.trim() {
+            "no sessionId" => "已执行 /compact：当前会话缺少 sessionId，未发生压缩。".to_string(),
+            "no transcript" => "已执行 /compact：未找到会话转录文件，未发生压缩。".to_string(),
+            _ if kept > 0 => format!(
+                "已执行 /compact：当前会话已在压缩范围内（保留 {kept} 行），无需进一步压缩。"
+            ),
+            _ => "已执行 /compact：当前会话未发生压缩。".to_string(),
+        }
+    };
+
+    if instructions
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        text.push_str("\n提示：当前 compact 接口不支持附加说明，已按默认策略执行。");
+    }
+    text
+}
+
 fn extract_json_payload(raw: &str) -> Option<Value> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -903,8 +1452,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        ChatExecError, OpenClawAttemptResult, OpenClawRouteDecision, compact_json_text,
-        decide_openclaw_route, extract_json_payload, extract_openclaw_text, parse_opencode_line,
+        ChatExecError, OpenClawAttemptResult, OpenClawControlCommand, OpenClawHistoryAnchor,
+        OpenClawRoute, OpenClawRouteDecision, compact_json_text, decide_openclaw_route,
+        extract_json_payload, extract_openclaw_chat_reply_after, extract_openclaw_command_token,
+        extract_openclaw_text, format_openclaw_compact_reply, is_openclaw_slash_command,
+        parse_openclaw_control_command, parse_opencode_line, resolve_openclaw_compact_session_key,
         wait_child_with_cancel,
     };
 
@@ -985,6 +1537,100 @@ mod tests {
             decide_openclaw_route(&failed),
             OpenClawRouteDecision::RetryLocal
         );
+    }
+
+    #[test]
+    fn parse_openclaw_control_command_should_detect_compact() {
+        let parsed = parse_openclaw_control_command("/compact");
+        assert!(matches!(
+            parsed,
+            Some(OpenClawControlCommand::Compact { instructions: None })
+        ));
+
+        let parsed_with_args = parse_openclaw_control_command("/COMPACT: keep latest tasks");
+        match parsed_with_args {
+            Some(OpenClawControlCommand::Compact { instructions }) => {
+                assert_eq!(instructions.as_deref(), Some("keep latest tasks"));
+            }
+            _ => panic!("compact with args should be parsed"),
+        }
+
+        assert!(parse_openclaw_control_command("/compactx").is_none());
+        assert!(parse_openclaw_control_command("hello /compact").is_none());
+    }
+
+    #[test]
+    fn slash_command_helpers_should_detect_and_extract_token() {
+        assert_eq!(
+            extract_openclaw_command_token("   /compact keep latest"),
+            Some("/compact".to_string())
+        );
+        assert_eq!(
+            extract_openclaw_command_token("/status"),
+            Some("/status".to_string())
+        );
+        assert!(extract_openclaw_command_token("status /compact").is_none());
+        assert!(!is_openclaw_slash_command("hello"));
+        assert!(is_openclaw_slash_command("/new"));
+    }
+
+    #[test]
+    fn extract_openclaw_chat_reply_after_should_prefer_assistant_message() {
+        let payload = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "timestamp": 10,
+                    "content": [{"type": "text", "text": "old"}]
+                },
+                {
+                    "role": "toolResult",
+                    "timestamp": 20,
+                    "content": [{"type": "text", "text": "tool output"}]
+                },
+                {
+                    "role": "assistant",
+                    "timestamp": 30,
+                    "content": [{"type": "text", "text": "final answer"}]
+                }
+            ]
+        });
+        let anchor = OpenClawHistoryAnchor {
+            latest_timestamp: 15,
+        };
+        let text = extract_openclaw_chat_reply_after(&payload, anchor)
+            .expect("assistant reply should be extracted");
+        assert_eq!(text, "final answer");
+    }
+
+    #[test]
+    fn resolve_openclaw_compact_session_key_should_prefer_status_key() {
+        let route = OpenClawRoute {
+            session_id: String::new(),
+            session_key: "agent:main:main".to_string(),
+            agent_id: "main".to_string(),
+        };
+        assert_eq!(
+            resolve_openclaw_compact_session_key(&route),
+            "agent:main:main"
+        );
+
+        let fallback_route = OpenClawRoute {
+            session_id: String::new(),
+            session_key: String::new(),
+            agent_id: "ops".to_string(),
+        };
+        assert_eq!(
+            resolve_openclaw_compact_session_key(&fallback_route),
+            "agent:ops:main"
+        );
+    }
+
+    #[test]
+    fn format_openclaw_compact_reply_should_mark_ignored_instructions() {
+        let text = format_openclaw_compact_reply(false, 120, "", Some("only keep todos"));
+        assert!(text.contains("不支持附加说明"));
+        assert!(text.contains("120"));
     }
 
     #[cfg(unix)]
