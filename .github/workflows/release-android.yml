@@ -103,7 +103,7 @@ jobs:
         run: cargo install tauri-cli --locked
 
       - name: Build Android unsigned APK
-        run: make build-mobile-tauri-android-apk ANDROID_TARGETS="${ANDROID_TARGETS}"
+        run: make SHELL=/bin/bash build-mobile-tauri-android-apk ANDROID_TARGETS="${ANDROID_TARGETS}"
 
       - name: Decode keystore from secret
         env:
