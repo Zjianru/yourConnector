@@ -2,7 +2,7 @@
 
 ## 项目结构
 
-1. `app/mobile`：Tauri Mobile App（当前 iOS）
+1. `app/mobile`：Tauri Mobile App（iOS + Android）
 2. `services/relay`：Relay 服务（Rust）
 3. `services/sidecar`：Sidecar 服务（Rust）
 4. `protocol/rust`：共享协议类型（Rust）
@@ -19,6 +19,11 @@ make run-sidecar
 
 # iOS 启动
 make run-mobile-tauri-ios IOS_SIM="iPhone 17 Pro"
+
+# Android 初始化与打包
+make init-mobile-tauri-android
+make build-mobile-tauri-android-apk ANDROID_TARGETS="aarch64"
+make build-mobile-tauri-android-aab ANDROID_TARGETS="aarch64"
 
 # 配对辅助
 make show-pairing
@@ -53,7 +58,7 @@ sudo bash /path/to/yc-sidecar.sh install \
 6. Release 资产仅包含安装脚本与清单：`yc-relay.sh`、`yc-sidecar.sh`、`release-manifest.json`、`release-checksums.txt`。
 7. GitHub Actions 已支持“按 tag 同步发布资产到阿里云 OSS（国内下载）”，工作流见 `.github/workflows/sync-release-to-oss.yml`。
 8. 国内下载地址模板：`https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX>/<tag>/<file>`
-9. iOS App 当前不在 Release 资产中分发；上线形态以 App Store/TestFlight 为准。
+9. Mobile App 当前不在 Release 资产中分发；上线形态以 App Store / TestFlight / Play Console 为准。
 
 ## 质量门禁
 

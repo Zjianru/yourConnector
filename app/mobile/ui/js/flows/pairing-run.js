@@ -4,6 +4,7 @@
 
 import { parsePairingLink } from "../services/pairing-link.js";
 import { parseRelayWsUrl, relayRequestJson } from "../services/relay-api.js";
+import { normalizedDeviceName } from "../utils/platform.js";
 import { asMap } from "../utils/type.js";
 
 /**
@@ -27,10 +28,6 @@ export function createPairingRunner({
   notifyIfDuplicateDisplayName,
   tauriInvoke,
 }) {
-  function normalizedDeviceName() {
-    return "ios_mobile";
-  }
-
   async function runPairingFromLink(rawValue, source = "paste") {
     const parsed = parsePairingLink(rawValue);
     if (!parsed) {

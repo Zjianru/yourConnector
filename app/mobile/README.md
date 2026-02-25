@@ -1,4 +1,4 @@
-# Mobile App（Tauri iOS）
+# Mobile App（Tauri iOS + Android）
 
 ## 启动与调试
 
@@ -16,6 +16,12 @@ make run-mobile-tauri-ios IOS_SIM="iPhone 17 Pro"
 make run-mobile-tauri-ios-dev IOS_SIM="iPhone 17 Pro"
 make run-mobile-tauri-ios-dev-clean IOS_SIM="iPhone 17 Pro"
 make repair-ios-sim IOS_SIM="iPhone 17 Pro"
+
+# Android 初始化与打包
+make init-mobile-tauri-android
+make run-mobile-tauri-android-dev ANDROID_DEVICE="<device-name>"
+make build-mobile-tauri-android-apk ANDROID_TARGETS="aarch64"
+make build-mobile-tauri-android-aab ANDROID_TARGETS="aarch64"
 ```
 
 ## 配对调试辅助

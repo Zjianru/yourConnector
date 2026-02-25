@@ -1,6 +1,8 @@
 SHELL := /bin/zsh
 
 IOS_SIM ?= iPhone 17 Pro
+ANDROID_TARGETS ?= aarch64
+ANDROID_DEVICE ?=
 PAIR_DIR ?= $(HOME)/.config/yourconnector/sidecar
 PAIR_RELAY_WS ?= ws://127.0.0.1:18080/v1/ws
 PAIR_NAME ?=
@@ -12,6 +14,8 @@ PAIR_ARGS ?=
 .PHONY: run-relay run-sidecar stop-relay stop-sidecar restart-relay restart-sidecar
 .PHONY: install-tauri-cli boot-ios-sim stop-mobile-tauri-ios repair-ios-sim
 .PHONY: run-mobile-tauri-ios run-mobile-tauri-ios-dev run-mobile-tauri-ios-dev-clean
+.PHONY: ensure-mobile-tauri-android init-mobile-tauri-android run-mobile-tauri-android-dev
+.PHONY: build-mobile-tauri-android-apk build-mobile-tauri-android-aab
 .PHONY: pairing show-pairing show-pairing-code show-pairing-link show-pairing-qr show-pairing-json simulate-ios-scan
 .PHONY: self-debug-loop
 .PHONY: help
@@ -25,6 +29,10 @@ help:
 	@echo "  make run-sidecar                    # 启动 sidecar"
 	@echo "  make run-mobile-tauri-ios           # 构建并安装 iOS App（推荐）"
 	@echo "  make run-mobile-tauri-ios-dev       # iOS dev 模式（热更新）"
+	@echo "  make init-mobile-tauri-android      # 初始化 Android 工程（首次一次）"
+	@echo "  make run-mobile-tauri-android-dev   # Android dev 模式（真机/模拟器）"
+	@echo "  make build-mobile-tauri-android-apk # 构建 Android APK（默认 aarch64）"
+	@echo "  make build-mobile-tauri-android-aab # 构建 Android AAB（默认 aarch64）"
 	@echo "  make pairing PAIR_ARGS='--show all' # 统一配对命令（relay 签发）"
 	@echo "  make show-pairing                   # 输出配对信息 + 终端二维码"
 	@echo "  make show-pairing-link              # 输出 yc://pair 链接"
@@ -116,6 +124,24 @@ run-mobile-tauri-ios-dev-clean:
 	xcrun simctl uninstall booted dev.yourconnector.mobile >/dev/null 2>&1 || true
 	rm -rf app/mobile/src-tauri/target/aarch64-apple-ios-sim
 	cd app/mobile/src-tauri && cargo tauri ios dev "$(IOS_SIM)"
+
+ensure-mobile-tauri-android:
+	@if [ -d app/mobile/src-tauri/gen/android ]; then \
+		echo "Android 工程已初始化：app/mobile/src-tauri/gen/android"; \
+	else \
+		cd app/mobile/src-tauri && cargo tauri android init --ci; \
+	fi
+
+init-mobile-tauri-android: ensure-mobile-tauri-android
+
+run-mobile-tauri-android-dev: ensure-mobile-tauri-android
+	cd app/mobile/src-tauri && cargo tauri android dev $(if $(strip $(ANDROID_DEVICE)),"$(ANDROID_DEVICE)",)
+
+build-mobile-tauri-android-apk: ensure-mobile-tauri-android
+	cd app/mobile/src-tauri && cargo tauri android build --apk --target $(ANDROID_TARGETS)
+
+build-mobile-tauri-android-aab: ensure-mobile-tauri-android
+	cd app/mobile/src-tauri && cargo tauri android build --aab --target $(ANDROID_TARGETS)
 
 pairing:
 	@./scripts/pairing.sh \

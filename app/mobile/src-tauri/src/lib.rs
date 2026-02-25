@@ -444,7 +444,6 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("failed to build mobile tauri app")
         .run(|app, event| {
-            #[cfg(any(target_os = "ios", target_os = "macos"))]
             if let RunEvent::Opened { urls } = event {
                 for url in urls {
                     if url.scheme() == "yc" && url.host_str() == Some("pair") {

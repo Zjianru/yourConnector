@@ -8,15 +8,17 @@ import {
   LEGACY_STORAGE_KEY,
   state,
 } from "./store.js";
+import { deviceIdPrefix } from "../utils/platform.js";
 
 /** 创建宿主机配置状态管理器。 */
 export function createHostState() {
   function createDeviceId() {
+    const prefix = deviceIdPrefix();
     if (window.crypto && typeof window.crypto.randomUUID === "function") {
-      return `ios_${window.crypto.randomUUID()}`;
+      return `${prefix}_${window.crypto.randomUUID()}`;
     }
     const rand = Math.random().toString(36).slice(2, 10);
-    return `ios_${Date.now()}_${rand}`;
+    return `${prefix}_${Date.now()}_${rand}`;
   }
 
   function createEventId() {
