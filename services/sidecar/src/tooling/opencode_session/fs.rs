@@ -95,22 +95,7 @@ pub(super) fn select_session_meta(
         .filter(|meta| !meta.id.trim().is_empty())
         .collect::<Vec<OpenCodeSessionMeta>>();
 
-    if metas.is_empty() {
-        return None;
-    }
-
-    if !normalized_cwd.is_empty() {
-        let matched = metas
-            .iter()
-            .filter(|meta| crate::tooling::normalize_path(&meta.directory) == normalized_cwd)
-            .max_by_key(|meta| meta.time.updated)
-            .cloned();
-        if matched.is_some() {
-            return matched;
-        }
-    }
-
-    metas.into_iter().max_by_key(|meta| meta.time.updated)
+    select_session_meta_from_metas(&metas, normalized_cwd)
 }
 
 /// 计算目录中 JSON 文件签名。
@@ -147,4 +132,78 @@ fn has_json_ext(path: &Path) -> bool {
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("json"))
         .unwrap_or(false)
+}
+
+/// 从会话元数据列表中选择与 cwd 对齐的会话。
+///
+/// 规则：
+/// 1. 若传入了 `normalized_cwd`，只返回该目录下最新会话；找不到则返回 `None`。
+/// 2. 若 `normalized_cwd` 为空，回退为全局最新会话。
+fn select_session_meta_from_metas(
+    metas: &[OpenCodeSessionMeta],
+    normalized_cwd: &str,
+) -> Option<OpenCodeSessionMeta> {
+    if metas.is_empty() {
+        return None;
+    }
+
+    if !normalized_cwd.is_empty() {
+        return metas
+            .iter()
+            .filter(|meta| crate::tooling::normalize_path(&meta.directory) == normalized_cwd)
+            .max_by_key(|meta| meta.time.updated)
+            .cloned();
+    }
+
+    metas.iter().max_by_key(|meta| meta.time.updated).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::tooling::opencode_session::types::{OpenCodeSessionMeta, OpenCodeSessionTime};
+
+    use super::select_session_meta_from_metas;
+
+    fn meta(id: &str, directory: &str, updated: i64) -> OpenCodeSessionMeta {
+        OpenCodeSessionMeta {
+            id: id.to_string(),
+            directory: directory.to_string(),
+            time: OpenCodeSessionTime { updated },
+            ..OpenCodeSessionMeta::default()
+        }
+    }
+
+    #[test]
+    fn cwd_mismatch_should_not_fallback_to_global_latest() {
+        let metas = vec![
+            meta("s1", "/workspace/old", 100),
+            meta("s2", "/workspace/old", 200),
+        ];
+        let selected = select_session_meta_from_metas(&metas, "/workspace/new");
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn cwd_match_should_pick_latest_in_same_directory() {
+        let metas = vec![
+            meta("s1", "/workspace/a", 100),
+            meta("s2", "/workspace/b", 200),
+            meta("s3", "/workspace/a", 300),
+        ];
+        let selected = select_session_meta_from_metas(&metas, "/workspace/a")
+            .expect("expected matched session");
+        assert_eq!(selected.id, "s3");
+    }
+
+    #[test]
+    fn empty_cwd_should_fallback_to_global_latest() {
+        let metas = vec![
+            meta("s1", "/workspace/a", 100),
+            meta("s2", "/workspace/b", 300),
+            meta("s3", "/workspace/c", 200),
+        ];
+        let selected =
+            select_session_meta_from_metas(&metas, "").expect("expected latest session");
+        assert_eq!(selected.id, "s2");
+    }
 }

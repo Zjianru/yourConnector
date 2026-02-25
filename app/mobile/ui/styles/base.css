@@ -953,6 +953,25 @@
         padding: 12px;
       }
 
+      .tool-detail-stack {
+        display: grid;
+        gap: 8px;
+      }
+
+      .tool-detail-subcard {
+        margin-top: 0;
+      }
+
+      .tool-detail-subcard .expand-head .title {
+        font-size: 16px;
+      }
+
+      .tool-detail-subcard .icon-btn {
+        width: 30px;
+        height: 30px;
+        font-size: 18px;
+      }
+
       .candidate-list {
         display: grid;
         gap: 10px;

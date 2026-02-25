@@ -2,10 +2,10 @@
 //! 1. 基于进程与本地会话文件发现 OpenCode 工具实例。
 //! 2. 输出 opencode.v1 详情数据，统一接入 Tool Adapter Core。
 
-use std::collections::HashSet;
+use std::{collections::HashSet, process::Command};
 
 use chrono::{Duration as ChronoDuration, Utc};
-use serde_json::json;
+use serde_json::{Value, json};
 use yc_shared_protocol::{ToolRuntimePayload, now_rfc3339_nanos};
 
 use crate::tooling::{
@@ -150,6 +150,9 @@ pub(crate) fn collect_details(
     options: &ToolDetailCollectOptions,
 ) -> Vec<ToolDetailCollectResult> {
     let mut results = Vec::with_capacity(tools.len());
+    let config_json = run_opencode_debug_json(&["debug", "config"]);
+    let skill_snapshot = collect_skill_snapshot(config_json.as_ref());
+    let mcp_snapshot = collect_mcp_snapshot(config_json.as_ref());
 
     for tool in tools {
         let workspace = tool.workspace_dir.clone().unwrap_or_default();
@@ -165,6 +168,8 @@ pub(crate) fn collect_details(
             "model": session_state.model,
             "latestTokens": session_state.latest_tokens,
             "modelUsage": session_state.model_usage,
+            "skills": skill_snapshot,
+            "mcp": mcp_snapshot,
         });
 
         results.push(ToolDetailCollectResult::success(
@@ -202,11 +207,136 @@ fn inject_expire_fields(
     data
 }
 
+/// 执行 opencode debug 命令并尝试解析 JSON。
+fn run_opencode_debug_json(args: &[&str]) -> Option<Value> {
+    let output = Command::new("opencode").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&output.stdout).ok()
+}
+
+/// 收集 skills 详情，并给出启用/未启用分类。
+fn collect_skill_snapshot(config_json: Option<&Value>) -> Value {
+    let skills_rows = run_opencode_debug_json(&["debug", "skill"])
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    let mut installed = Vec::new();
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+
+    for row in skills_rows {
+        let name = read_string_path(&row, &["name"]);
+        if name.trim().is_empty() {
+            continue;
+        }
+        let allowed = skill_allowed(config_json, &name);
+        if allowed {
+            enabled.push(name.clone());
+        } else {
+            disabled.push(name.clone());
+        }
+        installed.push(json!({
+            "name": name,
+            "description": read_string_path(&row, &["description"]),
+            "location": read_string_path(&row, &["location"]),
+        }));
+    }
+
+    json!({
+        "installed": installed,
+        "enabled": enabled,
+        "disabled": disabled,
+    })
+}
+
+/// 收集 mcp 配置，并给出启用/未启用分类。
+fn collect_mcp_snapshot(config_json: Option<&Value>) -> Value {
+    let mut servers = Vec::new();
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+
+    let mcp_obj = config_json
+        .and_then(|cfg| cfg.get("mcp"))
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for (name, row) in mcp_obj {
+        let enabled_flag = row
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let command = row
+            .get("command")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|item| item.as_str().map(ToString::to_string))
+            .collect::<Vec<String>>();
+        if enabled_flag {
+            enabled.push(name.clone());
+        } else {
+            disabled.push(name.clone());
+        }
+        servers.push(json!({
+            "name": name,
+            "type": read_string_path(&row, &["type"]),
+            "enabled": enabled_flag,
+            "command": command,
+            "timeout": row.get("timeout").and_then(Value::as_i64).unwrap_or_default(),
+        }));
+    }
+
+    json!({
+        "servers": servers,
+        "enabled": enabled,
+        "disabled": disabled,
+    })
+}
+
+/// 判断技能是否被 permission.skill 规则禁用。
+fn skill_allowed(config_json: Option<&Value>, skill_name: &str) -> bool {
+    let Some(permission_skill) = config_json
+        .and_then(|cfg| cfg.get("permission"))
+        .and_then(|v| v.get("skill"))
+        .and_then(Value::as_object)
+    else {
+        return true;
+    };
+    if let Some(action) = permission_skill.get(skill_name).and_then(Value::as_str) {
+        return !action.eq_ignore_ascii_case("deny");
+    }
+    if let Some(action) = permission_skill.get("*").and_then(Value::as_str) {
+        return !action.eq_ignore_ascii_case("deny");
+    }
+    true
+}
+
+/// 读取路径字符串。
+fn read_string_path(value: &Value, path: &[&str]) -> String {
+    let mut cursor = value;
+    for key in path {
+        let Some(next) = cursor.get(*key) else {
+            return String::new();
+        };
+        cursor = next;
+    }
+    cursor
+        .as_str()
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use super::discover;
+    use serde_json::json;
+
+    use super::{collect_mcp_snapshot, collect_skill_snapshot, discover, skill_allowed};
     use crate::{ProcInfo, tooling::core::types::ToolDiscoveryContext};
 
     fn proc(pid: i32, cmd: &str, cwd: &str) -> ProcInfo {
@@ -260,5 +390,50 @@ mod tests {
                 .iter()
                 .any(|item| item.tool_id.ends_with("_p202"))
         );
+    }
+
+    #[test]
+    fn skill_snapshot_respects_permission_deny() {
+        let config = json!({
+            "permission": {
+                "skill": {
+                    "*": "allow",
+                    "yc-demo-skill": "deny"
+                }
+            }
+        });
+        assert!(!skill_allowed(Some(&config), "yc-demo-skill"));
+        assert!(skill_allowed(Some(&config), "other-skill"));
+    }
+
+    #[test]
+    fn mcp_snapshot_splits_enabled_and_disabled() {
+        let config = json!({
+            "mcp": {
+                "a": {"type": "local", "enabled": true, "command": ["node", "a.js"]},
+                "b": {"type": "local", "enabled": false, "command": ["node", "b.js"]}
+            }
+        });
+        let snapshot = collect_mcp_snapshot(Some(&config));
+        let enabled = snapshot
+            .get("enabled")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let disabled = snapshot
+            .get("disabled")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(disabled.len(), 1);
+    }
+
+    #[test]
+    fn skill_snapshot_handles_missing_data() {
+        let snapshot = collect_skill_snapshot(None);
+        assert!(snapshot.get("installed").and_then(|v| v.as_array()).is_some());
+        assert!(snapshot.get("enabled").and_then(|v| v.as_array()).is_some());
+        assert!(snapshot.get("disabled").and_then(|v| v.as_array()).is_some());
     }
 }

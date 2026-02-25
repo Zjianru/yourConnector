@@ -4,7 +4,7 @@
 // 3. 保持 OpenCode 详情体验不退化，并在打开弹窗时触发按需刷新。
 
 import { asMap, asListOfMap, asBool } from "../utils/type.js";
-import { fmt2, fmtInt, fmtTokenM, usageSummary } from "../utils/format.js";
+import { fmt2, fmtInt, fmtTokenM } from "../utils/format.js";
 import { localizedCategory } from "../utils/host-format.js";
 import { renderRows } from "../utils/rows.js";
 import { escapeHtml } from "../utils/dom.js";
@@ -36,6 +36,7 @@ export function createToolDetailModal({
     state.detailHostId = hostId;
     state.detailToolId = toolId;
     state.detailExpanded = false;
+    state.detailCardExpanded = {};
     state.detailOpenClawPageIndex = 0;
     state.detailOpenClawSessionsSection = "diagnostics";
     state.detailOpenClawUsageWindowPreset = "1h";
@@ -52,6 +53,7 @@ export function createToolDetailModal({
     state.detailHostId = "";
     state.detailToolId = "";
     state.detailExpanded = false;
+    state.detailCardExpanded = {};
     state.detailOpenClawPageIndex = 0;
     state.detailOpenClawSessionsSection = "diagnostics";
     state.detailOpenClawUsageWindowPreset = "1h";
@@ -300,6 +302,68 @@ export function createToolDetailModal({
       ["会话诊断", openClawSessionDigest(overview)],
       ["混合用量头条", openClawUsageHeadline(overview)],
     ];
+  }
+
+  /**
+   * 切换旧版“更多信息”头部显隐。
+   * 默认工具详情会自行渲染多卡片，需隐藏该头部；OpenClaw 继续使用原头部。
+   * @param {boolean} visible 是否显示。
+   */
+  function setLegacyDetailHeaderVisible(visible) {
+    const head = ui.toolDetailSectionTitle?.parentElement;
+    if (head instanceof HTMLElement) {
+      head.style.display = visible ? "" : "none";
+    }
+    if (ui.detailTip instanceof HTMLElement) {
+      ui.detailTip.style.display = visible ? "" : "none";
+    }
+    if (ui.detailRows instanceof HTMLElement) {
+      ui.detailRows.style.marginTop = visible ? "8px" : "0";
+    }
+  }
+
+  /**
+   * 渲染默认详情的可折叠卡片。
+   * @param {{key: string, title: string, rows: Array<[string, string]>}} section 卡片定义。
+   * @returns {string}
+   */
+  function renderDefaultDetailCard(section) {
+    const previewCount = 3;
+    const key = String(section.key || "").trim();
+    const title = String(section.title || "详情").trim() || "详情";
+    const rows = Array.isArray(section.rows) && section.rows.length > 0
+      ? section.rows
+      : [["状态", "暂无数据"]];
+    const expanded = asBool(asMap(state.detailCardExpanded)[key]);
+    const showToggle = rows.length > previewCount;
+    const visibleRows = expanded ? rows : rows.slice(0, previewCount);
+    const hiddenCount = Math.max(0, rows.length - previewCount);
+    const toggle = showToggle
+      ? `
+        <button
+          class="icon-btn"
+          type="button"
+          data-detail-card-toggle="${escapeHtml(key)}"
+          aria-label="展开或收起 ${escapeHtml(title)}"
+        >
+          ${expanded ? "⌃" : "⌄"}
+        </button>
+      `
+      : "";
+    const tip = !expanded && hiddenCount > 0
+      ? `<p class="expand-tip">还有 ${hiddenCount} 项，点击箭头展开</p>`
+      : "";
+
+    return `
+      <section class="detail-card tool-detail-subcard">
+        <div class="expand-head">
+          <span class="title">${escapeHtml(title)}</span>
+          ${toggle}
+        </div>
+        <div class="rows" style="margin-top: 8px">${renderRows(visibleRows)}</div>
+        ${tip}
+      </section>
+    `;
   }
 
   /**
@@ -1165,6 +1229,7 @@ export function createToolDetailModal({
     ui.toolSummaryTitle.textContent = "OpenClaw 摘要";
     ui.toolDetailSectionTitle.textContent = "OpenClaw 详情";
     ui.usagePanelTitle.textContent = "模型用量（当前会话）";
+    setLegacyDetailHeaderVisible(true);
 
     ui.summaryRows.innerHTML = renderRows(summaryRows);
     ui.summaryStatusDots.innerHTML = `
@@ -1201,32 +1266,25 @@ export function createToolDetailModal({
    * @param {object} input 渲染上下文。
    */
   function renderDefaultModal(input) {
-    const { host, runtime, tool, metric, detail, detailData, displayName } = input;
+    const { runtime, tool, metric, detail, detailData, displayName } = input;
     const toolId = String(tool.toolId || "");
     const workspace = pickMetric(tool, metric, "workspaceDir") || "--";
     const connectedTool = asBool(metric.connected ?? tool.connected);
     const latestTokens = asMap(metric.latestTokens);
     const modelUsage = asListOfMap(metric.modelUsage);
     const schema = String(detail.schema || "").trim();
+    const isOpenCode = schema === "opencode.v1";
     const stale = asBool(detail.stale);
 
     const summaryRows = [
       ["工具名称", displayName],
-      ["宿主机", String(host.displayName || "--")],
       ["工作目录", workspace],
       ["工具模式", pickMetric(tool, metric, "mode") || "--"],
       ["会话模式", pickMetric(tool, metric, "agentMode") || "--"],
       ["当前模型", pickMetric(tool, metric, "model") || "--"],
       ["状态", pickMetric(tool, metric, "status") || "--"],
-      ["详情Schema", schema || "--"],
       ["详情状态", stale ? "数据过期（展示最近成功值）" : "已同步"],
-      ["详情采集时间", String(detail.collectedAt || "--")],
-      [
-        "最近Token（总/输入/输出）",
-        `${fmtTokenM(latestTokens.total)} / ${fmtTokenM(latestTokens.input)} / ${fmtTokenM(latestTokens.output)}`,
-      ],
-      ["最近缓存（读/写）", `${fmtTokenM(latestTokens.cacheRead)} / ${fmtTokenM(latestTokens.cacheWrite)}`],
-      ["模型用量", usageSummary(modelUsage)],
+      ["详情采集时间", formatTime(detail.collectedAt)],
     ];
 
     const reason = pickMetric(tool, metric, "reason");
@@ -1257,79 +1315,132 @@ export function createToolDetailModal({
       ],
     ];
 
-    let extraRows = [];
-    let extraUsageRows = [];
+    const toNameList = (raw) => {
+      if (!Array.isArray(raw)) {
+        return [];
+      }
+      return raw
+        .map((row) => {
+          if (typeof row === "string") {
+            return row.trim();
+          }
+          if (row && typeof row === "object") {
+            return String(row.name || "").trim();
+          }
+          return "";
+        })
+        .filter((name) => name.length > 0);
+    };
 
-    if (schema === "opencode.v1") {
-      const opencodeLatestTokens = asMap(detailData.latestTokens);
-      const opencodeUsage = asListOfMap(detailData.modelUsage);
-      extraRows = [
+    const skillSnapshot = asMap(detailData.skills);
+    const mcpSnapshot = asMap(detailData.mcp);
+    const skillInstalled = asListOfMap(skillSnapshot.installed);
+    const skillEnabled = toNameList(skillSnapshot.enabled);
+    const skillDisabled = toNameList(skillSnapshot.disabled);
+    const mcpServers = asListOfMap(mcpSnapshot.servers);
+    const mcpEnabled = toNameList(mcpSnapshot.enabled);
+    const mcpDisabled = toNameList(mcpSnapshot.disabled);
+
+    const skillRows = isOpenCode
+      ? [
+        ["已启用", `${skillEnabled.length} 项`],
+        ["未启用", `${skillDisabled.length} 项`],
+        ["已安装", `${skillInstalled.length} 项`],
+        ...skillEnabled.map((name, idx) => [`启用 Skill ${idx + 1}`, name]),
+        ...skillDisabled.map((name, idx) => [`未启用 Skill ${idx + 1}`, name]),
+      ]
+      : [["状态", "当前工具未提供 Skills 信息"]];
+    const mcpRows = isOpenCode
+      ? [
+        ["已连接", `${mcpEnabled.length} 项`],
+        ["未连接", `${mcpDisabled.length} 项`],
+        ["服务总数", `${mcpServers.length} 项`],
+        ...mcpServers.map((server, idx) => {
+          const name = String(server.name || "--");
+          const kind = String(server.type || "unknown");
+          const enabledFlag = asBool(server.enabled);
+          return [
+            `MCP 服务 ${idx + 1}`,
+            `${name} · ${enabledFlag ? "已连接" : "未连接"} · ${kind}`,
+          ];
+        }),
+      ]
+      : [["状态", "当前工具未提供 MCP 信息"]];
+
+    if (isOpenCode) {
+      detailsRows.unshift(
         ["Profile", String(detail.profileKey || "--")],
         ["Session ID", String(detailData.sessionId || "--")],
         ["Session Title", String(detailData.sessionTitle || "--")],
         ["Session Updated", String(detailData.sessionUpdatedAt || "--")],
-        ["Agent Mode", String(detailData.agentMode || "--")],
         ["Provider", String(detailData.providerId || "--")],
-      ];
-      extraUsageRows = opencodeUsage.map((row) => {
-        const modelName = String(row.model || "--");
-        const total = fmtTokenM(row.tokenTotal);
-        const input = fmtTokenM(row.tokenInput);
-        const output = fmtTokenM(row.tokenOutput);
-        const count = fmtInt(row.messages);
-        return [modelName, `消息 ${count} 条 · 总Token ${total} · 输入 ${input} · 输出 ${output}`];
-      });
-      if (extraUsageRows.length === 0 && Object.keys(opencodeLatestTokens).length > 0) {
-        extraUsageRows.push([
-          "最近 Token",
-          `${fmtTokenM(opencodeLatestTokens.total)} / ${fmtTokenM(opencodeLatestTokens.input)} / ${fmtTokenM(opencodeLatestTokens.output)}`,
-        ]);
-      }
+      );
     }
 
-    if (extraRows.length > 0) {
-      detailsRows.push(...extraRows);
+    const usageRows = [];
+    const detailUsage = asListOfMap(detailData.modelUsage);
+    const activeUsage = detailUsage.length > 0 ? detailUsage : modelUsage;
+    for (const row of activeUsage) {
+      const modelName = String(row.model || "--");
+      const total = fmtTokenM(row.tokenTotal);
+      const input = fmtTokenM(row.tokenInput);
+      const output = fmtTokenM(row.tokenOutput);
+      const count = fmtInt(row.messages);
+      usageRows.push([modelName, `消息 ${count} 条 · 总Token ${total} · 输入 ${input} · 输出 ${output}`]);
     }
+    if (usageRows.length === 0 && Object.keys(latestTokens).length > 0) {
+      usageRows.push([
+        "最近 Token",
+        `${fmtTokenM(latestTokens.total)} / ${fmtTokenM(latestTokens.input)} / ${fmtTokenM(latestTokens.output)}`,
+      ]);
+      usageRows.push([
+        "最近缓存（读/写）",
+        `${fmtTokenM(latestTokens.cacheRead)} / ${fmtTokenM(latestTokens.cacheWrite)}`,
+      ]);
+    }
+    if (usageRows.length === 0) {
+      usageRows.push(["状态", "当前会话暂无模型用量数据"]);
+    }
+
+    const cards = [
+      {
+        key: "skills",
+        title: "Skills 信息",
+        rows: skillRows,
+      },
+      {
+        key: "mcp",
+        title: "MCP 信息",
+        rows: mcpRows,
+      },
+      {
+        key: "usage",
+        title: "模型用量",
+        rows: usageRows,
+      },
+      {
+        key: "more",
+        title: "更多信息",
+        rows: detailsRows.length > 0 ? detailsRows : [["状态", "暂无更多信息"]],
+      },
+    ];
 
     ui.toolModalTitle.textContent = displayName || "Tool Detail";
-    ui.toolSummaryTitle.textContent = schema === "opencode.v1" ? "OpenCode 摘要" : "工具摘要";
+    ui.toolSummaryTitle.textContent = isOpenCode ? "OpenCode 摘要" : "工具摘要";
     ui.toolDetailSectionTitle.textContent = "更多信息";
     ui.usagePanelTitle.textContent = "模型用量（当前会话）";
+    setLegacyDetailHeaderVisible(false);
     ui.summaryStatusDots.innerHTML = "";
     ui.summaryRows.innerHTML = renderRows(summaryRows);
-
-    const previewCount = 2;
-    const showingRows = state.detailExpanded ? detailsRows : detailsRows.slice(0, previewCount);
-    ui.detailRows.innerHTML = renderRows(showingRows);
-    ui.detailTip.textContent = !state.detailExpanded && detailsRows.length > previewCount
-      ? `还有 ${detailsRows.length - previewCount} 项，点击箭头展开`
-      : "";
-
-    ui.toggleDetailsBtn.style.display = "";
-    ui.toggleDetailsBtn.textContent = state.detailExpanded ? "⌃" : "⌄";
-
-    if (state.detailExpanded && extraUsageRows.length > 0) {
-      ui.usagePanel.style.display = "block";
-      ui.usageRows.innerHTML = renderRows(extraUsageRows);
-    } else if (state.detailExpanded && modelUsage.length > 0) {
-      ui.usagePanel.style.display = "block";
-      ui.usageRows.innerHTML = renderRows(
-        modelUsage.map((row) => {
-          const modelName = String(row.model || "--");
-          const total = fmtTokenM(row.tokenTotal);
-          const input = fmtTokenM(row.tokenInput);
-          const output = fmtTokenM(row.tokenOutput);
-          const count = fmtInt(row.messages);
-          return [
-            modelName,
-            `消息 ${count} 条 · 总Token ${total} · 输入 ${input} · 输出 ${output}`,
-          ];
-        }),
-      );
-    } else {
-      ui.usagePanel.style.display = "none";
-      ui.usageRows.innerHTML = "";
-    }
+    ui.detailRows.innerHTML = `
+      <div class="tool-detail-stack">
+        ${cards.map((section) => renderDefaultDetailCard(section)).join("")}
+      </div>
+    `;
+    ui.detailTip.textContent = "";
+    ui.toggleDetailsBtn.style.display = "none";
+    ui.usagePanel.style.display = "none";
+    ui.usageRows.innerHTML = "";
 
     ui.toolModal.classList.add("show");
   }
@@ -1425,6 +1536,22 @@ export function createToolDetailModal({
       if (!(target instanceof Element)) {
         return;
       }
+
+      const cardToggle = target.closest("[data-detail-card-toggle]");
+      if (cardToggle instanceof Element) {
+        const key = String(cardToggle.getAttribute("data-detail-card-toggle") || "").trim();
+        if (key) {
+          const expandedMap = asMap(state.detailCardExpanded);
+          const next = !asBool(expandedMap[key]);
+          state.detailCardExpanded = {
+            ...expandedMap,
+            [key]: next,
+          };
+          renderToolModal();
+        }
+        return;
+      }
+
       const pageBtn = target.closest("[data-openclaw-page-index]");
       if (pageBtn instanceof Element) {
         const index = Number(pageBtn.getAttribute("data-openclaw-page-index"));

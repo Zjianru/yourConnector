@@ -100,6 +100,7 @@ export const state = {
   detailHostId: "",
   detailToolId: "",
   detailExpanded: false,
+  detailCardExpanded: {},
   detailOpenClawPageIndex: 0,
   detailOpenClawSessionsSection: "diagnostics",
   detailOpenClawUsageWindowPreset: "1h",
