@@ -12,6 +12,26 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+fn openclaw_identity_hash(tool_id: &str) -> Option<&str> {
+    let rest = tool_id.strip_prefix("openclaw_")?;
+
+    if let Some(hash) = rest.strip_suffix("_gw")
+        && !hash.trim().is_empty()
+    {
+        return Some(hash);
+    }
+
+    if let Some((hash, pid_text)) = rest.rsplit_once("_p")
+        && !hash.trim().is_empty()
+        && !pid_text.trim().is_empty()
+        && pid_text.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return Some(hash);
+    }
+
+    None
+}
+
 /// 工具白名单文件结构。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,28 +99,48 @@ impl ToolWhitelistStore {
         ids
     }
 
-    /// 兼容 OpenClaw gateway 的历史实例 ID：
-    /// 老版本使用 `openclaw_<hash>_p<pid>`，新版本使用 `openclaw_<hash>_gw`。
-    /// 该方法在白名单判断时提供平滑过渡，避免升级后工具“看似掉线”。
+    /// 兼容 OpenClaw 的实例 ID 漂移：
+    /// `openclaw_<hash>_gw` 与 `openclaw_<hash>_p<pid>` 视为同一逻辑身份。
+    /// 用于避免重启或 PID 漂移后卡片重复/离线。
     pub(crate) fn contains_compatible(&self, tool_id: &str) -> bool {
         if self.contains(tool_id) {
             return true;
         }
 
-        let Some(hash) = tool_id
-            .strip_prefix("openclaw_")
-            .and_then(|rest| rest.strip_suffix("_gw"))
-        else {
+        let Some(hash) = openclaw_identity_hash(tool_id) else {
             return false;
         };
 
-        let legacy_prefix = format!("openclaw_{hash}_p");
-        self.ids.iter().any(|id| id.starts_with(&legacy_prefix))
+        if self
+            .ids
+            .iter()
+            .filter_map(|id| openclaw_identity_hash(id))
+            .any(|existing_hash| existing_hash == hash)
+        {
+            return true;
+        }
+
+        // 单宿主 OpenClaw 单实例策略：当白名单里仅有一个 OpenClaw 身份时，
+        // 允许 hash 迁移（例如网关重启后 cwd 变化），避免出现“已接入但卡片离线占位”。
+        self.ids
+            .iter()
+            .filter_map(|id| openclaw_identity_hash(id))
+            .count()
+            == 1
     }
 
     /// 将工具加入白名单并立即落盘；返回是否实际发生变更。
     pub(crate) fn add(&mut self, tool_id: &str) -> anyhow::Result<bool> {
-        if !self.ids.insert(tool_id.to_string()) {
+        let before = self.ids.clone();
+
+        if openclaw_identity_hash(tool_id).is_some() {
+            // OpenClaw 按“单实例”维护：新实例接入时覆盖旧身份，避免残留旧 hash。
+            self.ids
+                .retain(|existing| openclaw_identity_hash(existing).is_none());
+        }
+
+        self.ids.insert(tool_id.to_string());
+        if self.ids == before {
             return Ok(false);
         }
         self.save()?;
@@ -109,7 +149,38 @@ impl ToolWhitelistStore {
 
     /// 将工具移出白名单并立即落盘；返回是否实际发生变更。
     pub(crate) fn remove(&mut self, tool_id: &str) -> anyhow::Result<bool> {
-        if !self.ids.remove(tool_id) {
+        let before = self.ids.clone();
+
+        if self.ids.remove(tool_id) {
+            self.save()?;
+            return Ok(true);
+        }
+
+        if let Some(hash) = openclaw_identity_hash(tool_id) {
+            let mut removed_by_hash = false;
+            self.ids.retain(|existing| {
+                let matched = openclaw_identity_hash(existing) == Some(hash);
+                if matched {
+                    removed_by_hash = true;
+                }
+                !matched
+            });
+
+            if !removed_by_hash {
+                // 当 hash 已漂移时（例如 gateway 身份变更），兜底移除唯一 OpenClaw 绑定。
+                let openclaw_ids = self
+                    .ids
+                    .iter()
+                    .filter(|id| openclaw_identity_hash(id).is_some())
+                    .cloned()
+                    .collect::<Vec<String>>();
+                if openclaw_ids.len() == 1 {
+                    self.ids.remove(&openclaw_ids[0]);
+                }
+            }
+        }
+
+        if self.ids == before {
             return Ok(false);
         }
         self.save()?;
@@ -343,4 +414,72 @@ fn controller_devices_path() -> Option<PathBuf> {
             .join("sidecar")
             .join("controller-devices.json"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ToolWhitelistStore, openclaw_identity_hash};
+
+    #[test]
+    fn openclaw_identity_hash_should_support_gateway_and_pid_variants() {
+        assert_eq!(
+            openclaw_identity_hash("openclaw_abcd1234ef56_gw"),
+            Some("abcd1234ef56")
+        );
+        assert_eq!(
+            openclaw_identity_hash("openclaw_abcd1234ef56_p1024"),
+            Some("abcd1234ef56")
+        );
+        assert_eq!(openclaw_identity_hash("opencode_xxx_p1"), None);
+    }
+
+    #[test]
+    fn contains_compatible_should_match_openclaw_pid_drift() {
+        let whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_p1024"]);
+        assert!(whitelist.contains_compatible("openclaw_abcd1234ef56_p2048"));
+        assert!(whitelist.contains_compatible("openclaw_abcd1234ef56_gw"));
+        assert!(whitelist.contains_compatible("openclaw_ffffeeee1111_p2048"));
+    }
+
+    #[test]
+    fn contains_compatible_should_require_hash_match_when_multiple_openclaw_bound() {
+        let whitelist = ToolWhitelistStore::from_ids_for_test(&[
+            "openclaw_abcd1234ef56_p1024",
+            "openclaw_ffffeeee1111_p2048",
+        ]);
+        assert!(whitelist.contains_compatible("openclaw_abcd1234ef56_gw"));
+        assert!(!whitelist.contains_compatible("openclaw_deadbeef9999_gw"));
+    }
+
+    #[test]
+    fn remove_should_drop_openclaw_compatible_identity() {
+        let mut whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_p1024"]);
+        let changed = whitelist
+            .remove("openclaw_abcd1234ef56_p2048")
+            .expect("remove should succeed");
+        assert!(changed);
+        assert!(!whitelist.contains_compatible("openclaw_abcd1234ef56_gw"));
+    }
+
+    #[test]
+    fn add_should_replace_old_openclaw_identity_under_single_instance_policy() {
+        let mut whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_gw"]);
+        let changed = whitelist
+            .add("openclaw_ffffeeee1111_gw")
+            .expect("add should succeed");
+        assert!(changed);
+
+        let ids = whitelist.list_ids();
+        assert_eq!(ids, vec!["openclaw_ffffeeee1111_gw".to_string()]);
+    }
+
+    #[test]
+    fn remove_should_drop_single_openclaw_even_when_hash_drifted() {
+        let mut whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_gw"]);
+        let changed = whitelist
+            .remove("openclaw_ffffeeee1111_gw")
+            .expect("remove should succeed");
+        assert!(changed);
+        assert!(whitelist.list_ids().is_empty());
+    }
 }

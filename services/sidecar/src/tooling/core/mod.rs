@@ -332,12 +332,17 @@ fn discovery_process_refresh_kind() -> ProcessRefreshKind {
         .with_memory()
         .with_cpu()
         .with_disk_usage()
+        // macOS 上 cmd/cwd 可能在首次快照缺失；强制刷新可避免 openclaw gateway toolId 漂移。
+        .with_cmd(UpdateKind::Always)
+        .with_cwd(UpdateKind::Always)
         .with_exe(UpdateKind::OnlyIfNotSet)
         .without_tasks()
 }
 
 #[cfg(test)]
 mod tests {
+    use sysinfo::UpdateKind;
+
     use super::{ToolAdapterCore, discovery_process_refresh_kind};
 
     #[test]
@@ -353,7 +358,10 @@ mod tests {
     }
 
     #[test]
-    fn discovery_refresh_kind_disables_tasks() {
-        assert!(!discovery_process_refresh_kind().tasks());
+    fn discovery_refresh_kind_enables_cmd_cwd_and_disables_tasks() {
+        let kind = discovery_process_refresh_kind();
+        assert_eq!(kind.cmd(), UpdateKind::Always);
+        assert_eq!(kind.cwd(), UpdateKind::Always);
+        assert!(!kind.tasks());
     }
 }

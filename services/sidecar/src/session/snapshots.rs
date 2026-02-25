@@ -109,6 +109,12 @@ fn split_discovered_tools(
     let mut connected = Vec::new();
     let mut candidates = Vec::new();
     let mut connected_identity_keys = HashSet::new();
+    let whitelist_ids = whitelist.list_ids();
+    let single_openclaw_binding = whitelist_ids
+        .iter()
+        .filter(|id| id.starts_with("openclaw_"))
+        .count()
+        == 1;
 
     for tool in discovered_tools.iter().cloned() {
         if whitelist.contains_compatible(&tool.tool_id) {
@@ -120,9 +126,16 @@ fn split_discovered_tools(
     }
 
     // 已接入工具即使当前进程暂时不可见，也应继续展示在 connected 列表。
-    for tool_id in whitelist.list_ids() {
+    let has_connected_openclaw = connected
+        .iter()
+        .any(|tool| tool.tool_id.starts_with("openclaw_"));
+    for tool_id in whitelist_ids {
         let identity_key = tool_identity_key(&tool_id);
         if connected_identity_keys.contains(&identity_key) {
+            continue;
+        }
+        if single_openclaw_binding && has_connected_openclaw && tool_id.starts_with("openclaw_") {
+            // OpenClaw 单实例策略下，白名单 hash 漂移时保留真实在线项，不再补离线占位。
             continue;
         }
         connected.push(build_whitelist_placeholder_tool(&tool_id));
@@ -346,5 +359,17 @@ mod tests {
         assert_eq!(candidates.len(), 0);
         assert_eq!(connected.len(), 1);
         assert_eq!(connected[0].tool_id, "openclaw_abcd1234ef56_gw");
+    }
+
+    #[test]
+    fn openclaw_hash_drift_should_still_bind_single_instance_card() {
+        let whitelist = ToolWhitelistStore::from_ids_for_test(&["openclaw_abcd1234ef56_gw"]);
+        let discovered = vec![make_tool("openclaw_ffffeeee1111_gw")];
+
+        let (connected, candidates) = split_discovered_tools(&discovered, &whitelist);
+        assert_eq!(candidates.len(), 0);
+        assert_eq!(connected.len(), 1);
+        assert_eq!(connected[0].tool_id, "openclaw_ffffeeee1111_gw");
+        assert_eq!(connected[0].status, "RUNNING");
     }
 }
