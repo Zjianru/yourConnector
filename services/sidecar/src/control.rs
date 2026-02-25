@@ -25,6 +25,16 @@ pub(crate) const TOOL_PROCESS_CONTROL_UPDATED_EVENT: &str = "tool_process_contro
 pub(crate) const CONTROLLER_REBIND_REQUEST_EVENT: &str = "controller_rebind_request";
 /// sidecar 返回控制端绑定更新结果。
 pub(crate) const CONTROLLER_BIND_UPDATED_EVENT: &str = "controller_bind_updated";
+/// 请求执行工具聊天（单条消息）。
+pub(crate) const TOOL_CHAT_REQUEST_EVENT: &str = "tool_chat_request";
+/// 请求取消当前工具聊天执行。
+pub(crate) const TOOL_CHAT_CANCEL_REQUEST_EVENT: &str = "tool_chat_cancel_request";
+/// sidecar 返回聊天开始事件。
+pub(crate) const TOOL_CHAT_STARTED_EVENT: &str = "tool_chat_started";
+/// sidecar 返回聊天流式分片事件。
+pub(crate) const TOOL_CHAT_CHUNK_EVENT: &str = "tool_chat_chunk";
+/// sidecar 返回聊天结束事件。
+pub(crate) const TOOL_CHAT_FINISHED_EVENT: &str = "tool_chat_finished";
 
 /// Relay 注入的可信来源客户端类型字段。
 const SOURCE_CLIENT_TYPE_FIELD: &str = "sourceClientType";
@@ -62,6 +72,21 @@ pub(crate) enum SidecarCommand {
     },
     /// 将控制端设备重绑为指定 deviceId。
     RebindController { device_id: String },
+    /// 发起工具聊天请求。
+    ToolChatRequest {
+        tool_id: String,
+        conversation_key: String,
+        request_id: String,
+        queue_item_id: String,
+        text: String,
+    },
+    /// 取消工具聊天请求。
+    ToolChatCancel {
+        tool_id: String,
+        conversation_key: String,
+        request_id: String,
+        queue_item_id: String,
+    },
 }
 
 /// 工具进程控制动作枚举。
@@ -205,6 +230,81 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 }
             })
             .map(|device_id| SidecarCommand::RebindController { device_id }),
+        TOOL_CHAT_REQUEST_EVENT => {
+            let tool_id = payload
+                .get("toolId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let conversation_key = payload
+                .get("conversationKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let text = payload
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let queue_item_id = payload
+                .get("queueItemId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| request_id.clone());
+
+            Some(SidecarCommand::ToolChatRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                queue_item_id,
+                text,
+            })
+        }
+        TOOL_CHAT_CANCEL_REQUEST_EVENT => {
+            let conversation_key = payload
+                .get("conversationKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let queue_item_id = payload
+                .get("queueItemId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| request_id.clone());
+            let tool_id = payload
+                .get("toolId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+
+            Some(SidecarCommand::ToolChatCancel {
+                tool_id,
+                conversation_key,
+                request_id,
+                queue_item_id,
+            })
+        }
         _ => None,
     }?;
 
@@ -234,6 +334,8 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
         SidecarCommand::RebindController { device_id } => {
             ("rebind-controller", device_id.to_string())
         }
+        SidecarCommand::ToolChatRequest { tool_id, .. } => ("chat-request", tool_id.clone()),
+        SidecarCommand::ToolChatCancel { tool_id, .. } => ("chat-cancel", tool_id.clone()),
     }
 }
 
@@ -241,6 +343,8 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
 pub(crate) fn command_feedback_event(command: &SidecarCommand) -> &'static str {
     match command {
         SidecarCommand::ControlToolProcess { .. } => TOOL_PROCESS_CONTROL_UPDATED_EVENT,
+        SidecarCommand::ToolChatRequest { .. } => TOOL_CHAT_FINISHED_EVENT,
+        SidecarCommand::ToolChatCancel { .. } => TOOL_CHAT_FINISHED_EVENT,
         _ => TOOL_WHITELIST_UPDATED_EVENT,
     }
 }
@@ -335,6 +439,70 @@ mod tests {
         let env = parse_sidecar_command(raw).expect("command should parse");
         match env.command {
             SidecarCommand::ResetToolWhitelist => {}
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_chat_request_command() {
+        let raw = r#"{
+            "type":"tool_chat_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{
+                "toolId":"opencode_workspace_p1",
+                "conversationKey":"host_a::opencode_workspace_p1",
+                "requestId":"req_1",
+                "queueItemId":"q_1",
+                "text":"hello"
+            }
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ToolChatRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                queue_item_id,
+                text,
+            } => {
+                assert_eq!(tool_id, "opencode_workspace_p1");
+                assert_eq!(conversation_key, "host_a::opencode_workspace_p1");
+                assert_eq!(request_id, "req_1");
+                assert_eq!(queue_item_id, "q_1");
+                assert_eq!(text, "hello");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_chat_cancel_command_defaults_queue_item_id() {
+        let raw = r#"{
+            "type":"tool_chat_cancel_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{
+                "toolId":"opencode_workspace_p1",
+                "conversationKey":"host_a::opencode_workspace_p1",
+                "requestId":"req_1"
+            }
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ToolChatCancel {
+                tool_id,
+                conversation_key,
+                request_id,
+                queue_item_id,
+            } => {
+                assert_eq!(tool_id, "opencode_workspace_p1");
+                assert_eq!(conversation_key, "host_a::opencode_workspace_p1");
+                assert_eq!(request_id, "req_1");
+                assert_eq!(queue_item_id, "req_1");
+            }
             _ => panic!("unexpected command"),
         }
     }

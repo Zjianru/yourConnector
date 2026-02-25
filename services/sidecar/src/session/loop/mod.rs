@@ -1,5 +1,6 @@
 //! Relay 会话循环。
 
+mod chat;
 mod command;
 mod url;
 
@@ -15,7 +16,8 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use self::{
-    command::handle_sidecar_command,
+    chat::ChatRuntime,
+    command::{SidecarCommandContext, handle_sidecar_command},
     url::{raw_payload_logging_enabled, sidecar_ws_url},
 };
 use crate::{
@@ -84,6 +86,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
 
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
+    let (chat_event_tx, mut chat_event_rx) = mpsc::unbounded_channel::<chat::ChatEventEnvelope>();
     let log_raw_payload = raw_payload_logging_enabled();
 
     // reader_task 专门读取 relay 下行消息，并抽取 sidecar 控制命令。
@@ -130,6 +133,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
     );
     let mut whitelist = ToolWhitelistStore::load();
     let mut controllers = ControllerDevicesStore::load();
+    let mut chat_runtime = ChatRuntime::default();
     if let Err(err) = controllers.seed(&cfg.controller_device_ids) {
         warn!("seed controller devices failed: {err}");
     }
@@ -166,6 +170,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             done = &mut reader_task => {
+                chat_runtime.abort_all();
                 match done {
                     Ok(_) => return Err(anyhow!("relay read loop closed")),
                     Err(err) => return Err(anyhow!("relay read task join error: {err}")),
@@ -173,18 +178,24 @@ async fn run_session(cfg: &Config) -> Result<()> {
             }
             maybe_cmd = cmd_rx.recv() => {
                 let Some(command_envelope) = maybe_cmd else {
+                    chat_runtime.abort_all();
                     return Err(anyhow!("command channel closed"));
                 };
 
                 let outcome = handle_sidecar_command(
-                    &mut ws_writer,
-                    cfg,
-                    &mut seq,
+                    SidecarCommandContext {
+                        ws_writer: &mut ws_writer,
+                        cfg,
+                        seq: &mut seq,
+                        discovered_tools: &discovered_tools,
+                        whitelist: &mut whitelist,
+                        controllers: &mut controllers,
+                        chat_runtime: &mut chat_runtime,
+                        chat_event_tx: &chat_event_tx,
+                    },
                     command_envelope,
-                    &discovered_tools,
-                    &mut whitelist,
-                    &mut controllers,
-                ).await?;
+                )
+                .await?;
 
                 if outcome.refresh_snapshots {
                     discovered_tools = tool_core.discover_tools(&mut sys);
@@ -214,6 +225,22 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     )
                     .await?;
                 }
+            }
+            maybe_chat_event = chat_event_rx.recv() => {
+                let Some(chat_event) = maybe_chat_event else {
+                    continue;
+                };
+                if let Some(finalize_key) = chat_event.finalize.as_ref() {
+                    chat_runtime.mark_finished(finalize_key);
+                }
+                send_event(
+                    &mut ws_writer,
+                    &cfg.system_id,
+                    &mut seq,
+                    chat_event.event_type,
+                    chat_event.trace_id.as_deref(),
+                    chat_event.payload,
+                ).await?;
             }
             _ = heartbeat_ticker.tick() => {
                 send_event(

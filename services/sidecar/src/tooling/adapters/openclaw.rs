@@ -113,6 +113,7 @@ pub(crate) fn discover(context: &ToolDiscoveryContext<'_>) -> Vec<ToolRuntimePay
         tools.push(ToolRuntimePayload {
             tool_id,
             name: "OpenClaw".to_string(),
+            tool_class: "assistant".to_string(),
             category: "DEV_WORKER".to_string(),
             vendor: "OpenClaw".to_string(),
             mode: mode.to_string(),

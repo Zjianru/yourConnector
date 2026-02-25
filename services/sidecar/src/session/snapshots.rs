@@ -134,17 +134,18 @@ fn split_discovered_tools(
 
 /// 生成白名单离线占位工具，保证“仅左滑删除才从 connected 消失”。
 fn build_whitelist_placeholder_tool(tool_id: &str) -> ToolRuntimePayload {
-    let (name, vendor, category, mode) = if tool_id.starts_with("openclaw_") {
-        ("OpenClaw", "OpenClaw", "CLI", "CLI")
+    let (name, vendor, category, mode, tool_class) = if tool_id.starts_with("openclaw_") {
+        ("OpenClaw", "OpenClaw", "CLI", "CLI", "assistant")
     } else if tool_id.starts_with("opencode_") {
-        ("OpenCode", "OpenCode", "TUI", "TUI")
+        ("OpenCode", "OpenCode", "TUI", "TUI", "code")
     } else {
-        ("Connected Tool", "Unknown", "UNKNOWN", "-")
+        ("Connected Tool", "Unknown", "UNKNOWN", "-", "assistant")
     };
 
     ToolRuntimePayload {
         tool_id: tool_id.to_string(),
         name: name.to_string(),
+        tool_class: tool_class.to_string(),
         category: category.to_string(),
         vendor: vendor.to_string(),
         mode: mode.to_string(),

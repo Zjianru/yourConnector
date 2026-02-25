@@ -4,6 +4,7 @@
 // 3. 提供原始日志开关与 Runtime 创建器，供各功能模块复用。
 
 import { createUiRefs } from "./ui-refs.js";
+import { createChatStateSlice } from "./chat.js";
 
 export const STORAGE_KEY = "yc_mobile_tauri_hosts_v2";
 export const LEGACY_STORAGE_KEY = "yc_mobile_tauri_debug";
@@ -88,6 +89,7 @@ export const state = {
 
   // 全局 UI 状态。
   activeTab: "ops",
+  activeChatKey: "",
   bannerActiveIndex: 0,
   logs: [],
   operationLogs: [],
@@ -124,6 +126,9 @@ export const state = {
 
   // 删除补偿执行状态。
   deleteCompensating: false,
+
+  // 聊天页状态树。
+  chat: createChatStateSlice(),
 };
 
 // 统一 DOM 引用出口，供流程层与渲染层共享。

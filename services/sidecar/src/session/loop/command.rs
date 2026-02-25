@@ -19,16 +19,33 @@ use crate::{
     config::Config,
     control::{
         CONTROLLER_BIND_UPDATED_EVENT, SidecarCommand, SidecarCommandEnvelope,
-        TOOL_PROCESS_CONTROL_UPDATED_EVENT, TOOL_WHITELIST_UPDATED_EVENT, ToolProcessAction,
-        command_feedback_event, command_feedback_parts,
+        TOOL_CHAT_FINISHED_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT, TOOL_WHITELIST_UPDATED_EVENT,
+        ToolProcessAction, command_feedback_event, command_feedback_parts,
     },
     session::{snapshots::is_fallback_tool, transport::send_event},
     stores::{ControllerDevicesStore, ToolWhitelistStore},
-    tooling::adapters::openclaw,
+    tooling::adapters::{openclaw, opencode},
+};
+
+use super::chat::{
+    CancelChatOutcome, ChatCancelInput, ChatEventSender, ChatRequestInput, ChatRuntime,
+    StartChatOutcome,
 };
 
 /// Relay WebSocket 写端类型别名。
 pub(crate) type RelayWriter = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
+
+/// sidecar 命令处理上下文。
+pub(crate) struct SidecarCommandContext<'a> {
+    pub(crate) ws_writer: &'a mut RelayWriter,
+    pub(crate) cfg: &'a Config,
+    pub(crate) seq: &'a mut u64,
+    pub(crate) discovered_tools: &'a [ToolRuntimePayload],
+    pub(crate) whitelist: &'a mut ToolWhitelistStore,
+    pub(crate) controllers: &'a mut ControllerDevicesStore,
+    pub(crate) chat_runtime: &'a mut ChatRuntime,
+    pub(crate) chat_event_tx: &'a ChatEventSender,
+}
 
 /// sidecar 命令处理结果：声明后续是否需要刷新快照/详情。
 #[derive(Debug, Clone, Default)]
@@ -87,14 +104,20 @@ struct LaunchSpec {
 
 /// 处理一条 sidecar 控制命令，并返回后续刷新意图。
 pub(crate) async fn handle_sidecar_command(
-    ws_writer: &mut RelayWriter,
-    cfg: &Config,
-    seq: &mut u64,
+    ctx: SidecarCommandContext<'_>,
     command_envelope: SidecarCommandEnvelope,
-    discovered_tools: &[ToolRuntimePayload],
-    whitelist: &mut ToolWhitelistStore,
-    controllers: &mut ControllerDevicesStore,
 ) -> Result<SidecarCommandOutcome> {
+    let SidecarCommandContext {
+        ws_writer,
+        cfg,
+        seq,
+        discovered_tools,
+        whitelist,
+        controllers,
+        chat_runtime,
+        chat_event_tx,
+    } = ctx;
+
     let trace_id = if command_envelope.trace_id.trim().is_empty() {
         None
     } else {
@@ -158,6 +181,41 @@ pub(crate) async fn handle_sidecar_command(
     };
 
     if !allowed {
+        if let SidecarCommand::ToolChatRequest {
+            tool_id,
+            conversation_key,
+            request_id,
+            queue_item_id,
+            ..
+        }
+        | SidecarCommand::ToolChatCancel {
+            tool_id,
+            conversation_key,
+            request_id,
+            queue_item_id,
+        } = &command_envelope.command
+        {
+            send_event(
+                ws_writer,
+                &cfg.system_id,
+                seq,
+                TOOL_CHAT_FINISHED_EVENT,
+                trace_id.as_deref(),
+                json!({
+                    "toolId": tool_id,
+                    "conversationKey": conversation_key,
+                    "requestId": request_id,
+                    "queueItemId": queue_item_id,
+                    "status": "failed",
+                    "text": "",
+                    "reason": allow_reason,
+                    "meta": {},
+                }),
+            )
+            .await?;
+            return Ok(SidecarCommandOutcome::default());
+        }
+
         let (action, tool_id) = command_feedback_parts(&command_envelope.command);
         let response_event = command_feedback_event(&command_envelope.command);
         send_event(
@@ -282,13 +340,18 @@ pub(crate) async fn handle_sidecar_command(
                     "工具不在当前列表，无法执行进程控制。".to_string(),
                     None,
                 ),
-                Some(tool) if !openclaw::matches_tool(tool) => (
-                    false,
-                    false,
-                    "当前仅支持对 OpenClaw 执行一键停止/重启。".to_string(),
-                    None,
-                ),
-                Some(tool) => match action {
+                Some(tool) => {
+                    let is_openclaw = openclaw::matches_tool(tool);
+                    let is_opencode = opencode::matches_tool(tool);
+                    if !is_openclaw && !is_opencode {
+                        (
+                            false,
+                            false,
+                            "当前仅支持对 OpenClaw 与代码工具执行进程控制。".to_string(),
+                            None,
+                        )
+                    } else {
+                        match action {
                     ToolProcessAction::Stop => {
                         if let Some(pid_value) = tool.pid {
                             let result = stop_process(pid_value).await;
@@ -298,7 +361,14 @@ pub(crate) async fn handle_sidecar_command(
                         }
                     }
                     ToolProcessAction::Restart => {
-                        if let Some(pid_value) = tool.pid {
+                        if !is_openclaw {
+                            (
+                                false,
+                                false,
+                                "代码工具当前仅支持停止；重启请手动拉起新进程。".to_string(),
+                                None,
+                            )
+                        } else if let Some(pid_value) = tool.pid {
                             match restart_process(pid_value).await {
                                 Ok((changed, new_pid)) => (
                                     true,
@@ -316,7 +386,9 @@ pub(crate) async fn handle_sidecar_command(
                             (false, false, "未找到可控制的进程 PID。".to_string(), None)
                         }
                     }
-                },
+                        }
+                    }
+                }
             };
 
             send_event(
@@ -341,6 +413,113 @@ pub(crate) async fn handle_sidecar_command(
                 SidecarCommandOutcome::snapshots_and_details()
             } else {
                 SidecarCommandOutcome::default()
+            }
+        }
+        SidecarCommand::ToolChatRequest {
+            tool_id,
+            conversation_key,
+            request_id,
+            queue_item_id,
+            text,
+        } => {
+            let tool = discovered_tools
+                .iter()
+                .find(|item| item.tool_id == tool_id)
+                .cloned();
+            let Some(target_tool) = tool else {
+                send_event(
+                    ws_writer,
+                    &cfg.system_id,
+                    seq,
+                    TOOL_CHAT_FINISHED_EVENT,
+                    trace_id.as_deref(),
+                    json!({
+                        "toolId": tool_id,
+                        "conversationKey": conversation_key,
+                        "requestId": request_id,
+                        "queueItemId": queue_item_id,
+                        "status": "failed",
+                        "text": "",
+                        "reason": "工具未在线或未接入，无法发起聊天。",
+                        "meta": {},
+                    }),
+                )
+                .await?;
+                return Ok(SidecarCommandOutcome::default());
+            };
+
+            let start = chat_runtime.start_request(
+                ChatRequestInput {
+                    tool_id: tool_id.clone(),
+                    conversation_key: conversation_key.clone(),
+                    request_id: request_id.clone(),
+                    queue_item_id: queue_item_id.clone(),
+                    text,
+                },
+                target_tool,
+                trace_id.clone(),
+                chat_event_tx.clone(),
+            );
+
+            match start {
+                StartChatOutcome::Started => SidecarCommandOutcome::default(),
+                StartChatOutcome::Busy { reason } => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_CHAT_FINISHED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolId": tool_id,
+                            "conversationKey": conversation_key,
+                            "requestId": request_id,
+                            "queueItemId": queue_item_id,
+                            "status": "busy",
+                            "text": "",
+                            "reason": reason,
+                            "meta": {},
+                        }),
+                    )
+                    .await?;
+                    SidecarCommandOutcome::default()
+                }
+            }
+        }
+        SidecarCommand::ToolChatCancel {
+            tool_id,
+            conversation_key,
+            request_id,
+            queue_item_id,
+        } => {
+            match chat_runtime.cancel_request(&ChatCancelInput {
+                tool_id: tool_id.clone(),
+                conversation_key: conversation_key.clone(),
+                request_id: request_id.clone(),
+                queue_item_id: queue_item_id.clone(),
+            }) {
+                CancelChatOutcome::Accepted => SidecarCommandOutcome::default(),
+                CancelChatOutcome::NotFound => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_CHAT_FINISHED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolId": tool_id,
+                            "conversationKey": conversation_key,
+                            "requestId": request_id,
+                            "queueItemId": queue_item_id,
+                            "status": "failed",
+                            "text": "",
+                            "reason": "未找到可取消的运行中请求。",
+                            "meta": {},
+                        }),
+                    )
+                    .await?;
+                    SidecarCommandOutcome::default()
+                }
             }
         }
         SidecarCommand::RebindController { .. } => SidecarCommandOutcome::default(),

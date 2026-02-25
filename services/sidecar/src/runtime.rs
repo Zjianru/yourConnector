@@ -30,6 +30,7 @@ pub(crate) fn fallback_tools_or_empty(fallback_tool: bool) -> Vec<ToolRuntimePay
     vec![ToolRuntimePayload {
         tool_id: "tool_local".to_string(),
         name: "Local Tool".to_string(),
+        tool_class: "assistant".to_string(),
         category: "DEV_WORKER".to_string(),
         vendor: "yourconnector".to_string(),
         mode: "TUI".to_string(),

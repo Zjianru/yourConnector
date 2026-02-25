@@ -10,6 +10,7 @@ import { escapeHtml } from "./utils/dom.js";
 import { maskSecret } from "./utils/format.js";
 import { renderTabs as renderTabsView } from "./views/tabs.js";
 import { renderDebugPanel as renderDebugPanelView } from "./views/debug.js";
+import { createChatView } from "./views/chat.js";
 import { renderBanner as renderBannerView, renderHostStage as renderHostStageView } from "./views/banner.js";
 import { renderTopActions as renderTopActionsView, syncBannerActiveIndex, extractBannerHostId } from "./views/ops.js";
 import { createToolsView } from "./views/tools.js";
@@ -20,6 +21,7 @@ import { createConnectionFlow } from "./flows/connection.js";
 import { createPairingFlow } from "./flows/pairing.js";
 import { createToolManageFlow } from "./flows/tool-manage.js";
 import { createHostManageFlow } from "./flows/host-manage.js";
+import { createChatFlow } from "./flows/chat.js";
 import { createHostNoticeModal } from "./modals/host-notice.js";
 import { createPairFailureModal } from "./modals/pair-failure.js";
 import { createToolDetailModal } from "./modals/tool-detail.js";
@@ -84,6 +86,7 @@ const toolsView = createToolsView({
   resolveToolDisplayName: runtimeState.resolveToolDisplayName,
   hostStatusLabel: runtimeState.hostStatusLabel,
 });
+const chatView = createChatView({ state, ui });
 
 const addToolModal = createAddToolModal({
   state,
@@ -178,6 +181,18 @@ function openHostNoticeModalGuard(title, body, options = {}) {
   noticeModal.openHostNoticeModal(title, body, options);
 }
 
+const chatFlow = createChatFlow({
+  state,
+  visibleHosts: hostState.visibleHosts,
+  hostById: hostState.hostById,
+  ensureRuntime: runtimeState.ensureRuntime,
+  resolveToolDisplayName: runtimeState.resolveToolDisplayName,
+  sendSocketEvent: connectionFlow.sendSocketEvent,
+  addLog,
+  tauriInvoke,
+  render,
+});
+
 const toolManageFlow = createToolManageFlow({
   state,
   hostById: hostState.hostById,
@@ -200,6 +215,7 @@ const toolManageFlow = createToolManageFlow({
   closeAddToolModal: addToolModal.closeAddToolModal,
   openToolDetail: openToolDetailGuard,
   openHostManageModal: openHostManageModalGuard,
+  deleteChatConversationByTool: chatFlow.deleteConversationByTool,
   render,
 });
 
@@ -235,6 +251,9 @@ connectionFlow.setHooks({
   openHostNoticeModal: openHostNoticeModalGuard,
   renderAddToolModal: addToolModal.renderAddToolModal,
   connectCandidateTool: toolManageFlow.connectCandidateTool,
+  onToolChatStarted: chatFlow.onToolChatStarted,
+  onToolChatChunk: chatFlow.onToolChatChunk,
+  onToolChatFinished: chatFlow.onToolChatFinished,
 });
 
 /**
@@ -291,6 +310,9 @@ function switchTab(tab) {
   if (document.activeElement instanceof HTMLElement) {
     document.activeElement.blur();
   }
+  if (tab === "chat") {
+    chatFlow.enterChatTab();
+  }
   state.activeTab = tab;
   render();
 }
@@ -298,12 +320,15 @@ function switchTab(tab) {
 function render() {
   try {
     hostState.recomputeSelections();
+    chatFlow.renderSync();
+    state.activeChatKey = String(state.chat.activeConversationKey || "");
     renderTabsView(state, ui);
     const hostCount = hostState.visibleHosts().length;
     renderTopActionsView(ui, hostCount, connectionFlow.hasConnectableHost(), connectionFlow.isAnyHostConnected());
     renderHostStageView(ui, hostState.visibleHosts().length > 0);
     renderBannerView(ui, hostState.visibleHosts(), state.bannerActiveIndex, runtimeState.hostStatusLabel, escapeHtml);
     toolsView.renderToolsByHost(hostState.visibleHosts());
+    chatView.renderChat();
     renderDebugPanelView(state, ui, hostState.visibleHosts, hostState.hostById, runtimeState.ensureRuntime, maskSecret, escapeHtml);
     toolDetailModal.renderToolModal();
     addToolModal.renderAddToolModal();
@@ -316,6 +341,7 @@ function render() {
 
 function bindEvents() {
   ui.tabOps.addEventListener("click", guardUiHandler("tab_ops", () => switchTab("ops")));
+  ui.tabChat.addEventListener("click", guardUiHandler("tab_chat", () => switchTab("chat")));
   ui.tabDebug.addEventListener("click", guardUiHandler("tab_debug", () => switchTab("debug")));
   ui.connectBtnTop.addEventListener("click", guardUiHandler("connect_all_hosts", () => connectionFlow.connectAllHosts()));
   ui.disconnectBtnTop.addEventListener("click", guardUiHandler("disconnect_all_hosts", () => connectionFlow.disconnectAllHosts()));
@@ -444,6 +470,7 @@ function bindEvents() {
     closeModalStack("none");
     toolsView.closeActiveToolSwipe();
   }));
+  chatFlow.bindEvents(ui);
 }
 
 function init() {
@@ -458,6 +485,7 @@ function init() {
   pairingFlow.bindPairingLinkBridge();
   pairingFlow.tryApplyLaunchPairingLink();
   ui.messageInput.value = state.message;
+  void chatFlow.hydrateChatState();
 
   bindEvents();
 

@@ -202,8 +202,7 @@ mod tests {
             meta("s2", "/workspace/b", 300),
             meta("s3", "/workspace/c", 200),
         ];
-        let selected =
-            select_session_meta_from_metas(&metas, "").expect("expected latest session");
+        let selected = select_session_meta_from_metas(&metas, "").expect("expected latest session");
         assert_eq!(selected.id, "s2");
     }
 }

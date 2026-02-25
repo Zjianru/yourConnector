@@ -131,6 +131,9 @@ pub struct ToolRuntimePayload {
     pub tool_id: String,
     // 工具显示名称。
     pub name: String,
+    // 工具业务类别（assistant|code）。
+    #[serde(default)]
+    pub tool_class: String,
     // 工具类别。
     pub category: String,
     // 工具厂商。

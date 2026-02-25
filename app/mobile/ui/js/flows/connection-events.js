@@ -22,6 +22,9 @@ export function createConnectionEvents({
   openHostNoticeModal,
   requestToolsRefresh,
   renderAddToolModal,
+  onToolChatStarted,
+  onToolChatChunk,
+  onToolChatFinished,
   addLog,
 }) {
   function shouldAutoRebindByReason(reason) {
@@ -108,6 +111,27 @@ export function createConnectionEvents({
 
       if (type === "metrics_snapshot") {
         applyMetricsSnapshot(hostId, payload);
+        return;
+      }
+
+      if (type === "tool_chat_started") {
+        if (typeof onToolChatStarted === "function") {
+          onToolChatStarted(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_chat_chunk") {
+        if (typeof onToolChatChunk === "function") {
+          onToolChatChunk(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_chat_finished") {
+        if (typeof onToolChatFinished === "function") {
+          onToolChatFinished(hostId, payload, { traceId, eventId, eventType: type });
+        }
       }
     } catch (_) {
       // ignore invalid payload
@@ -481,6 +505,7 @@ export function createConnectionEvents({
       hostId,
       [{
         toolId: primaryToolId,
+        toolClass: String(runtime.primaryToolMetrics.toolClass || ""),
         name: String(runtime.primaryToolMetrics.name || "Unknown Tool"),
         category: String(runtime.primaryToolMetrics.category || "UNKNOWN"),
         vendor: String(runtime.primaryToolMetrics.vendor || "-"),

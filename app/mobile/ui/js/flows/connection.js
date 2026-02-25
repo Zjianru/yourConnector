@@ -29,6 +29,9 @@ export function createConnectionFlow({
     openHostNoticeModal: () => {},
     renderAddToolModal: () => {},
     connectCandidateTool: () => {},
+    onToolChatStarted: () => {},
+    onToolChatChunk: () => {},
+    onToolChatFinished: () => {},
   };
 
   /**
@@ -61,6 +64,9 @@ export function createConnectionFlow({
     openHostNoticeModal: (...args) => hooks.openHostNoticeModal(...args),
     requestToolsRefresh: sendOps.requestToolsRefresh,
     renderAddToolModal: () => hooks.renderAddToolModal(),
+    onToolChatStarted: (...args) => hooks.onToolChatStarted(...args),
+    onToolChatChunk: (...args) => hooks.onToolChatChunk(...args),
+    onToolChatFinished: (...args) => hooks.onToolChatFinished(...args),
     addLog,
   });
 

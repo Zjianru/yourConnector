@@ -111,6 +111,7 @@ fn build_tool_from_process(
     Some(ToolRuntimePayload {
         tool_id,
         name: "OpenCode".to_string(),
+        tool_class: "code".to_string(),
         category: "CODE_AGENT".to_string(),
         vendor: "OpenCode".to_string(),
         mode: mode.to_string(),
@@ -263,10 +264,7 @@ fn collect_mcp_snapshot(config_json: Option<&Value>) -> Value {
         .unwrap_or_default();
 
     for (name, row) in mcp_obj {
-        let enabled_flag = row
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
+        let enabled_flag = row.get("enabled").and_then(Value::as_bool).unwrap_or(true);
         let command = row
             .get("command")
             .and_then(Value::as_array)
@@ -432,8 +430,18 @@ mod tests {
     #[test]
     fn skill_snapshot_handles_missing_data() {
         let snapshot = collect_skill_snapshot(None);
-        assert!(snapshot.get("installed").and_then(|v| v.as_array()).is_some());
+        assert!(
+            snapshot
+                .get("installed")
+                .and_then(|v| v.as_array())
+                .is_some()
+        );
         assert!(snapshot.get("enabled").and_then(|v| v.as_array()).is_some());
-        assert!(snapshot.get("disabled").and_then(|v| v.as_array()).is_some());
+        assert!(
+            snapshot
+                .get("disabled")
+                .and_then(|v| v.as_array())
+                .is_some()
+        );
     }
 }

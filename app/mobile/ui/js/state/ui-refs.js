@@ -10,9 +10,14 @@
 export function createUiRefs() {
   return {
     // 基础页面。
+    appRoot: document.getElementById("appRoot"),
+    topBar: document.getElementById("topBar"),
     opsView: document.getElementById("opsView"),
+    chatView: document.getElementById("chatView"),
     debugView: document.getElementById("debugView"),
+    mainTabs: document.getElementById("mainTabs"),
     tabOps: document.getElementById("tabOps"),
+    tabChat: document.getElementById("tabChat"),
     tabDebug: document.getElementById("tabDebug"),
 
     // 顶部操作。
@@ -43,6 +48,30 @@ export function createUiRefs() {
     copyOpLogsBtn: document.getElementById("copyOpLogsBtn"),
     clearLogsBtn: document.getElementById("clearLogsBtn"),
     logBox: document.getElementById("logBox"),
+
+    // 聊天页。
+    chatListPage: document.getElementById("chatListPage"),
+    chatDetailPage: document.getElementById("chatDetailPage"),
+    chatMessagePage: document.getElementById("chatMessagePage"),
+    chatConversationList: document.getElementById("chatConversationList"),
+    chatBackBtn: document.getElementById("chatBackBtn"),
+    chatMessageBackBtn: document.getElementById("chatMessageBackBtn"),
+    chatMessageZoomOutBtn: document.getElementById("chatMessageZoomOutBtn"),
+    chatMessageZoomInBtn: document.getElementById("chatMessageZoomInBtn"),
+    chatMessageZoomLabel: document.getElementById("chatMessageZoomLabel"),
+    chatSelectBtn: document.getElementById("chatSelectBtn"),
+    chatDeleteSelectedBtn: document.getElementById("chatDeleteSelectedBtn"),
+    chatDetailTitle: document.getElementById("chatDetailTitle"),
+    chatMessageTitle: document.getElementById("chatMessageTitle"),
+    chatMessageMeta: document.getElementById("chatMessageMeta"),
+    chatMessageFullBody: document.getElementById("chatMessageFullBody"),
+    chatOfflineHint: document.getElementById("chatOfflineHint"),
+    chatMessages: document.getElementById("chatMessages"),
+    chatQueueSummary: document.getElementById("chatQueueSummary"),
+    chatQueue: document.getElementById("chatQueue"),
+    chatInput: document.getElementById("chatInput"),
+    chatSendBtn: document.getElementById("chatSendBtn"),
+    chatStopBtn: document.getElementById("chatStopBtn"),
 
     // 工具详情。
     toolModal: document.getElementById("toolModal"),

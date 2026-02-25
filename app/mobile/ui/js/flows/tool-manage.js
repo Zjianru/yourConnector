@@ -30,8 +30,21 @@ export function createToolManageFlow({
   closeAddToolModal,
   openToolDetail,
   openHostManageModal,
+  deleteChatConversationByTool,
   render,
 }) {
+  const removeChatConversation = typeof deleteChatConversationByTool === "function"
+    ? deleteChatConversationByTool
+    : async () => false;
+
+  function toolClassOf(tool) {
+    return String(tool?.toolClass || "").trim().toLowerCase();
+  }
+
+  function isCodeTool(tool) {
+    return toolClassOf(tool) === "code";
+  }
+
   function isOpenClawTool(tool) {
     const toolId = String(tool?.toolId || "").toLowerCase();
     const name = String(tool?.name || "").toLowerCase();
@@ -44,7 +57,7 @@ export function createToolManageFlow({
     return /未绑定控制设备|未被授权|未授权控制|控制设备|控制端|未授权/.test(text);
   }
 
-  function requestOpenClawProcessControl(hostId, toolId, action) {
+  function requestToolProcessControl(hostId, toolId, action) {
     const host = hostById(hostId);
     const runtime = ensureRuntime(hostId);
     const normalizedToolId = String(toolId || "").trim();
@@ -56,8 +69,22 @@ export function createToolManageFlow({
     }
 
     const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === normalizedToolId);
-    if (!connectedTool || !isOpenClawTool(connectedTool)) {
-      openHostNoticeModal("操作失败", "当前仅支持对已接入的 OpenClaw 执行一键停止/重启。");
+    if (!connectedTool) {
+      openHostNoticeModal("操作失败", "工具不在当前已接入列表中，无法执行启停操作。");
+      return;
+    }
+    const isOpenClaw = isOpenClawTool(connectedTool);
+    const isCode = isCodeTool(connectedTool);
+    if (!isOpenClaw && !isCode) {
+      openHostNoticeModal("操作失败", "当前仅支持 OpenClaw 与代码工具执行启停。");
+      return;
+    }
+    if (normalizedAction === "restart" && !isOpenClaw) {
+      openHostNoticeModal("操作失败", "代码工具当前仅支持停止；重启请手动拉起新进程。");
+      return;
+    }
+    if (normalizedAction !== "restart" && normalizedAction !== "stop") {
+      openHostNoticeModal("操作失败", "不支持的进程控制动作。");
       return;
     }
 
@@ -81,7 +108,8 @@ export function createToolManageFlow({
     }
 
     const actionLabel = normalizedAction === "restart" ? "重启" : "停止";
-    addLog(`已发送 OpenClaw ${actionLabel}请求 (${host.displayName}): ${normalizedToolId}`, {
+    const toolName = resolveToolDisplayName(hostId, connectedTool);
+    addLog(`已发送工具${actionLabel}请求 (${host.displayName}): ${toolName} (${normalizedToolId})`, {
       scope: "tool_process",
       action: normalizedAction === "restart" ? "restart_tool_process" : "stop_tool_process",
       outcome: "started",
@@ -90,7 +118,7 @@ export function createToolManageFlow({
       hostName: host.displayName,
       toolId: normalizedToolId,
     });
-    openHostNoticeModal("已发出命令", `已请求${actionLabel}工具进程，完成后会自动刷新状态。`);
+    openHostNoticeModal("已发出命令", `已请求${actionLabel}工具进程（${toolName}），完成后会自动刷新状态。`);
   }
 
   function connectCandidateTool(hostId, toolId) {
@@ -192,7 +220,7 @@ export function createToolManageFlow({
     render();
   }
 
-  function disconnectConnectedTool(hostId, toolId) {
+  async function disconnectConnectedTool(hostId, toolId) {
     const host = hostById(hostId);
     const runtime = ensureRuntime(hostId);
     if (!host || !runtime) return;
@@ -203,6 +231,15 @@ export function createToolManageFlow({
 
     const tool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
     const name = resolveToolDisplayName(hostId, tool || { name: toolId, toolId });
+    const isCode = isCodeTool(tool);
+    if (isCode) {
+      const confirmed = window.confirm(
+        `删除卡片会删除该工具的本地聊天记录，但不影响工具正常使用。\n\n工具：${name}\n\n是否继续？`,
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
 
     // 先本地乐观移除，等待白名单回执再做最终收敛。
     setToolHidden(hostId, toolId, true);
@@ -221,6 +258,24 @@ export function createToolManageFlow({
       render();
       return;
     }
+
+    if (isCode) {
+      try {
+        await removeChatConversation(hostId, toolId, { deleteStore: true });
+      } catch (error) {
+        addLog(`删除代码工具会话失败 (${host.displayName}): ${toolId} ${error}`, {
+          level: "warn",
+          scope: "chat",
+          action: "delete_conversation",
+          outcome: "failed",
+          hostId,
+          hostName: host.displayName,
+          toolId,
+          detail: String(error || ""),
+        });
+      }
+    }
+
     addLog(`已请求断开工具 (${host.displayName}): ${toolId}`, {
       scope: "tool_whitelist",
       action: "disconnect_tool",
@@ -230,11 +285,18 @@ export function createToolManageFlow({
       hostName: host.displayName,
       toolId,
     });
-    openHostNoticeModal("工具已断开", `工具“${name}”已从已接入列表移除，可在候选工具中重新接入。`);
+    if (isCode) {
+      openHostNoticeModal(
+        "工具已断开",
+        `工具“${name}”已从已接入列表移除，本地聊天记录已删除；不影响工具正常使用。`,
+      );
+    } else {
+      openHostNoticeModal("工具已断开", `工具“${name}”已从已接入列表移除，可在候选工具中重新接入。`);
+    }
     requestToolsRefresh(hostId);
   }
 
-  function onToolsGroupedClick(event) {
+  async function onToolsGroupedClick(event) {
     const swipeContainer = event.target.closest(".tool-swipe");
     if (swipeContainer) {
       const swipeKey = String(swipeContainer.getAttribute("data-tool-swipe-key") || "").trim();
@@ -253,14 +315,14 @@ export function createToolManageFlow({
     const restartBtn = event.target.closest("[data-tool-process-restart]");
     if (restartBtn) {
       const [hostId, toolId] = String(restartBtn.getAttribute("data-tool-process-restart") || "").split("::");
-      if (hostId && toolId) requestOpenClawProcessControl(hostId, toolId, "restart");
+      if (hostId && toolId) requestToolProcessControl(hostId, toolId, "restart");
       return;
     }
 
     const stopBtn = event.target.closest("[data-tool-process-stop]");
     if (stopBtn) {
       const [hostId, toolId] = String(stopBtn.getAttribute("data-tool-process-stop") || "").split("::");
-      if (hostId && toolId) requestOpenClawProcessControl(hostId, toolId, "stop");
+      if (hostId && toolId) requestToolProcessControl(hostId, toolId, "stop");
       return;
     }
 
@@ -307,7 +369,7 @@ export function createToolManageFlow({
     const deleteToolBtn = event.target.closest("[data-tool-delete]");
     if (deleteToolBtn) {
       const [hostId, toolId] = String(deleteToolBtn.getAttribute("data-tool-delete") || "").split("::");
-      if (hostId && toolId) disconnectConnectedTool(hostId, toolId);
+      if (hostId && toolId) await disconnectConnectedTool(hostId, toolId);
       return;
     }
 

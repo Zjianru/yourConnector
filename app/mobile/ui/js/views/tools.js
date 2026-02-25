@@ -333,6 +333,15 @@ export function createToolsView(deps) {
             <div class="tool-logo">OC</div>
             <div class="tool-name">${escapeHtml(displayName)}</div>
             <span class="chip">${escapeHtml(mode.toUpperCase())}</span>
+            <div class="tool-quick-actions">
+              <button
+                type="button"
+                class="tool-quick-btn stop"
+                data-tool-process-stop="${escapeHtml(`${hostId}::${toolId}`)}"
+              >
+                停止
+              </button>
+            </div>
           </div>
           <div class="chip-wrap">
             <span class="chip">${escapeHtml(String(metric.status ?? tool.status ?? "UNKNOWN"))}</span>

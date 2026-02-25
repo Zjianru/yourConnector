@@ -20,8 +20,8 @@
     <link rel="stylesheet" href="./styles/tools.css" />
   </head>
   <body>
-    <div class="app">
-      <header class="topbar">
+    <div id="appRoot" class="app">
+      <header id="topBar" class="topbar">
         <div class="top-actions">
           <button id="connectBtnTop" class="btn btn-primary btn-sm">连接全部宿主机</button>
           <button id="disconnectBtnTop" class="btn btn-outline btn-sm" disabled>断开全部</button>
@@ -52,6 +52,80 @@
           </div>
           <p class="section-sub">按宿主机分组展示每台宿主机已接入工具；工具卡片左滑可编辑名称或删除接入。</p>
           <div id="toolsGroupedList" class="tools"></div>
+        </div>
+      </section>
+
+      <section id="chatView" class="view">
+        <div id="chatListPage" class="chat-page active">
+          <article class="glass-card status-card">
+            <h2 class="section-title" style="margin-top: 0">聊天会话</h2>
+            <p class="section-sub">按「宿主机 + 工具」维护独立会话。</p>
+            <div id="chatConversationList" class="chat-conversation-list"></div>
+          </article>
+        </div>
+
+        <div id="chatDetailPage" class="chat-page">
+          <article class="glass-card status-card chat-detail-card">
+            <div class="chat-detail-head">
+              <button id="chatBackBtn" class="chat-back-btn" type="button" aria-label="返回会话列表">‹</button>
+              <h3 id="chatDetailTitle" class="detail-title" style="margin: 0">聊天详情</h3>
+              <div class="chat-detail-head-actions">
+                <button id="chatSelectBtn" class="btn btn-outline btn-sm" type="button">选择</button>
+                <button id="chatDeleteSelectedBtn" class="btn btn-outline btn-sm stop hidden" type="button">删除</button>
+              </div>
+            </div>
+            <p id="chatOfflineHint" class="section-sub" style="margin: 8px 2px"></p>
+
+            <div id="chatMessages" class="chat-messages"></div>
+
+            <button
+              id="chatQueueSummary"
+              type="button"
+              class="chat-queue-summary"
+              aria-label="展开待发送队列"
+              hidden
+            ></button>
+            <div id="chatQueue" class="chat-queue"></div>
+
+            <div class="chat-composer">
+              <textarea id="chatInput" rows="1" placeholder="输入要发送给工具的消息"></textarea>
+              <div class="chat-composer-actions">
+                <button id="chatSendBtn" class="btn btn-primary" type="button">发送</button>
+                <button id="chatStopBtn" class="btn btn-outline" type="button">停止生成</button>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div id="chatMessagePage" class="chat-page">
+          <article class="glass-card status-card chat-detail-card chat-message-page-card">
+            <div class="chat-detail-head">
+              <button
+                id="chatMessageBackBtn"
+                class="chat-back-btn"
+                type="button"
+                aria-label="返回聊天详情"
+              >‹</button>
+              <h3 id="chatMessageTitle" class="detail-title" style="margin: 0">完整消息</h3>
+              <div class="chat-message-head-actions">
+                <button
+                  id="chatMessageZoomOutBtn"
+                  type="button"
+                  class="chat-zoom-btn"
+                  aria-label="缩小预览"
+                >A-</button>
+                <span id="chatMessageZoomLabel" class="chat-zoom-label">100%</span>
+                <button
+                  id="chatMessageZoomInBtn"
+                  type="button"
+                  class="chat-zoom-btn"
+                  aria-label="放大预览"
+                >A+</button>
+              </div>
+            </div>
+            <p id="chatMessageMeta" class="section-sub" style="margin: 8px 2px"></p>
+            <div id="chatMessageFullBody" class="chat-full-message markdown-body"></div>
+          </article>
         </div>
       </section>
 
@@ -93,8 +167,9 @@
       </section>
     </div>
 
-    <nav class="tabs">
+    <nav id="mainTabs" class="tabs">
       <button id="tabOps" class="tab-btn active">运维</button>
+      <button id="tabChat" class="tab-btn">聊天</button>
       <button id="tabDebug" class="tab-btn">调试入口</button>
     </nav>
 

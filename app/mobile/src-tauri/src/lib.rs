@@ -6,6 +6,11 @@
 use std::collections::HashMap;
 #[cfg(not(any(target_os = "ios", target_os = "macos")))]
 use std::sync::{Mutex, OnceLock};
+use std::{
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
+};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
@@ -46,6 +51,13 @@ struct DeviceSession {
     refresh_token: String,
     key_id: String,
     credential_id: String,
+}
+
+/// 聊天存储 bootstrap 返回结构。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatStoreBootstrap {
+    index: serde_json::Value,
 }
 
 /// 非 Apple 平台下的简易内存安全存储（仅用于开发构建兜底）。
@@ -208,6 +220,197 @@ fn auth_clear_session(system_id: String, device_id: String) -> Result<(), String
     Ok(())
 }
 
+/// 聊天存储根目录：`<appData>/chat`。
+fn chat_store_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("resolve app data dir failed: {err}"))?;
+    let root = app_data_dir.join("chat");
+    fs::create_dir_all(root.join("conversations"))
+        .map_err(|err| format!("create chat dirs failed: {err}"))?;
+    Ok(root)
+}
+
+/// 聊天索引文件路径。
+fn chat_index_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(chat_store_root(app)?.join("index.json"))
+}
+
+/// 会话文件名（对 key 做哈希，避免路径注入与跨平台非法字符）。
+fn conversation_file_name(conversation_key: &str) -> String {
+    let digest = Sha256::digest(conversation_key.as_bytes());
+    format!("conv_{}.jsonl", URL_SAFE_NO_PAD.encode(&digest[..18]))
+}
+
+/// 会话 JSONL 文件路径。
+fn conversation_path(app: &tauri::AppHandle, conversation_key: &str) -> Result<PathBuf, String> {
+    let normalized = conversation_key.trim();
+    if normalized.is_empty() {
+        return Err("conversationKey 不能为空".to_string());
+    }
+    Ok(chat_store_root(app)?
+        .join("conversations")
+        .join(conversation_file_name(normalized)))
+}
+
+/// 读取索引（不存在时返回空对象）。
+fn read_chat_index(app: &tauri::AppHandle) -> Result<serde_json::Value, String> {
+    let index_path = chat_index_path(app)?;
+    let bytes = match fs::read(index_path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(serde_json::json!({})),
+        Err(err) => return Err(format!("read chat index failed: {err}")),
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|err| format!("decode chat index failed: {err}"))
+}
+
+/// 启动时读取聊天索引。
+#[tauri::command]
+fn chat_store_bootstrap(app: tauri::AppHandle) -> Result<ChatStoreBootstrap, String> {
+    Ok(ChatStoreBootstrap {
+        index: read_chat_index(&app)?,
+    })
+}
+
+/// 追加写入会话事件（JSONL）。
+#[tauri::command]
+fn chat_store_append_events(
+    app: tauri::AppHandle,
+    conversation_key: String,
+    events: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+
+    let conv_path = conversation_path(&app, &conversation_key)?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(conv_path)
+        .map_err(|err| format!("open chat conversation failed: {err}"))?;
+
+    for item in events {
+        let line =
+            serde_json::to_string(&item).map_err(|err| format!("encode chat event failed: {err}"))?;
+        file.write_all(line.as_bytes())
+            .map_err(|err| format!("write chat event failed: {err}"))?;
+        file.write_all(b"\n")
+            .map_err(|err| format!("write chat newline failed: {err}"))?;
+    }
+    Ok(())
+}
+
+/// 读取指定会话事件（支持可选倒序截断）。
+#[tauri::command]
+fn chat_store_load_conversation(
+    app: tauri::AppHandle,
+    conversation_key: String,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let conv_path = conversation_path(&app, &conversation_key)?;
+    let file = match fs::File::open(conv_path) {
+        Ok(handle) => handle,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(format!("open chat conversation failed: {err}")),
+    };
+    let reader = BufReader::new(file);
+    let mut rows = Vec::new();
+    for line in reader.lines() {
+        let raw = line.map_err(|err| format!("read chat line failed: {err}"))?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
+            continue;
+        };
+        rows.push(value);
+    }
+
+    if let Some(max_rows) = limit {
+        if rows.len() > max_rows {
+            let split = rows.len() - max_rows;
+            rows = rows.split_off(split);
+        }
+    }
+    Ok(rows)
+}
+
+/// 幂等覆盖聊天索引文件。
+#[tauri::command]
+fn chat_store_upsert_index(app: tauri::AppHandle, index: serde_json::Value) -> Result<(), String> {
+    let index_path = chat_index_path(&app)?;
+    let bytes =
+        serde_json::to_vec_pretty(&index).map_err(|err| format!("encode chat index failed: {err}"))?;
+    fs::write(index_path, bytes).map_err(|err| format!("write chat index failed: {err}"))
+}
+
+/// 删除指定会话的本地存储（索引 + JSONL）。
+#[tauri::command]
+fn chat_store_delete_conversation(
+    app: tauri::AppHandle,
+    conversation_key: String,
+) -> Result<(), String> {
+    let normalized_key = conversation_key.trim();
+    if normalized_key.is_empty() {
+        return Err("conversationKey 不能为空".to_string());
+    }
+
+    let mut index = read_chat_index(&app)?;
+    let Some(index_obj) = index.as_object_mut() else {
+        index = serde_json::json!({});
+        chat_store_upsert_index(app.clone(), index)?;
+        let conv_path = conversation_path(&app, normalized_key)?;
+        return match fs::remove_file(conv_path) {
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(format!("delete chat conversation failed: {err}")),
+        };
+    };
+
+    if let Some(by_key) = index_obj
+        .get_mut("conversationsByKey")
+        .and_then(|value| value.as_object_mut())
+    {
+        by_key.remove(normalized_key);
+    }
+
+    if let Some(order) = index_obj
+        .get_mut("conversationOrder")
+        .and_then(|value| value.as_array_mut())
+    {
+        order.retain(|item| item.as_str() != Some(normalized_key));
+    }
+
+    let active_key = index_obj
+        .get("activeConversationKey")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if active_key == normalized_key {
+        let next_active = index_obj
+            .get("conversationOrder")
+            .and_then(|value| value.as_array())
+            .and_then(|order| order.first())
+            .and_then(|item| item.as_str())
+            .unwrap_or("");
+        index_obj.insert(
+            "activeConversationKey".to_string(),
+            serde_json::Value::String(next_active.to_string()),
+        );
+    }
+
+    chat_store_upsert_index(app.clone(), index)?;
+    let conv_path = conversation_path(&app, normalized_key)?;
+    match fs::remove_file(conv_path) {
+        Ok(_) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("delete chat conversation failed: {err}")),
+    }
+}
+
 /// 将系统深链事件透传给 WebView。前端通过 `window.__YC_HANDLE_PAIR_LINK__` 接收并解析。
 fn forward_pairing_link(app: &tauri::AppHandle, raw_url: &str) {
     let encoded = match serde_json::to_string(raw_url) {
@@ -232,6 +435,11 @@ pub fn run() {
             auth_store_session,
             auth_load_session,
             auth_clear_session,
+            chat_store_bootstrap,
+            chat_store_append_events,
+            chat_store_load_conversation,
+            chat_store_upsert_index,
+            chat_store_delete_conversation,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build mobile tauri app")

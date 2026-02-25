@@ -9,8 +9,15 @@
  */
 export function renderTabs(state, ui) {
   const onOps = state.activeTab === "ops";
+  const onChat = state.activeTab === "chat";
+  const onDebug = state.activeTab === "debug";
+  if (ui.topBar) {
+    ui.topBar.classList.toggle("hidden", !onOps);
+  }
   ui.opsView.classList.toggle("active", onOps);
-  ui.debugView.classList.toggle("active", !onOps);
+  ui.chatView.classList.toggle("active", onChat);
+  ui.debugView.classList.toggle("active", onDebug);
   ui.tabOps.classList.toggle("active", onOps);
-  ui.tabDebug.classList.toggle("active", !onOps);
+  ui.tabChat.classList.toggle("active", onChat);
+  ui.tabDebug.classList.toggle("active", onDebug);
 }
