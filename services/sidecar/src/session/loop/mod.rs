@@ -63,14 +63,8 @@ pub(crate) async fn run_relay_loop(cfg: Config) -> Result<()> {
     }
 }
 
-/// 单次 relay 会话：连接、收命令、推送心跳与快照，直到连接中断。
-async fn run_session(cfg: &Config) -> Result<()> {
-    let ws_url = sidecar_ws_url(cfg)?;
-    info!("connecting relay {}", ws_url);
-
-    let (ws_stream, _) = connect_async(ws_url.as_str()).await?;
-    info!("relay connected");
-
+/// 拉取并打印最新配对 banner（短时票据 + 深链）。
+async fn refresh_pairing_banner(cfg: &Config) {
     match fetch_pair_bootstrap(
         &cfg.relay_ws_url,
         None,
@@ -83,6 +77,17 @@ async fn run_session(cfg: &Config) -> Result<()> {
         Ok(data) => print_pairing_banner(&data),
         Err(err) => warn!("fetch pair bootstrap failed: {err}"),
     }
+}
+
+/// 单次 relay 会话：连接、收命令、推送心跳与快照，直到连接中断。
+async fn run_session(cfg: &Config) -> Result<()> {
+    let ws_url = sidecar_ws_url(cfg)?;
+    info!("connecting relay {}", ws_url);
+
+    let (ws_stream, _) = connect_async(ws_url.as_str()).await?;
+    info!("relay connected");
+
+    refresh_pairing_banner(cfg).await;
 
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
@@ -163,6 +168,10 @@ async fn run_session(cfg: &Config) -> Result<()> {
 
     let mut metrics_ticker = tokio::time::interval(cfg.metrics_interval);
     metrics_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut pairing_banner_ticker = tokio::time::interval(cfg.pairing_banner_refresh_interval);
+    pairing_banner_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // 跳过 interval 的首次“立即触发”，避免连接后重复打印两次 banner。
+    pairing_banner_ticker.tick().await;
     let mut details_ticker = tokio::time::interval(cfg.details_interval);
     details_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
@@ -267,6 +276,9 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &whitelist,
                 )
                 .await?;
+            }
+            _ = pairing_banner_ticker.tick() => {
+                refresh_pairing_banner(cfg).await;
             }
             _ = details_ticker.tick() => {
                 refresh_and_send_details(

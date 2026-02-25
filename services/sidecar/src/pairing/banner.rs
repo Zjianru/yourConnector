@@ -67,6 +67,12 @@ pub(crate) fn print_pairing_banner(data: &PairBootstrapData) {
         link = data.pair_link
     );
     println!(
+        "{white}{bold}提示:{reset} 链接为短时票据，过期后请重新执行 `yc-sidecar pairing show --format link` 获取最新链接。",
+        white = ANSI_WHITE,
+        bold = ANSI_BOLD,
+        reset = ANSI_RESET
+    );
+    println!(
         "{white}{bold}模拟扫码(iOS):{reset} {cmd}\n",
         white = ANSI_WHITE,
         bold = ANSI_BOLD,

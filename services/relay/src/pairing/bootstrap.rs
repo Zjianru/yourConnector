@@ -112,6 +112,12 @@ pub(crate) fn print_pairing_banner_from_relay(data: &PairBootstrapData) {
         link = data.pair_link
     );
     println!(
+        "{white}{bold}提示:{reset} 链接为短时票据，过期后请重新签发最新配对信息。",
+        white = ANSI_WHITE,
+        bold = ANSI_BOLD,
+        reset = ANSI_RESET
+    );
+    println!(
         "{white}{bold}模拟扫码(iOS):{reset} {cmd}\n",
         white = ANSI_WHITE,
         bold = ANSI_BOLD,

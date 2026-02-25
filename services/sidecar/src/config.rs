@@ -97,6 +97,8 @@ pub(crate) struct Config {
     pub(crate) heartbeat_interval: Duration,
     /// 指标快照推送周期。
     pub(crate) metrics_interval: Duration,
+    /// 配对 banner 刷新周期（自动重新签发短时链接）。
+    pub(crate) pairing_banner_refresh_interval: Duration,
     /// 工具详情补采周期。
     pub(crate) details_interval: Duration,
     /// 工具详情按需刷新去抖窗口。
@@ -181,6 +183,7 @@ impl Config {
             health_addr: env_or_default("SIDECAR_ADDR", "0.0.0.0:18081"),
             heartbeat_interval: duration_from_env("HEARTBEAT_INTERVAL_SEC", 5),
             metrics_interval: duration_from_env("METRICS_INTERVAL_SEC", 10),
+            pairing_banner_refresh_interval: duration_from_env("PAIRING_BANNER_REFRESH_SEC", 120),
             details_interval: duration_from_env(
                 "DETAILS_INTERVAL_SEC",
                 DEFAULT_DETAILS_INTERVAL_SEC,

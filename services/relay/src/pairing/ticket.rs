@@ -143,3 +143,30 @@ pub(crate) fn pair_ticket_error_to_api(err: PairTicketError) -> ApiError {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{generate_pairing_ticket, verify_pairing_ticket};
+
+    #[test]
+    fn generated_ticket_changes_between_calls() {
+        let first = generate_pairing_ticket("sys_demo", "ptk_demo", 300);
+        let second = generate_pairing_ticket("sys_demo", "ptk_demo", 300);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn consumed_ticket_is_rejected_as_replay() {
+        let mut used = std::collections::HashMap::new();
+        let ticket = generate_pairing_ticket("sys_demo", "ptk_demo", 300);
+
+        let first = verify_pairing_ticket(&ticket, "sys_demo", "ptk_demo", &mut used, true);
+        assert!(first.is_ok());
+
+        let second = verify_pairing_ticket(&ticket, "sys_demo", "ptk_demo", &mut used, true);
+        assert!(matches!(
+            second,
+            Err(crate::api::types::PairTicketError::Replay)
+        ));
+    }
+}
