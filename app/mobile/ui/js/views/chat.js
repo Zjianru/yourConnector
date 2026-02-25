@@ -149,6 +149,17 @@ export function createChatView({ state, ui }) {
     return "助手";
   }
 
+  function conversationStatus(conv) {
+    const availability = String(conv?.availability || "").trim().toLowerCase();
+    if (availability === "invalid") {
+      return { className: "offline", label: "未连接" };
+    }
+    if (conv?.online) {
+      return { className: "online", label: "在线" };
+    }
+    return { className: "offline", label: "离线" };
+  }
+
   function toggleMainTabs(visible) {
     if (!ui.mainTabs) return;
     ui.mainTabs.classList.toggle("hidden", !visible);
@@ -188,10 +199,12 @@ export function createChatView({ state, ui }) {
           const preview = latest ? String(latest.text || "").slice(0, 48) : "暂无消息";
           const isActive = conv.key === activeKey;
           const isSwiped = String(chatState.swipedConversationKey || "") === String(conv.key || "");
+          const status = conversationStatus(conv);
           return `
             <div class="chat-conversation-row ${isSwiped ? "swiped" : ""}" data-chat-row="${escapeHtml(conv.key)}">
               <div class="chat-conversation-actions">
                 <button type="button" class="chat-conversation-clear-btn" data-chat-clear="${escapeHtml(conv.key)}">清空</button>
+                <button type="button" class="chat-conversation-clear-btn" data-chat-delete="${escapeHtml(conv.key)}">删除</button>
               </div>
               <button
                 type="button"
@@ -203,8 +216,8 @@ export function createChatView({ state, ui }) {
                   <div class="chat-conversation-content">
                     <div class="chat-conversation-title">
                       <span class="chat-conversation-name">${escapeHtml(conv.hostName || conv.hostId || "--")} · ${escapeHtml(conv.toolName || conv.toolId || "--")}</span>
-                      <span class="chat-conversation-status ${conv.online ? "online" : "offline"}">
-                        ${conv.online ? "在线" : "离线"}
+                      <span class="chat-conversation-status ${status.className}">
+                        ${status.label}
                       </span>
                     </div>
                     <div class="chat-conversation-preview">${escapeHtml(preview)}</div>
@@ -284,9 +297,13 @@ export function createChatView({ state, ui }) {
     ui.chatDeleteSelectedBtn.classList.toggle("hidden", !selectionMode);
     ui.chatDeleteSelectedBtn.disabled = selectedCount === 0;
     ui.chatDeleteSelectedBtn.textContent = selectedCount > 0 ? `删除(${selectedCount})` : "删除";
-    ui.chatOfflineHint.textContent = active.online
-      ? (active.running ? "正在生成中，可继续排队消息。" : "")
-      : "当前会话离线，请先连接宿主机后发送。";
+    const availability = String(active.availability || (active.online ? "online" : "offline")).toLowerCase();
+    const isInvalid = availability === "invalid";
+    ui.chatOfflineHint.textContent = isInvalid
+      ? "当前进程已失效（PID 已变化），请删除卡片后重新接入。"
+      : (active.online
+        ? (active.running ? "正在生成中，可继续排队消息。" : "")
+        : "当前会话离线，请先连接宿主机后发送。");
     ui.chatMessages.innerHTML = active.messages.length > 0
       ? active.messages
         .slice(-400)
@@ -364,9 +381,9 @@ export function createChatView({ state, ui }) {
       ui.chatQueue.innerHTML = "";
     }
 
-    ui.chatInput.disabled = false;
+    ui.chatInput.disabled = isInvalid;
     ui.chatInput.value = String(active.draft || "");
-    ui.chatSendBtn.disabled = !active.online
+    ui.chatSendBtn.disabled = isInvalid || !active.online
       || (!String(active.draft || "").trim() && !(active.queue.length > 0 && !active.running));
     const showStop = Boolean(active.running);
     ui.chatStopBtn.classList.toggle("hidden", !showStop);

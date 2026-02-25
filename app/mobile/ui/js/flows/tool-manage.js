@@ -12,6 +12,9 @@ export function createToolManageFlow({
   state,
   hostById,
   ensureRuntime,
+  resolveLogicalToolId,
+  resolveRuntimeToolId,
+  clearToolBinding,
   setToolHidden,
   getToolAlias,
   setToolAlias,
@@ -36,6 +39,22 @@ export function createToolManageFlow({
   const removeChatConversation = typeof deleteChatConversationByTool === "function"
     ? deleteChatConversationByTool
     : async () => false;
+  const forgetToolBinding = typeof clearToolBinding === "function"
+    ? clearToolBinding
+    : () => {};
+
+  function findRuntimeTool(runtime, hostId, toolId) {
+    const id = String(toolId || "").trim();
+    if (!runtime || !id) return null;
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, id)
+      : id;
+    return runtime.tools.find((item) => (
+      String(item.toolId || "") === logicalToolId
+      || String(item.toolId || "") === id
+      || String(item.runtimeToolId || "") === id
+    )) || null;
+  }
 
   function toolClassOf(tool) {
     return String(tool?.toolClass || "").trim().toLowerCase();
@@ -68,11 +87,17 @@ export function createToolManageFlow({
       return;
     }
 
-    const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === normalizedToolId);
+    const connectedTool = findRuntimeTool(runtime, hostId, normalizedToolId);
     if (!connectedTool) {
       openHostNoticeModal("操作失败", "工具不在当前已接入列表中，无法执行启停操作。");
       return;
     }
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, normalizedToolId)
+      : normalizedToolId;
+    const runtimeToolId = typeof resolveRuntimeToolId === "function"
+      ? resolveRuntimeToolId(hostId, logicalToolId)
+      : normalizedToolId;
     const isOpenClaw = isOpenClawTool(connectedTool);
     const isCode = isCodeTool(connectedTool);
     if (!isOpenClaw && !isCode) {
@@ -93,13 +118,13 @@ export function createToolManageFlow({
       hostId,
       "tool_process_control_request",
       {
-        toolId: normalizedToolId,
+        toolId: runtimeToolId,
         action: normalizedAction,
       },
       {
         action: normalizedAction === "restart" ? "restart_tool_process" : "stop_tool_process",
         traceId,
-        toolId: normalizedToolId,
+        toolId: runtimeToolId,
       },
     );
     if (!sent) {
@@ -116,7 +141,7 @@ export function createToolManageFlow({
       traceId,
       hostId,
       hostName: host.displayName,
-      toolId: normalizedToolId,
+      toolId: runtimeToolId,
     });
     openHostNoticeModal("已发出命令", `已请求${actionLabel}工具进程（${toolName}），完成后会自动刷新状态。`);
   }
@@ -143,7 +168,10 @@ export function createToolManageFlow({
     }
 
     runtime.connectingToolIds[id] = true;
-    setToolHidden(hostId, id, false);
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, id)
+      : id;
+    setToolHidden(hostId, logicalToolId, false);
     clearToolConnectTimer(runtime, id);
     const traceId = createTraceId();
     runtime.toolConnectTraceIds[id] = traceId;
@@ -203,10 +231,13 @@ export function createToolManageFlow({
     const host = hostById(hostId);
     if (!runtime || !host || !toolId) return;
 
-    const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
+    const connectedTool = findRuntimeTool(runtime, hostId, toolId);
     const candidateTool = runtime.candidateTools.find((item) => String(item.toolId || "") === toolId);
     const tool = connectedTool || candidateTool;
-    const currentAlias = getToolAlias(hostId, toolId);
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, toolId)
+      : toolId;
+    const currentAlias = getToolAlias(hostId, logicalToolId);
     const defaultName = resolveToolDisplayName(hostId, tool || { name: "Unknown Tool", toolId });
     const nextName = window.prompt(
       `请输入工具显示名称（宿主机：${host.displayName}）`,
@@ -215,8 +246,8 @@ export function createToolManageFlow({
     if (nextName === null) return;
 
     const normalized = String(nextName || "").trim();
-    setToolAlias(hostId, toolId, normalized);
-    addLog(`工具名称已更新 (${host.displayName}): ${toolId} -> ${normalized || defaultName}`);
+    setToolAlias(hostId, logicalToolId, normalized);
+    addLog(`工具名称已更新 (${host.displayName}): ${logicalToolId} -> ${normalized || defaultName}`);
     render();
   }
 
@@ -229,70 +260,68 @@ export function createToolManageFlow({
       return;
     }
 
-    const tool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
-    const name = resolveToolDisplayName(hostId, tool || { name: toolId, toolId });
-    const isCode = isCodeTool(tool);
-    if (isCode) {
-      const confirmed = window.confirm(
-        `删除卡片会删除该工具的本地聊天记录，但不影响工具正常使用。\n\n工具：${name}\n\n是否继续？`,
-      );
-      if (!confirmed) {
-        return;
-      }
+    const tool = findRuntimeTool(runtime, hostId, toolId);
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, toolId)
+      : toolId;
+    const runtimeToolId = typeof resolveRuntimeToolId === "function"
+      ? resolveRuntimeToolId(hostId, logicalToolId)
+      : toolId;
+    const name = resolveToolDisplayName(hostId, tool || { name: logicalToolId, toolId: logicalToolId });
+    const confirmed = window.confirm(
+      `删除卡片会删除该工具的本地聊天记录，但不影响工具进程本身。\n\n工具：${name}\n\n是否继续？`,
+    );
+    if (!confirmed) {
+      return;
     }
 
     // 先本地乐观移除，等待白名单回执再做最终收敛。
-    setToolHidden(hostId, toolId, true);
-    runtime.tools = runtime.tools.filter((item) => String(item.toolId || "") !== toolId);
+    setToolHidden(hostId, logicalToolId, true);
+    runtime.tools = runtime.tools.filter((item) => String(item.toolId || "") !== logicalToolId);
     render();
 
     const traceId = createTraceId();
-    const sent = sendSocketEvent(hostId, "tool_disconnect_request", { toolId }, {
+    const sent = sendSocketEvent(hostId, "tool_disconnect_request", { toolId: runtimeToolId }, {
       action: "disconnect_tool",
       traceId,
-      toolId,
+      toolId: runtimeToolId,
     });
     if (!sent) {
-      setToolHidden(hostId, toolId, false);
+      setToolHidden(hostId, logicalToolId, false);
       requestToolsRefresh(hostId);
       render();
       return;
     }
 
-    if (isCode) {
-      try {
-        await removeChatConversation(hostId, toolId, { deleteStore: true });
-      } catch (error) {
-        addLog(`删除代码工具会话失败 (${host.displayName}): ${toolId} ${error}`, {
-          level: "warn",
-          scope: "chat",
-          action: "delete_conversation",
-          outcome: "failed",
-          hostId,
-          hostName: host.displayName,
-          toolId,
-          detail: String(error || ""),
-        });
-      }
+    try {
+      await removeChatConversation(hostId, logicalToolId, { deleteStore: true });
+    } catch (error) {
+      addLog(`删除工具会话失败 (${host.displayName}): ${logicalToolId} ${error}`, {
+        level: "warn",
+        scope: "chat",
+        action: "delete_conversation",
+        outcome: "failed",
+        hostId,
+        hostName: host.displayName,
+        toolId: logicalToolId,
+        detail: String(error || ""),
+      });
     }
+    forgetToolBinding(hostId, logicalToolId);
 
-    addLog(`已请求断开工具 (${host.displayName}): ${toolId}`, {
+    addLog(`已请求断开工具 (${host.displayName}): ${runtimeToolId}`, {
       scope: "tool_whitelist",
       action: "disconnect_tool",
       outcome: "started",
       traceId,
       hostId,
       hostName: host.displayName,
-      toolId,
+      toolId: runtimeToolId,
     });
-    if (isCode) {
-      openHostNoticeModal(
-        "工具已断开",
-        `工具“${name}”已从已接入列表移除，本地聊天记录已删除；不影响工具正常使用。`,
-      );
-    } else {
-      openHostNoticeModal("工具已断开", `工具“${name}”已从已接入列表移除，可在候选工具中重新接入。`);
-    }
+    openHostNoticeModal(
+      "工具已断开",
+      `工具“${name}”已从已接入列表移除，本地聊天记录已删除；不影响工具正常使用。`,
+    );
     requestToolsRefresh(hostId);
   }
 

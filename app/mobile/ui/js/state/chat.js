@@ -5,7 +5,7 @@
 export const CHAT_QUEUE_LIMIT = 20;
 
 /**
- * 生成会话键：hostId::toolId。
+ * 生成会话键：hostId::logicalToolId。
  * @param {string} hostId 宿主机 ID。
  * @param {string} toolId 工具 ID。
  * @returns {string}
@@ -55,11 +55,13 @@ export function ensureConversation(chatState, key, meta = {}) {
       key: normalizedKey,
       hostId: String(meta.hostId || ""),
       toolId: String(meta.toolId || ""),
+      runtimeToolId: String(meta.runtimeToolId || ""),
       toolClass: String(meta.toolClass || ""),
       hostName: String(meta.hostName || ""),
       toolName: String(meta.toolName || ""),
       updatedAt: String(meta.updatedAt || new Date().toISOString()),
       online: Boolean(meta.online),
+      availability: String(meta.availability || "offline"),
       messages: [],
       queue: [],
       running: null,
@@ -70,10 +72,12 @@ export function ensureConversation(chatState, key, meta = {}) {
   const conv = chatState.conversationsByKey[normalizedKey];
   if (meta.hostId) conv.hostId = String(meta.hostId);
   if (meta.toolId) conv.toolId = String(meta.toolId);
+  if (meta.runtimeToolId) conv.runtimeToolId = String(meta.runtimeToolId);
   if (meta.toolClass) conv.toolClass = String(meta.toolClass);
   if (meta.hostName) conv.hostName = String(meta.hostName);
   if (meta.toolName) conv.toolName = String(meta.toolName);
   if ("online" in meta) conv.online = Boolean(meta.online);
+  if (meta.availability) conv.availability = String(meta.availability);
   conv.updatedAt = String(meta.updatedAt || conv.updatedAt || new Date().toISOString());
   if (!chatState.conversationOrder.includes(normalizedKey)) {
     chatState.conversationOrder.unshift(normalizedKey);

@@ -246,6 +246,8 @@ export function createConnectionSocketOps({
     runtime.status = "DISCONNECTED";
     runtime.sidecarStatus = "UNKNOWN";
     runtime.lastHeartbeatAt = null;
+    runtime.primaryToolMetrics = {};
+    runtime.toolMetricsById = {};
     runtime.candidateTools = [];
     runtime.connectingToolIds = {};
     runtime.toolConnectTraceIds = {};

@@ -16,6 +16,7 @@ export function createHostDeleteFlow({
   sendSocketEvent,
   disposeRuntime,
   clearToolMetaForHost,
+  deleteChatConversationsByHost,
   recomputeSelections,
   persistConfig,
   render,
@@ -30,6 +31,9 @@ export function createHostDeleteFlow({
     tauriInvoke,
     clearHostSession,
   });
+  const removeHostConversations = typeof deleteChatConversationsByHost === "function"
+    ? deleteChatConversationsByHost
+    : async () => 0;
 
   /**
    * 删除宿主机前，尽量让 sidecar 清空工具白名单，避免重配后“历史已接入工具自动回流”。
@@ -75,6 +79,11 @@ export function createHostDeleteFlow({
     if (!host) return;
 
     await resetToolWhitelistBeforeDelete(hostId, host);
+    try {
+      await removeHostConversations(hostId, { deleteStore: true });
+    } catch (error) {
+      addLog(`删除宿主机会话失败 (${host.displayName}): ${error}`);
+    }
 
     let expectedCredentialId = "";
     let expectedKeyId = "";

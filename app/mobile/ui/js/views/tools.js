@@ -314,14 +314,21 @@ export function createToolsView(deps) {
     const swipeKey = `${hostId}::${toolId}`;
     const displayName = resolveToolDisplayName(hostId, tool);
     const mode = String(metric.mode ?? tool.mode ?? "TUI");
+    const invalidPidChanged = Boolean(tool.invalidPidChanged)
+      || String(tool.status || "").trim().toLowerCase() === "invalid";
+    const statusLabel = invalidPidChanged
+      ? "未连接"
+      : String(metric.status ?? tool.status ?? "UNKNOWN");
     const note = buildOpenCodeCardNote({
       endpoint: String(metric.endpoint ?? tool.endpoint ?? ""),
-      reason: String(metric.reason ?? tool.reason ?? ""),
+      reason: invalidPidChanged
+        ? "检测到进程 PID 变化，请删除卡片后重新接入新进程。"
+        : String(metric.reason ?? tool.reason ?? ""),
       model: String(metric.model ?? tool.model ?? ""),
       agentMode: String(metric.agentMode ?? tool.agentMode ?? ""),
       workspaceDir: String(metric.workspaceDir ?? tool.workspaceDir ?? ""),
     });
-    const connected = asBool(metric.connected ?? tool.connected);
+    const connected = invalidPidChanged ? false : asBool(metric.connected ?? tool.connected);
     return `
       <div class="tool-swipe" data-tool-swipe-key="${escapeHtml(swipeKey)}">
         <article
@@ -344,7 +351,7 @@ export function createToolsView(deps) {
             </div>
           </div>
           <div class="chip-wrap">
-            <span class="chip">${escapeHtml(String(metric.status ?? tool.status ?? "UNKNOWN"))}</span>
+            <span class="chip">${escapeHtml(statusLabel)}</span>
             <span class="chip">${connected ? "已接入" : "未接入"}</span>
           </div>
           ${note ? `<p class="tool-note">${escapeHtml(note)}</p>` : ""}
@@ -378,9 +385,10 @@ export function createToolsView(deps) {
     const mode = String(metric.mode ?? tool.mode ?? "CLI");
     const connected = asBool(metric.connected ?? tool.connected);
     const detail = detailForTool(hostId, toolId);
+    const runtime = ensureRuntime(hostId);
+    const capabilityChange = asMap(runtime?.toolCapabilityChangesByToolId?.[toolId] || {});
     const detailData = asMap(detail.data);
     const summary = summarizeOpenClaw(detailData, asBool(detail.stale));
-    const workspace = String(metric.workspaceDir ?? tool.workspaceDir ?? "").trim();
 
     const gatewayLabel = statusDotLabel("gateway", summary.gatewayDot);
     const dataLabel = openClawFreshnessLabel(
@@ -421,8 +429,8 @@ export function createToolsView(deps) {
           <div class="chip-wrap">
             <span class="chip">${escapeHtml(String(metric.status ?? tool.status ?? "UNKNOWN"))}</span>
             <span class="chip">${connected ? "已接入" : "未接入"}</span>
-            ${workspace ? `<span class="chip">${escapeHtml(`工作目录：${workspace}`)}</span>` : ""}
           </div>
+          ${capabilityChange.summary ? `<p class="tool-note">${escapeHtml(`能力变化：${String(capabilityChange.summary || "")}`)}</p>` : ""}
           <div class="tool-openclaw-dots">
             <span class="tool-dot-label">
               <i class="tool-dot ${gatewayClass}"></i>

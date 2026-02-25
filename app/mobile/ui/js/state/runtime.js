@@ -6,8 +6,82 @@
 import { createRuntime, state } from "./store.js";
 import { asBool } from "../utils/type.js";
 
+export const OPENCLAW_LOGICAL_TOOL_ID = "openclaw_primary";
+
+function isOpenClawToolId(toolId) {
+  return /^openclaw_/i.test(String(toolId || "").trim());
+}
+
+function isOpenClawTool(tool) {
+  const toolId = String(tool?.toolId || "").toLowerCase();
+  const name = String(tool?.name || "").toLowerCase();
+  const vendor = String(tool?.vendor || "").toLowerCase();
+  return toolId.startsWith("openclaw_") || name.includes("openclaw") || vendor.includes("openclaw");
+}
+
+function isOpenCodeTool(tool) {
+  const toolId = String(tool?.toolId || "").toLowerCase();
+  const name = String(tool?.name || "").toLowerCase();
+  const vendor = String(tool?.vendor || "").toLowerCase();
+  return toolId.startsWith("opencode_") || name.includes("opencode") || vendor.includes("opencode");
+}
+
+function parsePidFromToolId(toolId) {
+  const text = String(toolId || "").trim();
+  const match = text.match(/_p(\d+)$/i);
+  if (!match) return 0;
+  const pid = Number(match[1] || 0);
+  return Number.isFinite(pid) && pid > 0 ? pid : 0;
+}
+
+function parsePidFromTool(tool) {
+  const explicit = Number(tool?.pid || 0);
+  if (Number.isFinite(explicit) && explicit > 0) {
+    return explicit;
+  }
+  return parsePidFromToolId(tool?.runtimeToolId || tool?.toolId || "");
+}
+
+function opencodeFamilyKey(toolId) {
+  const normalized = String(toolId || "").trim().toLowerCase();
+  const match = normalized.match(/^(opencode_[a-z0-9]+)_p\d+$/);
+  if (match && match[1]) return match[1];
+  if (normalized.startsWith("opencode_")) return normalized;
+  return "";
+}
+
+function openclawSelectionScore(tool) {
+  const status = String(tool?.status || "").trim().toLowerCase();
+  const source = String(tool?.source || "").trim().toLowerCase();
+  let score = 0;
+  if (asBool(tool?.connected)) score += 2;
+  if (status && status !== "offline") score += 4;
+  if (source === "whitelist-placeholder") score -= 3;
+  if (parsePidFromTool(tool) > 0) score += 1;
+  return score;
+}
+
 /** 创建运行态管理器（按 hostId 维护连接与工具状态）。 */
 export function createRuntimeState({ persistConfig }) {
+  function ensureRuntimeShape(runtime) {
+    if (!runtime || typeof runtime !== "object") return;
+    if (!runtime.logicalToolIdToRuntimeToolId || typeof runtime.logicalToolIdToRuntimeToolId !== "object") {
+      runtime.logicalToolIdToRuntimeToolId = {};
+    }
+    if (!runtime.runtimeToolIdToLogicalToolId || typeof runtime.runtimeToolIdToLogicalToolId !== "object") {
+      runtime.runtimeToolIdToLogicalToolId = {};
+    }
+    if (!runtime.toolCapabilityChangesByToolId || typeof runtime.toolCapabilityChangesByToolId !== "object") {
+      runtime.toolCapabilityChangesByToolId = {};
+    }
+    if (!runtime.opencodeInvalidByLogicalToolId || typeof runtime.opencodeInvalidByLogicalToolId !== "object") {
+      runtime.opencodeInvalidByLogicalToolId = {};
+    }
+    if (!runtime.openclawWorkspaceByToolId || typeof runtime.openclawWorkspaceByToolId !== "object") {
+      runtime.openclawWorkspaceByToolId = {};
+    }
+  }
+
   function ensureRuntime(hostId) {
     const id = String(hostId || "").trim();
     if (!id) {
@@ -16,6 +90,7 @@ export function createRuntimeState({ persistConfig }) {
     if (!state.runtimes[id]) {
       state.runtimes[id] = createRuntime();
     }
+    ensureRuntimeShape(state.runtimes[id]);
     return state.runtimes[id];
   }
 
@@ -56,9 +131,39 @@ export function createRuntimeState({ persistConfig }) {
     delete state.runtimes[hostId];
   }
 
+  function resolveLogicalToolId(hostId, toolId) {
+    const normalized = String(toolId || "").trim();
+    if (!normalized) return "";
+    if (normalized === OPENCLAW_LOGICAL_TOOL_ID) return normalized;
+    const runtime = ensureRuntime(hostId);
+    if (runtime && runtime.runtimeToolIdToLogicalToolId[normalized]) {
+      return String(runtime.runtimeToolIdToLogicalToolId[normalized] || "").trim() || normalized;
+    }
+    if (isOpenClawToolId(normalized)) {
+      return OPENCLAW_LOGICAL_TOOL_ID;
+    }
+    return normalized;
+  }
+
+  function resolveRuntimeToolId(hostId, logicalOrRuntimeToolId) {
+    const normalized = String(logicalOrRuntimeToolId || "").trim();
+    if (!normalized) return "";
+    const runtime = ensureRuntime(hostId);
+    if (!runtime) return normalized;
+    if (runtime.logicalToolIdToRuntimeToolId[normalized]) {
+      return String(runtime.logicalToolIdToRuntimeToolId[normalized] || "").trim() || normalized;
+    }
+    if (normalized === OPENCLAW_LOGICAL_TOOL_ID) {
+      const fallback = (Array.isArray(runtime.tools) ? runtime.tools : []).find((tool) => isOpenClawTool(tool));
+      if (!fallback) return normalized;
+      return String(fallback.runtimeToolId || fallback.toolId || normalized).trim() || normalized;
+    }
+    return normalized;
+  }
+
   function toolStateKey(hostId, toolId) {
     const host = String(hostId || "").trim();
-    const tool = String(toolId || "").trim();
+    const tool = resolveLogicalToolId(hostId, toolId);
     if (!host || !tool) {
       return "";
     }
@@ -126,8 +231,23 @@ export function createRuntimeState({ persistConfig }) {
     persistConfig();
   }
 
+  function clearToolBinding(hostId, toolId) {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime) return;
+    const logicalToolId = resolveLogicalToolId(hostId, toolId);
+    if (!logicalToolId) return;
+    const runtimeToolId = String(runtime.logicalToolIdToRuntimeToolId[logicalToolId] || "").trim();
+    if (runtimeToolId) {
+      delete runtime.runtimeToolIdToLogicalToolId[runtimeToolId];
+    }
+    delete runtime.logicalToolIdToRuntimeToolId[logicalToolId];
+    delete runtime.opencodeInvalidByLogicalToolId[logicalToolId];
+    delete runtime.toolCapabilityChangesByToolId[logicalToolId];
+    delete runtime.openclawWorkspaceByToolId[logicalToolId];
+  }
+
   function resolveToolDisplayName(hostId, tool) {
-    const toolId = String(tool && tool.toolId ? tool.toolId : "");
+    const toolId = resolveLogicalToolId(hostId, String(tool && tool.toolId ? tool.toolId : ""));
     const alias = getToolAlias(hostId, toolId);
     if (alias) {
       return alias;
@@ -137,20 +257,150 @@ export function createRuntimeState({ persistConfig }) {
   }
 
   function sanitizeTools(hostId, source, includeHidden) {
-    return source.filter((tool) => {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime) return [];
+
+    const hasOpenclawCard = Array.isArray(runtime.tools)
+      && runtime.tools.some((tool) => String(tool.toolId || "") === OPENCLAW_LOGICAL_TOOL_ID || isOpenClawTool(tool));
+    const connectedOpencodePids = new Set(
+      (Array.isArray(runtime.tools) ? runtime.tools : [])
+        .filter((tool) => isOpenCodeTool(tool))
+        .map((tool) => {
+          const runtimeToolId = resolveRuntimeToolId(hostId, String(tool.toolId || ""));
+          const pid = parsePidFromTool({ ...tool, runtimeToolId });
+          return pid > 0 ? pid : 0;
+        })
+        .filter((pid) => pid > 0),
+    );
+
+    const filtered = source.filter((tool) => {
       const name = String(tool.name || "").toLowerCase();
       const category = String(tool.category || "").toLowerCase();
       const toolId = String(tool.toolId || "").trim();
+      const logicalToolId = isOpenClawTool(tool) ? OPENCLAW_LOGICAL_TOOL_ID : toolId;
       if (name.includes("mobile") || name.includes("client app")) {
         return false;
       }
       if (category.includes("client")) {
         return false;
       }
-      if (!includeHidden && toolId && isToolHidden(hostId, toolId)) {
+      if (!includeHidden && logicalToolId && isToolHidden(hostId, logicalToolId)) {
         return false;
       }
+      if (includeHidden && isOpenClawTool(tool) && hasOpenclawCard) {
+        return false;
+      }
+      if (includeHidden && isOpenCodeTool(tool)) {
+        const pid = parsePidFromTool(tool);
+        if (pid > 0 && connectedOpencodePids.has(pid)) {
+          return false;
+        }
+      }
       return true;
+    });
+
+    if (includeHidden) {
+      return filtered;
+    }
+
+    runtime.logicalToolIdToRuntimeToolId = {};
+    runtime.runtimeToolIdToLogicalToolId = {};
+
+    let selectedOpenclaw = null;
+    const nonOpenclaw = [];
+    for (const tool of filtered) {
+      if (!isOpenClawTool(tool)) {
+        nonOpenclaw.push(tool);
+        continue;
+      }
+      if (!selectedOpenclaw || openclawSelectionScore(tool) > openclawSelectionScore(selectedOpenclaw)) {
+        selectedOpenclaw = tool;
+      }
+    }
+
+    const connectedList = [];
+    if (selectedOpenclaw) connectedList.push(selectedOpenclaw);
+    connectedList.push(...nonOpenclaw);
+
+    return connectedList.map((tool) => {
+      const rawToolId = String(tool.toolId || "").trim();
+      const logicalToolId = isOpenClawTool(tool) ? OPENCLAW_LOGICAL_TOOL_ID : rawToolId;
+      if (!rawToolId) {
+        return { ...tool };
+      }
+
+      runtime.runtimeToolIdToLogicalToolId[rawToolId] = logicalToolId;
+      runtime.logicalToolIdToRuntimeToolId[logicalToolId] = rawToolId;
+
+      const nextTool = {
+        ...tool,
+        toolId: logicalToolId,
+        logicalToolId,
+        runtimeToolId: rawToolId,
+      };
+
+      if (logicalToolId === OPENCLAW_LOGICAL_TOOL_ID) {
+        const workspace = String(tool.workspaceDir || "").trim();
+        if (workspace && !runtime.openclawWorkspaceByToolId[logicalToolId]) {
+          runtime.openclawWorkspaceByToolId[logicalToolId] = workspace;
+        }
+        if (runtime.openclawWorkspaceByToolId[logicalToolId]) {
+          nextTool.workspaceDir = runtime.openclawWorkspaceByToolId[logicalToolId];
+        }
+      }
+
+      if (isOpenCodeTool(nextTool) && runtime.opencodeInvalidByLogicalToolId[logicalToolId]) {
+        nextTool.invalidPidChanged = true;
+        nextTool.status = "INVALID";
+        nextTool.reason = "检测到进程 PID 变化，请删除卡片后重新接入新进程。";
+      } else {
+        nextTool.invalidPidChanged = false;
+      }
+
+      return nextTool;
+    });
+  }
+
+  function syncOpencodeInvalidState(hostId) {
+    const runtime = ensureRuntime(hostId);
+    if (!runtime) return;
+
+    const candidateTools = Array.isArray(runtime.candidateTools) ? runtime.candidateTools : [];
+    const nextInvalid = {};
+    for (const tool of Array.isArray(runtime.tools) ? runtime.tools : []) {
+      if (!isOpenCodeTool(tool)) continue;
+      const logicalToolId = String(tool.toolId || "").trim();
+      const runtimeToolId = resolveRuntimeToolId(hostId, logicalToolId);
+      const connectedFamily = opencodeFamilyKey(runtimeToolId);
+      if (!connectedFamily) continue;
+
+      const replaced = candidateTools.some((candidate) => {
+        if (!isOpenCodeTool(candidate)) return false;
+        const candidateToolId = String(candidate.toolId || "").trim();
+        return candidateToolId
+          && candidateToolId !== runtimeToolId
+          && opencodeFamilyKey(candidateToolId) === connectedFamily;
+      });
+      if (replaced) {
+        nextInvalid[logicalToolId] = true;
+      }
+    }
+
+    runtime.opencodeInvalidByLogicalToolId = nextInvalid;
+    runtime.tools = (Array.isArray(runtime.tools) ? runtime.tools : []).map((tool) => {
+      const logicalToolId = String(tool.toolId || "").trim();
+      if (!isOpenCodeTool(tool)) {
+        return { ...tool, invalidPidChanged: false };
+      }
+      if (!nextInvalid[logicalToolId]) {
+        return { ...tool, invalidPidChanged: false };
+      }
+      return {
+        ...tool,
+        invalidPidChanged: true,
+        status: "INVALID",
+        reason: "检测到进程 PID 变化，请删除卡片后重新接入新进程。",
+      };
     });
   }
 
@@ -159,10 +409,12 @@ export function createRuntimeState({ persistConfig }) {
     if (!runtime || !toolId) {
       return {};
     }
-    if (runtime.toolMetricsById[toolId]) {
-      return runtime.toolMetricsById[toolId];
+    const logicalToolId = resolveLogicalToolId(hostId, toolId);
+    const runtimeToolId = resolveRuntimeToolId(hostId, logicalToolId);
+    if (runtime.toolMetricsById[runtimeToolId]) {
+      return runtime.toolMetricsById[runtimeToolId];
     }
-    if (runtime.primaryToolMetrics.toolId === toolId) {
+    if (String(runtime.primaryToolMetrics.toolId || "") === runtimeToolId) {
       return runtime.primaryToolMetrics;
     }
     return {};
@@ -186,11 +438,13 @@ export function createRuntimeState({ persistConfig }) {
         data: {},
       };
     }
-    const detail = runtime.toolDetailsById[toolId] || {};
+    const logicalToolId = resolveLogicalToolId(hostId, toolId);
+    const runtimeToolId = resolveRuntimeToolId(hostId, logicalToolId);
+    const detail = runtime.toolDetailsById[runtimeToolId] || {};
     return {
       schema: String(detail.schema || ""),
-      stale: asBool(runtime.toolDetailStaleById[toolId]),
-      collectedAt: String(runtime.toolDetailUpdatedAtById[toolId] || ""),
+      stale: asBool(runtime.toolDetailStaleById[runtimeToolId]),
+      collectedAt: String(runtime.toolDetailUpdatedAtById[runtimeToolId] || ""),
       expiresAt: String(detail.expiresAt || ""),
       profileKey: String(detail.profileKey || ""),
       data: detail.data && typeof detail.data === "object" ? detail.data : {},
@@ -230,8 +484,12 @@ export function createRuntimeState({ persistConfig }) {
     isToolHidden,
     setToolHidden,
     clearToolMetaForHost,
+    clearToolBinding,
+    resolveLogicalToolId,
+    resolveRuntimeToolId,
     resolveToolDisplayName,
     sanitizeTools,
+    syncOpencodeInvalidState,
     metricForTool,
     detailForTool,
     hostStatusLabel,

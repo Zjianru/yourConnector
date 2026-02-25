@@ -21,6 +21,8 @@ export function createChatFlow({
   visibleHosts,
   hostById,
   ensureRuntime,
+  resolveLogicalToolId,
+  resolveRuntimeToolId,
   resolveToolDisplayName,
   sendSocketEvent,
   addLog,
@@ -82,10 +84,64 @@ export function createChatFlow({
     return toolClass === "assistant" || toolClass === "code";
   }
 
+  function mapLogicalToolId(hostId, toolId) {
+    const raw = String(toolId || "").trim();
+    if (!raw) return "";
+    if (typeof resolveLogicalToolId === "function") {
+      return String(resolveLogicalToolId(hostId, raw) || "").trim() || raw;
+    }
+    return raw;
+  }
+
+  function mapRuntimeToolId(hostId, toolId) {
+    const raw = String(toolId || "").trim();
+    if (!raw) return "";
+    if (typeof resolveRuntimeToolId === "function") {
+      return String(resolveRuntimeToolId(hostId, raw) || "").trim() || raw;
+    }
+    return raw;
+  }
+
+  function isOpenCodeConversation(conv) {
+    const toolId = String(conv?.toolId || "").toLowerCase();
+    const toolName = String(conv?.toolName || "").toLowerCase();
+    return toolId.startsWith("opencode_") || toolName.includes("opencode");
+  }
+
+  function resolveConversationRuntimeToolId(conv) {
+    if (!conv) return "";
+    const hostId = String(conv.hostId || "").trim();
+    if (!hostId) return "";
+    const logicalToolId = String(conv.toolId || "").trim();
+    const mapped = mapRuntimeToolId(hostId, logicalToolId);
+    if (mapped && mapped !== logicalToolId) return mapped;
+    if (String(conv.runtimeToolId || "").trim()) return String(conv.runtimeToolId || "").trim();
+    const runtime = ensureRuntime(hostId);
+    if (!runtime || !Array.isArray(runtime.tools)) return mapped || logicalToolId;
+    const found = runtime.tools.find((tool) => String(tool.toolId || "") === logicalToolId);
+    return String(found?.runtimeToolId || found?.toolId || mapped || logicalToolId || "").trim();
+  }
+
+  function finalizeInterruptedMessages(conv, reason) {
+    if (!conv) return false;
+    let changed = false;
+    for (const msg of Array.isArray(conv.messages) ? conv.messages : []) {
+      const status = String(msg.status || "").trim().toLowerCase();
+      if (status === "streaming" || status === "sending") {
+        msg.status = "interrupted";
+        if (reason && !String(msg.text || "").trim() && msg.role !== "user") {
+          msg.text = reason;
+        }
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   function isToolOnline(runtime, tool) {
     if (!runtime || !runtime.connected || !tool) return false;
     const status = String(tool.status || "").trim().toLowerCase();
-    return Boolean(tool.connected) && status !== "offline";
+    return Boolean(tool.connected) && status !== "offline" && status !== "invalid";
   }
 
   function toPersistedConversation(conv) {
@@ -103,9 +159,11 @@ export function createChatFlow({
       key: String(conv.key || ""),
       hostId: String(conv.hostId || ""),
       toolId: String(conv.toolId || ""),
+      runtimeToolId: String(conv.runtimeToolId || ""),
       toolClass: String(conv.toolClass || ""),
       hostName: String(conv.hostName || ""),
       toolName: String(conv.toolName || ""),
+      availability: String(conv.availability || "offline"),
       updatedAt: String(conv.updatedAt || ""),
       messages: Array.isArray(conv.messages) ? conv.messages : [],
       queue,
@@ -122,9 +180,11 @@ export function createChatFlow({
       key,
       hostId: String(conv.hostId || ""),
       toolId: String(conv.toolId || ""),
+      runtimeToolId: String(conv.runtimeToolId || ""),
       toolClass: String(conv.toolClass || ""),
       hostName: String(conv.hostName || ""),
       toolName: String(conv.toolName || ""),
+      availability: String(conv.availability || "offline"),
       updatedAt: String(conv.updatedAt || new Date().toISOString()),
       online: false,
       messages: Array.isArray(conv.messages) ? conv.messages : [],
@@ -141,7 +201,7 @@ export function createChatFlow({
       byKey[key] = toPersistedConversation(rawConv);
     });
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       activeConversationKey: String(state.chat.activeConversationKey || ""),
       conversationOrder: Array.isArray(state.chat.conversationOrder)
         ? state.chat.conversationOrder
@@ -355,32 +415,45 @@ export function createChatFlow({
 
   function normalizeConversationOnlineState() {
     const onlineKeys = new Set();
+    const invalidKeys = new Set();
+    const runtimeToolIdByKey = {};
 
     visibleHosts().forEach((host) => {
       const runtime = ensureRuntime(host.hostId);
       if (!runtime) return;
       const tools = Array.isArray(runtime.tools) ? runtime.tools : [];
       tools.filter(isChatTool).forEach((tool) => {
-        const key = chatConversationKey(host.hostId, tool.toolId);
+        const logicalToolId = mapLogicalToolId(host.hostId, tool.toolId);
+        const key = chatConversationKey(host.hostId, logicalToolId);
         if (!key) return;
+        const online = isToolOnline(runtime, tool);
+        const invalid = String(tool.status || "").trim().toLowerCase() === "invalid"
+          || Boolean(tool.invalidPidChanged);
+        const runtimeToolId = String(tool.runtimeToolId || tool.toolId || "").trim();
         const conv = ensureConversation(state.chat, key, {
           hostId: host.hostId,
-          toolId: String(tool.toolId || ""),
+          toolId: logicalToolId,
+          runtimeToolId,
           toolClass: String(tool.toolClass || ""),
           hostName: String(host.displayName || host.hostId),
           toolName: resolveToolDisplayName(host.hostId, tool),
-          online: isToolOnline(runtime, tool),
+          online,
+          availability: invalid ? "invalid" : (online ? "online" : "offline"),
         });
         if (conv) {
-          const online = isToolOnline(runtime, tool);
           conv.online = online;
+          conv.runtimeToolId = runtimeToolId;
+          conv.availability = invalid ? "invalid" : (online ? "online" : "offline");
           if (online) onlineKeys.add(key);
+          if (invalid) invalidKeys.add(key);
+          if (runtimeToolId) runtimeToolIdByKey[key] = runtimeToolId;
         }
       });
     });
 
     Object.values(state.chat.conversationsByKey).forEach((conv) => {
       const isOnline = onlineKeys.has(conv.key);
+      const isInvalid = invalidKeys.has(conv.key);
       if (!isOnline && conv.running && conv.running.requestId && conv.running.queueItemId) {
         const exists = conv.queue.some((item) => item.queueItemId === conv.running.queueItemId);
         if (!exists) {
@@ -393,7 +466,17 @@ export function createChatFlow({
         }
         conv.running = null;
       }
+      if (!isOnline) {
+        const interrupted = finalizeInterruptedMessages(conv, "连接中断，消息输出已中止。");
+        if (interrupted && !conv.error) {
+          conv.error = "连接中断，消息输出已中止。";
+        }
+      }
+      if (runtimeToolIdByKey[conv.key]) {
+        conv.runtimeToolId = runtimeToolIdByKey[conv.key];
+      }
       conv.online = isOnline;
+      conv.availability = isInvalid ? "invalid" : (isOnline ? "online" : "offline");
     });
 
     if (!state.chat.activeConversationKey) {
@@ -478,9 +561,26 @@ export function createChatFlow({
   }
 
   async function deleteConversationByTool(hostId, toolId, { deleteStore = true } = {}) {
-    const key = chatConversationKey(hostId, toolId);
+    const logicalToolId = mapLogicalToolId(hostId, toolId);
+    const key = chatConversationKey(hostId, logicalToolId);
     if (!key) return false;
     return deleteConversationByKey(key, { deleteStore });
+  }
+
+  async function deleteConversationsByHost(hostId, { deleteStore = true } = {}) {
+    const normalizedHostId = String(hostId || "").trim();
+    if (!normalizedHostId) return 0;
+    const keys = Object.values(state.chat.conversationsByKey)
+      .filter((conv) => String(conv.hostId || "") === normalizedHostId)
+      .map((conv) => String(conv.key || ""))
+      .filter(Boolean);
+    let removedCount = 0;
+    for (const key of keys) {
+      // eslint-disable-next-line no-await-in-loop
+      const removed = await deleteConversationByKey(key, { deleteStore });
+      if (removed) removedCount += 1;
+    }
+    return removedCount;
   }
 
   async function clearConversationMessages(conversationKey) {
@@ -560,12 +660,25 @@ export function createChatFlow({
   function maybeDispatchNext(conversationKey) {
     const conv = state.chat.conversationsByKey[conversationKey];
     if (!conv || !conv.online || conv.running || conv.queue.length === 0) return;
+    if (String(conv.availability || "").toLowerCase() === "invalid") {
+      conv.error = "当前工具实例已失效，请删除卡片后重新接入新进程。";
+      touchConversation(conv);
+      render();
+      return;
+    }
     const item = conv.queue[0];
+    const runtimeToolId = resolveConversationRuntimeToolId(conv);
+    if (!runtimeToolId) {
+      conv.error = "当前工具未在线，无法发送。";
+      touchConversation(conv);
+      render();
+      return;
+    }
     const sent = sendSocketEvent(
       conv.hostId,
       "tool_chat_request",
       {
-        toolId: conv.toolId,
+        toolId: runtimeToolId,
         conversationKey: conv.key,
         requestId: item.requestId,
         queueItemId: item.queueItemId,
@@ -574,7 +687,7 @@ export function createChatFlow({
       {
         action: "tool_chat_request",
         traceId: item.requestId.replace(/^req_/, "trc_"),
-        toolId: conv.toolId,
+        toolId: runtimeToolId,
       },
     );
     if (!sent) {
@@ -607,6 +720,11 @@ export function createChatFlow({
     const text = String(conv.draft || "").trim();
     if (!text) {
       maybeDispatchNext(conv.key);
+      return;
+    }
+    if (String(conv.availability || "").toLowerCase() === "invalid" && isOpenCodeConversation(conv)) {
+      conv.error = "当前进程已失效（PID 已变化），请删除卡片后重新接入。";
+      render();
       return;
     }
     if (!conv.online) {
@@ -662,11 +780,17 @@ export function createChatFlow({
   function stopRunningMessage() {
     const conv = activeConversation();
     if (!conv || !conv.running) return;
+    const runtimeToolId = resolveConversationRuntimeToolId(conv);
+    if (!runtimeToolId) {
+      conv.error = "停止失败：当前工具未在线";
+      render();
+      return;
+    }
     const sent = sendSocketEvent(
       conv.hostId,
       "tool_chat_cancel_request",
       {
-        toolId: conv.toolId,
+        toolId: runtimeToolId,
         conversationKey: conv.key,
         requestId: conv.running.requestId,
         queueItemId: conv.running.queueItemId,
@@ -674,7 +798,7 @@ export function createChatFlow({
       {
         action: "tool_chat_cancel_request",
         traceId: conv.running.requestId.replace(/^req_/, "trc_"),
-        toolId: conv.toolId,
+        toolId: runtimeToolId,
       },
     );
     if (!sent) {
@@ -687,28 +811,35 @@ export function createChatFlow({
       action: "tool_chat_cancel_request",
       outcome: "sent",
       hostId: conv.hostId,
-      toolId: conv.toolId,
+      toolId: runtimeToolId,
       traceId: conv.running.requestId.replace(/^req_/, "trc_"),
     });
   }
 
   function ensureConversationByPayload(hostId, payload) {
-    const toolId = String(payload.toolId || "").trim();
-    const key = String(payload.conversationKey || "").trim()
-      || chatConversationKey(hostId, toolId);
-    if (!key || !toolId) return null;
+    const runtimeToolId = String(payload.toolId || "").trim();
+    const logicalToolId = mapLogicalToolId(hostId, runtimeToolId);
+    const key = chatConversationKey(hostId, logicalToolId);
+    if (!key || !logicalToolId) return null;
     const host = hostById(hostId);
     const runtime = ensureRuntime(hostId);
     const tool = runtime && Array.isArray(runtime.tools)
-      ? runtime.tools.find((item) => String(item.toolId || "") === toolId)
+      ? runtime.tools.find((item) => (
+        String(item.toolId || "") === logicalToolId
+        || String(item.runtimeToolId || "") === runtimeToolId
+      ))
       : null;
     const conv = ensureConversation(state.chat, key, {
       hostId,
-      toolId,
+      toolId: logicalToolId,
+      runtimeToolId: runtimeToolId || String(tool?.runtimeToolId || tool?.toolId || ""),
       toolClass: tool ? String(tool.toolClass || "") : "",
       hostName: host ? host.displayName : hostId,
-      toolName: tool ? resolveToolDisplayName(hostId, tool) : toolId,
+      toolName: tool ? resolveToolDisplayName(hostId, tool) : logicalToolId,
       online: isToolOnline(runtime, tool),
+      availability: tool && (String(tool.status || "").toLowerCase() === "invalid" || tool.invalidPidChanged)
+        ? "invalid"
+        : (isToolOnline(runtime, tool) ? "online" : "offline"),
       updatedAt: new Date().toISOString(),
     });
     if (!state.chat.activeConversationKey) {
@@ -883,6 +1014,22 @@ export function createChatFlow({
   }
 
   function onChatListClick(event) {
+    const deleteBtn = event.target.closest("[data-chat-delete]");
+    if (deleteBtn) {
+      const key = String(deleteBtn.getAttribute("data-chat-delete") || "");
+      if (key) {
+        const conv = state.chat.conversationsByKey[key];
+        const label = conv
+          ? `${conv.hostName || conv.hostId || "--"} · ${conv.toolName || conv.toolId || "--"}`
+          : key;
+        const confirmed = window.confirm(`确认删除会话「${label}」吗？此操作不可恢复。`);
+        if (confirmed) {
+          void deleteConversationByKey(key, { deleteStore: true });
+        }
+      }
+      return;
+    }
+
     const clearBtn = event.target.closest("[data-chat-clear]");
     if (clearBtn) {
       void clearConversationMessages(String(clearBtn.getAttribute("data-chat-clear") || ""));
@@ -1009,26 +1156,111 @@ export function createChatFlow({
     maybeDispatchNext(conv.key);
   }
 
+  function normalizeRestoredConversations(restoredByKey, rawOrder) {
+    const normalizedByKey = {};
+    const rankByKey = {};
+
+    function rankConversation(conv) {
+      const messageCount = Array.isArray(conv.messages) ? conv.messages.length : 0;
+      const updatedAt = Date.parse(String(conv.updatedAt || "")) || 0;
+      return { messageCount, updatedAt };
+    }
+
+    function shouldReplace(existingRank, candidateRank) {
+      if (!existingRank) return true;
+      if (candidateRank.messageCount !== existingRank.messageCount) {
+        return candidateRank.messageCount > existingRank.messageCount;
+      }
+      return candidateRank.updatedAt >= existingRank.updatedAt;
+    }
+
+    Object.entries(asMap(restoredByKey)).forEach(([key, rawConv]) => {
+      const conv = asMap(rawConv);
+      const fallbackHost = String(key || "").split("::")[0] || "";
+      const fallbackTool = String(key || "").split("::").slice(1).join("::") || "";
+      const hostId = String(conv.hostId || fallbackHost || "").trim();
+      const rawToolId = String(conv.toolId || fallbackTool || "").trim();
+      if (!hostId || !rawToolId) return;
+
+      const logicalToolId = mapLogicalToolId(hostId, rawToolId);
+      const normalizedKey = chatConversationKey(hostId, logicalToolId);
+      if (!normalizedKey) return;
+
+      const candidate = {
+        ...conv,
+        key: normalizedKey,
+        hostId,
+        toolId: logicalToolId,
+        runtimeToolId: String(conv.runtimeToolId || rawToolId || ""),
+        availability: String(conv.availability || "offline"),
+        online: false,
+      };
+      const candidateRank = rankConversation(candidate);
+      if (shouldReplace(rankByKey[normalizedKey], candidateRank)) {
+        normalizedByKey[normalizedKey] = candidate;
+        rankByKey[normalizedKey] = candidateRank;
+      }
+    });
+
+    const orderSource = Array.isArray(rawOrder) ? rawOrder : [];
+    const normalizedOrder = [];
+    const seen = new Set();
+    orderSource.forEach((rawKey) => {
+      const conv = asMap(restoredByKey[rawKey]);
+      const fallbackHost = String(rawKey || "").split("::")[0] || "";
+      const fallbackTool = String(rawKey || "").split("::").slice(1).join("::") || "";
+      const hostId = String(conv.hostId || fallbackHost || "").trim();
+      const rawToolId = String(conv.toolId || fallbackTool || "").trim();
+      const logicalToolId = mapLogicalToolId(hostId, rawToolId);
+      const normalizedKey = chatConversationKey(hostId, logicalToolId);
+      if (!normalizedKey || !normalizedByKey[normalizedKey] || seen.has(normalizedKey)) return;
+      seen.add(normalizedKey);
+      normalizedOrder.push(normalizedKey);
+    });
+
+    const remaining = Object.keys(normalizedByKey)
+      .filter((key) => !seen.has(key))
+      .sort((a, b) => {
+        const ta = Date.parse(String(normalizedByKey[a]?.updatedAt || "")) || 0;
+        const tb = Date.parse(String(normalizedByKey[b]?.updatedAt || "")) || 0;
+        return tb - ta;
+      });
+    normalizedOrder.push(...remaining);
+
+    return { byKey: normalizedByKey, order: normalizedOrder };
+  }
+
   async function hydrateChatState() {
     try {
       const result = await tauriInvoke("chat_store_bootstrap", {});
       const index = asMap(result && result.index);
       const byKey = asMap(index.conversationsByKey);
-      const restored = {};
+      const restoredRaw = {};
       Object.entries(byKey).forEach(([key, rawConv]) => {
         const conv = restoreConversation(rawConv);
-        if (conv) restored[key] = conv;
+        if (conv) restoredRaw[key] = conv;
       });
-      state.chat.conversationsByKey = restored;
-      state.chat.conversationOrder = Array.isArray(index.conversationOrder)
-        ? index.conversationOrder.filter((key) => restored[key])
-        : Object.keys(restored);
+      const normalized = normalizeRestoredConversations(restoredRaw, index.conversationOrder);
+      state.chat.conversationsByKey = normalized.byKey;
+      state.chat.conversationOrder = Array.isArray(normalized.order)
+        ? normalized.order.filter((key) => normalized.byKey[key])
+        : Object.keys(normalized.byKey);
       if (state.chat.conversationOrder.length === 0) {
-        state.chat.conversationOrder = Object.keys(restored);
+        state.chat.conversationOrder = Object.keys(normalized.byKey);
       }
       const active = String(index.activeConversationKey || "");
-      state.chat.activeConversationKey = restored[active]
-        ? active
+      const activeRawConv = asMap(restoredRaw[active]);
+      const activeHostFallback = active.split("::")[0] || "";
+      const activeToolFallback = active.split("::").slice(1).join("::") || "";
+      const activeKey = chatConversationKey(
+        String(activeRawConv.hostId || activeHostFallback || "").trim(),
+        mapLogicalToolId(
+          String(activeRawConv.hostId || activeHostFallback || "").trim(),
+          String(activeRawConv.toolId || activeToolFallback || "").trim(),
+        ),
+      );
+      state.chat.activeConversationKey = normalized.byKey[activeKey]
+        ? activeKey
         : (state.chat.conversationOrder[0] || "");
       state.chat.viewMode = "list";
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
@@ -1038,6 +1270,7 @@ export function createChatFlow({
       state.chat.swipedConversationKey = "";
       state.chat.hydrated = true;
       normalizeConversationOnlineState();
+      void persistIndex();
       render();
     } catch (error) {
       addLog(`chat bootstrap failed: ${error}`, {
@@ -1096,5 +1329,6 @@ export function createChatFlow({
     openConversation,
     deleteConversationByKey,
     deleteConversationByTool,
+    deleteConversationsByHost,
   };
 }

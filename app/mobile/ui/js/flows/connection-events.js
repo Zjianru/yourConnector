@@ -14,6 +14,9 @@ export function createConnectionEvents({
   hostById,
   ensureRuntime,
   sanitizeTools,
+  resolveLogicalToolId,
+  resolveRuntimeToolId,
+  syncOpencodeInvalidState,
   clearToolConnectTimer,
   resolveToolDisplayName,
   setToolHidden,
@@ -27,6 +30,56 @@ export function createConnectionEvents({
   onToolChatFinished,
   addLog,
 }) {
+  function findRuntimeTool(runtime, hostId, toolId) {
+    const rawToolId = String(toolId || "").trim();
+    if (!runtime || !rawToolId) return null;
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, rawToolId)
+      : rawToolId;
+    return runtime.tools.find((item) => (
+      String(item.toolId || "") === logicalToolId
+      || String(item.toolId || "") === rawToolId
+      || String(item.runtimeToolId || "") === rawToolId
+    )) || null;
+  }
+
+  function extractOpenclawCapabilities(detailData) {
+    const data = asMap(detailData);
+    const overview = asMap(data.overview);
+    const agents = asListOfMap(data.agents);
+    const primaryAgent = agents[0] || {};
+    const usage = asMap(data.usage);
+    const configuredModels = asListOfMap(usage.configuredModels);
+    return {
+      model: String(primaryAgent.model || "").trim(),
+      contextMaxTokens: Number(primaryAgent.contextMaxTokens || 0),
+      configuredModelCount: Number(configuredModels.length || 0),
+      defaultAgent: String(overview.defaultAgentId || overview.defaultAgentName || "").trim(),
+    };
+  }
+
+  function describeOpenclawCapabilityChanges(beforeCaps, afterCaps) {
+    const before = asMap(beforeCaps);
+    const after = asMap(afterCaps);
+    const changes = [];
+    const beforeModel = String(before.model || "").trim();
+    const afterModel = String(after.model || "").trim();
+    if (beforeModel && afterModel && beforeModel !== afterModel) {
+      changes.push(`模型 ${beforeModel} -> ${afterModel}`);
+    }
+    const beforeCtx = Number(before.contextMaxTokens || 0);
+    const afterCtx = Number(after.contextMaxTokens || 0);
+    if (beforeCtx > 0 && afterCtx > 0 && beforeCtx !== afterCtx) {
+      changes.push(`上下文窗口 ${beforeCtx} -> ${afterCtx}`);
+    }
+    const beforeCount = Number(before.configuredModelCount || 0);
+    const afterCount = Number(after.configuredModelCount || 0);
+    if (beforeCount >= 0 && afterCount >= 0 && beforeCount !== afterCount) {
+      changes.push(`配置模型数 ${beforeCount} -> ${afterCount}`);
+    }
+    return changes;
+  }
+
   function shouldAutoRebindByReason(reason) {
     const text = String(reason || "");
     return /未绑定控制设备|未被授权|未授权控制|控制设备|控制端|未授权/.test(text);
@@ -63,6 +116,9 @@ export function createConnectionEvents({
       if (type === "tools_snapshot") {
         const parsed = asListOfMap(payload.tools);
         runtime.tools = sanitizeTools(hostId, parsed, false);
+        if (typeof syncOpencodeInvalidState === "function") {
+          syncOpencodeInvalidState(hostId);
+        }
         if (!runtime.toolConnectTraceIds) runtime.toolConnectTraceIds = {};
         for (const tool of runtime.tools) {
           const toolId = String(tool.toolId || "");
@@ -76,6 +132,9 @@ export function createConnectionEvents({
 
       if (type === "tools_candidates") {
         runtime.candidateTools = sanitizeTools(hostId, asListOfMap(payload.tools), true);
+        if (typeof syncOpencodeInvalidState === "function") {
+          syncOpencodeInvalidState(hostId);
+        }
         runtime.candidateSnapshotVersion = Number(runtime.candidateSnapshotVersion || 0) + 1;
         if (runtime.candidateRefreshTimer) {
           clearTimeout(runtime.candidateRefreshTimer);
@@ -157,11 +216,14 @@ export function createConnectionEvents({
     const isRefresh = action === "refresh";
     const isReset = action === "reset";
 
-    const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, toolId)
+      : toolId;
+    const connectedTool = findRuntimeTool(runtime, hostId, toolId);
     const candidateTool = runtime.candidateTools.find((item) => String(item.toolId || "") === toolId);
     const toolName = resolveToolDisplayName(
       hostId,
-      connectedTool || candidateTool || { name: toolId, toolId },
+      connectedTool || candidateTool || { name: logicalToolId || toolId, toolId: logicalToolId || toolId },
     );
 
     if (isConnect && toolId) {
@@ -199,6 +261,9 @@ export function createConnectionEvents({
     if (!ok) {
       if (isDisconnect && toolId) {
         setToolHidden(hostId, toolId, false);
+        if (logicalToolId && logicalToolId !== toolId) {
+          setToolHidden(hostId, logicalToolId, false);
+        }
       }
 
       if (isRefresh) {
@@ -348,7 +413,7 @@ export function createConnectionEvents({
     } else if (toolId) {
       delete runtime.toolConnectRetryCount[toolId];
       if (isConnect) {
-        setToolHidden(hostId, toolId, false);
+        setToolHidden(hostId, logicalToolId || toolId, false);
         openHostNoticeModal("添加成功", `工具“${toolName}”已接入。`, {
           keepAddToolOpen: true,
         });
@@ -434,11 +499,14 @@ export function createConnectionEvents({
     const changed = asBool(payload.changed);
     const reason = String(payload.reason || "");
 
-    const connectedTool = runtime.tools.find((item) => String(item.toolId || "") === toolId);
+    const logicalToolId = typeof resolveLogicalToolId === "function"
+      ? resolveLogicalToolId(hostId, toolId)
+      : toolId;
+    const connectedTool = findRuntimeTool(runtime, hostId, toolId);
     const candidateTool = runtime.candidateTools.find((item) => String(item.toolId || "") === toolId);
     const toolName = resolveToolDisplayName(
       hostId,
-      connectedTool || candidateTool || { name: toolId || "OpenClaw", toolId },
+      connectedTool || candidateTool || { name: logicalToolId || toolId || "OpenClaw", toolId: logicalToolId || toolId },
     );
     const actionLabel = action === "restart" ? "重启" : "停止";
 
@@ -508,9 +576,17 @@ export function createConnectionEvents({
     if (primaryToolId) metricsByToolId[primaryToolId] = runtime.primaryToolMetrics;
     runtime.toolMetricsById = metricsByToolId;
 
-    if (runtime.tools.length !== 0) return;
+    if (runtime.tools.length !== 0) {
+      if (typeof syncOpencodeInvalidState === "function") {
+        syncOpencodeInvalidState(hostId);
+      }
+      return;
+    }
     if (metricsTools.length > 0) {
       runtime.tools = sanitizeTools(hostId, metricsTools, false);
+      if (typeof syncOpencodeInvalidState === "function") {
+        syncOpencodeInvalidState(hostId);
+      }
       return;
     }
     if (!primaryToolId) return;
@@ -531,6 +607,9 @@ export function createConnectionEvents({
       }],
       false,
     );
+    if (typeof syncOpencodeInvalidState === "function") {
+      syncOpencodeInvalidState(hostId);
+    }
   }
 
   /**
@@ -544,6 +623,7 @@ export function createConnectionEvents({
       return;
     }
 
+    const previousDetailsById = runtime.toolDetailsById || {};
     const detailsById = {};
     const staleById = {};
     const updatedAtById = {};
@@ -562,6 +642,25 @@ export function createConnectionEvents({
       };
       staleById[toolId] = asBool(item.stale);
       updatedAtById[toolId] = String(item.collectedAt || "");
+
+      const logicalToolId = typeof resolveLogicalToolId === "function"
+        ? resolveLogicalToolId(hostId, toolId)
+        : toolId;
+      if (logicalToolId === "openclaw_primary") {
+        const previousRuntimeToolId = typeof resolveRuntimeToolId === "function"
+          ? resolveRuntimeToolId(hostId, logicalToolId)
+          : toolId;
+        const previousDetail = asMap(previousDetailsById[previousRuntimeToolId] || previousDetailsById[toolId]);
+        const beforeCaps = extractOpenclawCapabilities(previousDetail.data);
+        const afterCaps = extractOpenclawCapabilities(item.data);
+        const changes = describeOpenclawCapabilityChanges(beforeCaps, afterCaps);
+        if (changes.length > 0) {
+          runtime.toolCapabilityChangesByToolId[logicalToolId] = {
+            summary: changes.join(" / "),
+            ts: new Date().toISOString(),
+          };
+        }
+      }
     }
 
     runtime.toolDetailsById = detailsById;
