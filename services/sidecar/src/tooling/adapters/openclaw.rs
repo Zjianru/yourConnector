@@ -194,9 +194,9 @@ pub(crate) fn matches_tool(tool: &ToolRuntimePayload) -> bool {
 /// 采集 OpenClaw 详情（openclaw.v1）。
 ///
 /// 分层策略：
-/// 1. 慢周期：固定采 `status --json --usage` + `agents list --json --bindings` + `channels status --json`。
+/// 1. 慢周期：固定采 `status --json --usage` + `agents list --json --bindings` + `channels status --json` + `gateway status --json`。
 /// 2. 兜底层：当 status 缺 recent sessions 时补采 `sessions --json`。
-/// 3. 按需层：仅当 `include_deep_details=true` 时补采 gateway/memory/security。
+/// 3. 按需层：仅当 `include_deep_details=true` 时补采 memory/security。
 ///    health 固定纳入慢层采集，用于渠道身份与健康摘要。
 pub(crate) async fn collect_details(
     tools: &[ToolRuntimePayload],
@@ -351,19 +351,20 @@ async fn collect_profile_details(
     );
     let channel_overview = parse_channel_overview(channels_status_json.as_ref());
 
-    let (gateway_status, memory_status, security_status) = if include_deep_details {
-        let gateway_timeout = effective_timeout(options.command_timeout, GATEWAY_TIMEOUT_CAP_MS);
+    let gateway_timeout = effective_timeout(options.command_timeout, GATEWAY_TIMEOUT_CAP_MS);
+    let gateway_status = run_openclaw_json(
+        profile_key,
+        &["gateway", "status", "--json"],
+        gateway_timeout,
+    )
+    .await
+    .ok();
+
+    let (memory_status, security_status) = if include_deep_details {
         let memory_timeout = effective_timeout(options.command_timeout, MEMORY_TIMEOUT_CAP_MS);
         let security_timeout = effective_timeout(options.command_timeout, SECURITY_TIMEOUT_CAP_MS);
 
         (
-            run_openclaw_json(
-                profile_key,
-                &["gateway", "status", "--json"],
-                gateway_timeout,
-            )
-            .await
-            .ok(),
             run_openclaw_json(profile_key, &["memory", "status", "--json"], memory_timeout)
                 .await
                 .ok(),
@@ -376,7 +377,7 @@ async fn collect_profile_details(
             .ok(),
         )
     } else {
-        (None, None, None)
+        (None, None)
     };
 
     let health_summary = parse_health_summary(health_status.as_ref());
@@ -2023,7 +2024,7 @@ fn parse_dashboard_meta(status_json: &Value, gateway_status_json: Option<&Value>
     let gateway_url = read_string_path(status_json, &["gateway", "url"]);
     let rpc_reachable = gateway_status_json
         .map(|row| read_bool_path(row, &["rpc", "ok"]))
-        .unwrap_or(false);
+        .unwrap_or(gateway_reachable);
     let bind_mode = gateway_status_json
         .map(|row| read_string_path(row, &["gateway", "bindMode"]))
         .unwrap_or_default();
@@ -2068,6 +2069,7 @@ fn parse_health_summary(health_json: Option<&Value>) -> Value {
 
 /// 解析网关运行态。
 fn parse_gateway_runtime(status_json: &Value, gateway_status_json: Option<&Value>) -> Value {
+    let gateway_reachable = read_bool_path(status_json, &["gateway", "reachable"]);
     if let Some(raw) = gateway_status_json {
         let runtime = raw.get("service").and_then(|v| v.get("runtime")).cloned();
         return json!({
@@ -2087,7 +2089,7 @@ fn parse_gateway_runtime(status_json: &Value, gateway_status_json: Option<&Value
         "bindHost": "",
         "port": 0,
         "probeUrl": read_string_path(status_json, &["gateway", "url"]),
-        "rpcOk": false,
+        "rpcOk": gateway_reachable,
         "serviceStatus": read_string_path(status_json, &["gatewayService", "runtimeShort"]),
         "serviceState": "",
         "pid": 0,
@@ -2617,10 +2619,10 @@ mod tests {
 
     use super::{
         attach_agent_context_metrics, build_model_lookup, build_sessions_payload, discover,
-        parse_auth_user_by_provider, parse_channel_identities, parse_profile_key_from_cmd,
-        parse_status_default_agent_id, parse_status_recent_sessions, parse_usage_windows,
-        resolve_profile_state_dir, select_agents_by_workspace, select_sessions_by_agents,
-        to_percent,
+        parse_auth_user_by_provider, parse_channel_identities, parse_dashboard_meta,
+        parse_gateway_runtime, parse_profile_key_from_cmd, parse_status_default_agent_id,
+        parse_status_recent_sessions, parse_usage_windows, resolve_profile_state_dir,
+        select_agents_by_workspace, select_sessions_by_agents, to_percent,
     };
     use crate::{ProcInfo, tooling::core::types::ToolDiscoveryContext};
 
@@ -2826,6 +2828,28 @@ mod tests {
         assert_eq!(to_percent(0, 0), 0);
         assert_eq!(to_percent(5, 0), 0);
         assert_eq!(to_percent(1, 4), 25);
+    }
+
+    #[test]
+    fn gateway_runtime_fallback_prefers_status_reachable() {
+        let status = json!({
+            "gateway": {
+                "reachable": true,
+                "url": "http://127.0.0.1:18789"
+            },
+            "gatewayService": {
+                "runtimeShort": "active"
+            }
+        });
+
+        let runtime = parse_gateway_runtime(&status, None);
+        assert_eq!(runtime["rpcOk"], true);
+        assert_eq!(runtime["probeUrl"], "http://127.0.0.1:18789");
+
+        let dashboard_meta = parse_dashboard_meta(&status, None);
+        assert_eq!(dashboard_meta["gatewayReachable"], true);
+        assert_eq!(dashboard_meta["rpcReachable"], true);
+        assert_eq!(dashboard_meta["available"], true);
     }
 
     #[test]

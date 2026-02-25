@@ -16,13 +16,13 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 
 use self::{
-    chat::ChatRuntime,
+    chat::{ChatEventSender, ChatRuntime},
     command::{SidecarCommandContext, handle_sidecar_command},
     url::{raw_payload_logging_enabled, sidecar_ws_url},
 };
 use crate::{
     config::Config,
-    control::{SidecarCommandEnvelope, parse_sidecar_command},
+    control::{SidecarCommand, SidecarCommandEnvelope, parse_sidecar_command},
     pairing::{banner::print_pairing_banner, bootstrap_client::fetch_pair_bootstrap},
     session::{
         snapshots::{send_snapshots, send_tool_details_snapshot, summarize_wire_payload},
@@ -32,6 +32,99 @@ use crate::{
     tooling::core::{ToolAdapterCore, types::ToolDetailsCollectRequest},
 };
 use yc_shared_protocol::ToolRuntimePayload;
+
+#[derive(Debug, Clone, Default)]
+struct PendingDetailsRefresh {
+    target_tool_id: Option<String>,
+    force: bool,
+    dirty: bool,
+}
+
+fn is_chat_priority_command(command: &SidecarCommandEnvelope) -> bool {
+    matches!(
+        command.command,
+        SidecarCommand::ToolChatRequest { .. } | SidecarCommand::ToolChatCancel { .. }
+    )
+}
+
+fn merge_pending_details_refresh(
+    pending: &mut PendingDetailsRefresh,
+    target_tool_id: Option<String>,
+    force: bool,
+) {
+    if !pending.dirty {
+        pending.target_tool_id = target_tool_id;
+        pending.force = force;
+        pending.dirty = true;
+        return;
+    }
+
+    pending.force = pending.force || force;
+    match (&pending.target_tool_id, &target_tool_id) {
+        (_, None) => pending.target_tool_id = None,
+        (None, Some(_)) => {}
+        (Some(existing), Some(next)) => {
+            if existing != next {
+                pending.target_tool_id = None;
+            }
+        }
+    }
+    pending.dirty = true;
+}
+
+async fn handle_command_envelope(
+    ws_writer: &mut command::RelayWriter,
+    cfg: &Config,
+    seq: &mut u64,
+    sys: &mut System,
+    started_at: Instant,
+    tool_core: &mut ToolAdapterCore,
+    discovered_tools: &mut Vec<ToolRuntimePayload>,
+    whitelist: &mut ToolWhitelistStore,
+    controllers: &mut ControllerDevicesStore,
+    chat_runtime: &mut ChatRuntime,
+    chat_event_tx: &ChatEventSender,
+    command_envelope: SidecarCommandEnvelope,
+    pending_details_refresh: &mut PendingDetailsRefresh,
+) -> Result<()> {
+    let outcome = handle_sidecar_command(
+        SidecarCommandContext {
+            ws_writer,
+            cfg,
+            seq,
+            discovered_tools,
+            whitelist,
+            controllers,
+            chat_runtime,
+            chat_event_tx,
+        },
+        command_envelope,
+    )
+    .await?;
+
+    if outcome.refresh_snapshots {
+        *discovered_tools = tool_core.discover_tools(sys);
+        send_snapshots(
+            ws_writer,
+            cfg,
+            seq,
+            sys,
+            started_at,
+            discovered_tools,
+            whitelist,
+        )
+        .await?;
+    }
+    if outcome.refresh_details {
+        merge_pending_details_refresh(
+            pending_details_refresh,
+            outcome.detail_tool_id,
+            outcome.force_detail_refresh,
+        );
+    }
+
+    Ok(())
+}
 
 /// 维护 relay 会话生命周期，并在断线后执行指数退避重连。
 pub(crate) async fn run_relay_loop(cfg: Config) -> Result<()> {
@@ -90,7 +183,8 @@ async fn run_session(cfg: &Config) -> Result<()> {
     refresh_pairing_banner(cfg).await;
 
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
-    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
+    let (high_cmd_tx, mut high_cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
+    let (normal_cmd_tx, mut normal_cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
     let (chat_event_tx, mut chat_event_rx) = mpsc::unbounded_channel::<chat::ChatEventEnvelope>();
     let log_raw_payload = raw_payload_logging_enabled();
 
@@ -108,7 +202,12 @@ async fn run_session(cfg: &Config) -> Result<()> {
                             command.source_client_type,
                             command.source_device_id
                         );
-                        if cmd_tx.send(command).is_err() {
+                        let target = if is_chat_priority_command(&command) {
+                            &high_cmd_tx
+                        } else {
+                            &normal_cmd_tx
+                        };
+                        if target.send(command).is_err() {
                             break;
                         }
                     } else if log_raw_payload {
@@ -174,9 +273,16 @@ async fn run_session(cfg: &Config) -> Result<()> {
     pairing_banner_ticker.tick().await;
     let mut details_ticker = tokio::time::interval(cfg.details_interval);
     details_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let details_dispatch_interval = cfg.details_refresh_debounce.max(Duration::from_millis(200));
+    let mut details_dispatch_ticker = tokio::time::interval(details_dispatch_interval);
+    details_dispatch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // 跳过首次立即触发，避免连接瞬间重复跑一次详情。
+    details_dispatch_ticker.tick().await;
+    let mut pending_details_refresh = PendingDetailsRefresh::default();
 
     loop {
         tokio::select! {
+            biased;
             _ = tokio::signal::ctrl_c() => return Ok(()),
             done = &mut reader_task => {
                 chat_runtime.abort_all();
@@ -185,55 +291,47 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     Err(err) => return Err(anyhow!("relay read task join error: {err}")),
                 }
             }
-            maybe_cmd = cmd_rx.recv() => {
+            maybe_cmd = high_cmd_rx.recv() => {
                 let Some(command_envelope) = maybe_cmd else {
-                    chat_runtime.abort_all();
-                    return Err(anyhow!("command channel closed"));
+                    continue;
                 };
-
-                let outcome = handle_sidecar_command(
-                    SidecarCommandContext {
-                        ws_writer: &mut ws_writer,
-                        cfg,
-                        seq: &mut seq,
-                        discovered_tools: &discovered_tools,
-                        whitelist: &mut whitelist,
-                        controllers: &mut controllers,
-                        chat_runtime: &mut chat_runtime,
-                        chat_event_tx: &chat_event_tx,
-                    },
+                handle_command_envelope(
+                    &mut ws_writer,
+                    cfg,
+                    &mut seq,
+                    &mut sys,
+                    started_at,
+                    &mut tool_core,
+                    &mut discovered_tools,
+                    &mut whitelist,
+                    &mut controllers,
+                    &mut chat_runtime,
+                    &chat_event_tx,
                     command_envelope,
+                    &mut pending_details_refresh,
                 )
                 .await?;
-
-                if outcome.refresh_snapshots {
-                    discovered_tools = tool_core.discover_tools(&mut sys);
-                    send_snapshots(
-                        &mut ws_writer,
-                        cfg,
-                        &mut seq,
-                        &mut sys,
-                        started_at,
-                        &discovered_tools,
-                        &whitelist,
-                    )
-                    .await?;
-                }
-                if outcome.refresh_details {
-                    refresh_and_send_details(
-                        &mut ws_writer,
-                        cfg,
-                        &mut seq,
-                        &mut tool_core,
-                        build_details_collect_request(
-                            &discovered_tools,
-                            &whitelist,
-                            outcome.detail_tool_id,
-                            outcome.force_detail_refresh,
-                        ),
-                    )
-                    .await?;
-                }
+            }
+            maybe_cmd = normal_cmd_rx.recv() => {
+                let Some(command_envelope) = maybe_cmd else {
+                    continue;
+                };
+                handle_command_envelope(
+                    &mut ws_writer,
+                    cfg,
+                    &mut seq,
+                    &mut sys,
+                    started_at,
+                    &mut tool_core,
+                    &mut discovered_tools,
+                    &mut whitelist,
+                    &mut controllers,
+                    &mut chat_runtime,
+                    &chat_event_tx,
+                    command_envelope,
+                    &mut pending_details_refresh,
+                )
+                .await?;
             }
             maybe_chat_event = chat_event_rx.recv() => {
                 let Some(chat_event) = maybe_chat_event else {
@@ -281,12 +379,26 @@ async fn run_session(cfg: &Config) -> Result<()> {
                 refresh_pairing_banner(cfg).await;
             }
             _ = details_ticker.tick() => {
+                merge_pending_details_refresh(&mut pending_details_refresh, None, false);
+            }
+            _ = details_dispatch_ticker.tick() => {
+                if !pending_details_refresh.dirty {
+                    continue;
+                }
+                let target_tool_id = pending_details_refresh.target_tool_id.clone();
+                let force_refresh = pending_details_refresh.force;
+                pending_details_refresh = PendingDetailsRefresh::default();
                 refresh_and_send_details(
                     &mut ws_writer,
                     cfg,
                     &mut seq,
                     &mut tool_core,
-                    build_details_collect_request(&discovered_tools, &whitelist, None, false),
+                    build_details_collect_request(
+                        &discovered_tools,
+                        &whitelist,
+                        target_tool_id,
+                        force_refresh,
+                    ),
                 )
                 .await?;
             }
