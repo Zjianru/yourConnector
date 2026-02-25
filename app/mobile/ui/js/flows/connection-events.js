@@ -220,9 +220,19 @@ export function createConnectionEvents({
         if (shouldAutoRebindByReason(reason)) {
           requestControllerRebind(hostId);
           requestToolsRefresh(hostId);
-          openHostNoticeModal(
-            "当前设备未授权",
-            "已自动尝试重绑控制端并刷新工具列表；如仍失败，请在调试入口手动绑定当前设备。",
+          addLog(
+            `检测到控制端权限限制，已自动尝试重绑并刷新工具列表 (${host ? host.displayName : hostId})`,
+            {
+              scope: "controller",
+              action: "rebind_controller",
+              outcome: "started",
+              traceId: String(eventMeta.traceId || ""),
+              eventId: String(eventMeta.eventId || ""),
+              eventType: String(eventMeta.eventType || ""),
+              hostId,
+              hostName: host ? host.displayName : "",
+              detail: reason,
+            },
           );
         } else {
           openHostNoticeModal(
@@ -384,6 +394,10 @@ export function createConnectionEvents({
         hostName: host ? host.displayName : "",
         detail: reason,
       });
+      openHostNoticeModal(
+        "当前设备未授权",
+        reason || "自动重绑控制端失败，请在调试入口手动绑定当前设备。",
+      );
     } else if (changed) {
       addLog(`控制端已切换为当前设备 (${host ? host.displayName : hostId}): ${deviceId}`, {
         scope: "controller",
