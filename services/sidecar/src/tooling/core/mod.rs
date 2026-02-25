@@ -13,7 +13,7 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, Utc};
-use sysinfo::{ProcessesToUpdate, System};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 use yc_shared_protocol::{ToolDetailEnvelopePayload, ToolRuntimePayload, now_rfc3339_nanos};
 
 use self::{
@@ -267,12 +267,20 @@ fn schema_for_tool(tool: &ToolRuntimePayload) -> &'static str {
 
 /// 从 sysinfo 采集进程快照并构建父子关系索引。
 fn collect_process_snapshot(sys: &mut System) -> (HashMap<i32, ProcInfo>, HashMap<i32, Vec<i32>>) {
-    sys.refresh_processes(ProcessesToUpdate::All, true);
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        discovery_process_refresh_kind(),
+    );
 
     let mut all: HashMap<i32, ProcInfo> = HashMap::new();
     let mut children_by_ppid: HashMap<i32, Vec<i32>> = HashMap::new();
 
     for process in sys.processes().values() {
+        if process.thread_kind().is_some() {
+            // Linux 下 task(TID) 也可能出现在 process 列表里，过滤掉线程避免候选工具重复。
+            continue;
+        }
         let pid = process.pid().as_u32() as i32;
         let ppid = process
             .parent()
@@ -317,9 +325,20 @@ fn collect_process_snapshot(sys: &mut System) -> (HashMap<i32, ProcInfo>, HashMa
     (all, children_by_ppid)
 }
 
+/// 发现阶段的进程刷新配置：保留与默认 `refresh_processes` 相同的字段，
+/// 但显式关闭 tasks，避免将线程(TID)当成独立进程。
+fn discovery_process_refresh_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_memory()
+        .with_cpu()
+        .with_disk_usage()
+        .with_exe(UpdateKind::OnlyIfNotSet)
+        .without_tasks()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ToolAdapterCore;
+    use super::{ToolAdapterCore, discovery_process_refresh_kind};
 
     #[test]
     fn core_keeps_parallelism_positive() {
@@ -331,5 +350,10 @@ mod tests {
             std::time::Duration::from_secs(3),
         );
         assert!(core.detail_options.max_parallel >= 1);
+    }
+
+    #[test]
+    fn discovery_refresh_kind_disables_tasks() {
+        assert!(!discovery_process_refresh_kind().tasks());
     }
 }
