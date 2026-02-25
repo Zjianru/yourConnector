@@ -11,6 +11,8 @@ SCRIPT_NAME="yc-sidecar.sh"
 REPO="Zjianru/yourConnector"
 RELEASE_TAG="__YC_RELEASE_TAG__"
 DEFAULT_ASSET_BASE="__YC_ASSET_BASE__"
+RELEASE_TAG_PLACEHOLDER="__YC_RELEASE""_TAG__"
+ASSET_BASE_PLACEHOLDER="__YC_ASSET""_BASE__"
 
 SERVICE_USER_DEFAULT="yourconnector"
 SERVICE_GROUP_DEFAULT="yourconnector"
@@ -111,7 +113,7 @@ normalize_asset_base_url() {
     return 0
   fi
   ASSET_BASE_URL="${DEFAULT_ASSET_BASE%/}"
-  [[ -n "$ASSET_BASE_URL" && "$ASSET_BASE_URL" != "__YC_ASSET_BASE__" ]] || fail "asset base is not configured in script metadata"
+  [[ -n "$ASSET_BASE_URL" && "$ASSET_BASE_URL" != "$ASSET_BASE_PLACEHOLDER" ]] || fail "asset base is not configured in script metadata"
 }
 
 current_tag() {
@@ -119,7 +121,7 @@ current_tag() {
     echo "${YC_RELEASE_TAG}"
     return 0
   fi
-  [[ "$RELEASE_TAG" != "__YC_RELEASE_TAG__" ]] || fail "release tag is not embedded in script metadata"
+  [[ "$RELEASE_TAG" != "$RELEASE_TAG_PLACEHOLDER" ]] || fail "release tag is not embedded in script metadata"
   echo "$RELEASE_TAG"
 }
 
