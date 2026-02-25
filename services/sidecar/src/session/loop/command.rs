@@ -352,40 +352,43 @@ pub(crate) async fn handle_sidecar_command(
                         )
                     } else {
                         match action {
-                    ToolProcessAction::Stop => {
-                        if let Some(pid_value) = tool.pid {
-                            let result = stop_process(pid_value).await;
-                            (result.ok, result.changed, result.reason, None)
-                        } else {
-                            (false, false, "未找到可控制的进程 PID。".to_string(), None)
-                        }
-                    }
-                    ToolProcessAction::Restart => {
-                        if !is_openclaw {
-                            (
-                                false,
-                                false,
-                                "代码工具当前仅支持停止；重启请手动拉起新进程。".to_string(),
-                                None,
-                            )
-                        } else if let Some(pid_value) = tool.pid {
-                            match restart_process(pid_value).await {
-                                Ok((changed, new_pid)) => (
-                                    true,
-                                    changed,
-                                    if let Some(new_pid_value) = new_pid {
-                                        format!("已重启 OpenClaw 进程，新 PID: {new_pid_value}")
-                                    } else {
-                                        "已重启 OpenClaw 进程。".to_string()
-                                    },
-                                    new_pid,
-                                ),
-                                Err(err) => (false, false, err, None),
+                            ToolProcessAction::Stop => {
+                                if let Some(pid_value) = tool.pid {
+                                    let result = stop_process(pid_value).await;
+                                    (result.ok, result.changed, result.reason, None)
+                                } else {
+                                    (false, false, "未找到可控制的进程 PID。".to_string(), None)
+                                }
                             }
-                        } else {
-                            (false, false, "未找到可控制的进程 PID。".to_string(), None)
-                        }
-                    }
+                            ToolProcessAction::Restart => {
+                                if !is_openclaw {
+                                    (
+                                        false,
+                                        false,
+                                        "代码工具当前仅支持停止；重启请手动拉起新进程。"
+                                            .to_string(),
+                                        None,
+                                    )
+                                } else if let Some(pid_value) = tool.pid {
+                                    match restart_process(pid_value).await {
+                                        Ok((changed, new_pid)) => (
+                                            true,
+                                            changed,
+                                            if let Some(new_pid_value) = new_pid {
+                                                format!(
+                                                    "已重启 OpenClaw 进程，新 PID: {new_pid_value}"
+                                                )
+                                            } else {
+                                                "已重启 OpenClaw 进程。".to_string()
+                                            },
+                                            new_pid,
+                                        ),
+                                        Err(err) => (false, false, err, None),
+                                    }
+                                } else {
+                                    (false, false, "未找到可控制的进程 PID。".to_string(), None)
+                                }
+                            }
                         }
                     }
                 }
