@@ -785,6 +785,11 @@ fn parse_session_row(raw: &Value) -> Option<Value> {
         agent_id = parse_agent_id_from_session_key(&key);
     }
 
+    let age_ms = raw
+        .get("ageMs")
+        .and_then(Value::as_i64)
+        .unwrap_or_else(|| read_i64(raw, "age"));
+
     Some(json!({
         "key": key,
         "kind": read_string(raw, "kind"),
@@ -803,7 +808,7 @@ fn parse_session_row(raw: &Value) -> Option<Value> {
         "remainingTokens": read_i64(raw, "remainingTokens"),
         "percentUsed": read_i64(raw, "percentUsed"),
         "updatedAt": read_i64(raw, "updatedAt"),
-        "ageMs": read_i64(raw, "age"),
+        "ageMs": age_ms,
         "systemSent": read_bool(raw, "systemSent"),
         "abortedLastRun": read_bool(raw, "abortedLastRun"),
     }))
@@ -1857,22 +1862,33 @@ fn attach_agent_context_metrics(
         let session_ctx = latest
             .map(|latest_row| read_i64(latest_row, "contextTokens"))
             .unwrap_or(0);
-        let remaining = latest
-            .map(|latest_row| read_i64(latest_row, "remainingTokens"))
-            .unwrap_or(0);
-        let percent_used = latest
-            .map(|latest_row| read_i64(latest_row, "percentUsed"))
+        let remaining_opt = latest
+            .and_then(|latest_row| latest_row.get("remainingTokens"))
+            .and_then(Value::as_i64);
+        let percent_used_opt = latest
+            .and_then(|latest_row| latest_row.get("percentUsed"))
+            .and_then(Value::as_i64);
+        let total_tokens = latest
+            .map(|latest_row| read_i64(latest_row, "totalTokens"))
             .unwrap_or(0);
 
         let context_max = choose_context_max(session_ctx, default_context_tokens, model_ctx);
         let (context_used, source) = choose_context_used_source(
             context_max,
-            remaining,
-            percent_used,
+            remaining_opt,
+            percent_used_opt,
+            total_tokens,
             session_ctx,
             default_context_tokens,
             model_ctx,
         );
+        let remaining = remaining_opt.unwrap_or_else(|| {
+            if context_max > 0 && context_used >= 0 {
+                context_max.saturating_sub(context_used)
+            } else {
+                0
+            }
+        });
 
         if let Some(obj) = row.as_object_mut() {
             obj.insert("contextMaxTokens".to_string(), json!(context_max.max(0)));
@@ -1905,8 +1921,9 @@ fn choose_context_max(session_ctx: i64, default_ctx: i64, model_ctx: i64) -> i64
 /// 选择“已用上下文 + 来源”。
 fn choose_context_used_source(
     context_max: i64,
-    remaining: i64,
-    percent_used: i64,
+    remaining_opt: Option<i64>,
+    percent_used_opt: Option<i64>,
+    total_tokens: i64,
     session_ctx: i64,
     default_ctx: i64,
     model_ctx: i64,
@@ -1921,12 +1938,22 @@ fn choose_context_used_source(
         "unknown"
     };
 
-    if context_max > 0 && remaining >= 0 && remaining <= context_max {
-        return (context_max - remaining, source.to_string());
-    }
-    if context_max > 0 && percent_used > 0 {
-        let used = ((context_max as f64) * (percent_used as f64 / 100.0)).round() as i64;
-        return (used, source.to_string());
+    if context_max > 0 {
+        if let Some(remaining) = remaining_opt
+            && remaining >= 0
+            && remaining <= context_max
+        {
+            return (context_max - remaining, source.to_string());
+        }
+        if let Some(percent_used) = percent_used_opt
+            && percent_used > 0
+        {
+            let used = ((context_max as f64) * (percent_used as f64 / 100.0)).round() as i64;
+            return (used.clamp(0, context_max), source.to_string());
+        }
+        if total_tokens > 0 {
+            return (total_tokens.min(context_max), source.to_string());
+        }
     }
     (0, source.to_string())
 }
@@ -2643,6 +2670,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_recent_sessions_prefers_age_ms_with_age_fallback() {
+        let status = json!({
+            "sessions": {
+                "recent": [
+                    {"sessionId":"s1","agentId":"main","updatedAt":1000,"ageMs":1234,"age":99},
+                    {"sessionId":"s2","agentId":"main","updatedAt":900,"age":4567}
+                ]
+            }
+        });
+        let rows = parse_status_recent_sessions(&status);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["ageMs"], 1234);
+        assert_eq!(rows[1]["ageMs"], 4567);
+    }
+
+    #[test]
     fn parse_auth_user_prefers_label_parentheses() {
         let models_status = json!({
             "auth": {
@@ -2738,6 +2781,29 @@ mod tests {
         let rows = attach_agent_context_metrics(agents, &sessions, 9000, &model_lookup);
         assert_eq!(rows[0]["contextMaxTokens"], 10000);
         assert_eq!(rows[0]["contextUsedTokens"], 7500);
+        assert_eq!(rows[0]["contextLimitSource"], "session");
+    }
+
+    #[test]
+    fn attach_context_falls_back_to_total_tokens_when_remaining_missing() {
+        let agents = vec![json!({
+            "agentId":"main",
+            "name":"main",
+            "model":"deepseek-chat",
+            "isDefault":true
+        })];
+        let sessions = vec![json!({
+            "agentId":"main",
+            "model":"deepseek-chat",
+            "contextTokens":90000,
+            "totalTokens":17980,
+            "updatedAt":100
+        })];
+        let model_lookup = build_model_lookup(&[]);
+        let rows = attach_agent_context_metrics(agents, &sessions, 9000, &model_lookup);
+        assert_eq!(rows[0]["contextMaxTokens"], 90000);
+        assert_eq!(rows[0]["contextUsedTokens"], 17980);
+        assert_eq!(rows[0]["remainingTokens"], 72020);
         assert_eq!(rows[0]["contextLimitSource"], "session");
     }
 
