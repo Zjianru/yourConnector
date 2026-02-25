@@ -22,7 +22,11 @@ make run-mobile-tauri-ios IOS_SIM="iPhone 17 Pro"
 
 # Android 初始化与打包
 make init-mobile-tauri-android
-make build-mobile-tauri-android-apk ANDROID_TARGETS="aarch64"
+make build-mobile-tauri-android-apk-test \
+  ANDROID_KEYSTORE_PATH="/abs/path/release.jks" \
+  ANDROID_KEY_ALIAS="your_alias" \
+  ANDROID_KEYSTORE_PASSWORD="***" \
+  ANDROID_KEY_PASSWORD="***"
 make build-mobile-tauri-android-aab ANDROID_TARGETS="aarch64"
 
 # 配对辅助
@@ -54,11 +58,10 @@ sudo bash /path/to/yc-sidecar.sh install \
 2. 安装脚本面向用户输入统一为公网 IPv4；脚本内部自动拼接标准 Relay 地址。
 3. `yc-relay.sh` 在 Linux 上使用 Let’s Encrypt shortlived IP 证书（HTTP-01 + webroot）。
 4. 详细参数、卸载与 `doctor/status` 见 `docs/分发安装与卸载-v1.md`。
-5. GitHub Actions 已支持“打 tag 自动构建多平台发布资产”，工作流见 `.github/workflows/release-linux.yml`。
-6. Release 资产仅包含安装脚本与清单：`yc-relay.sh`、`yc-sidecar.sh`、`release-manifest.json`、`release-checksums.txt`。
-7. GitHub Actions 已支持“按 tag 同步发布资产到阿里云 OSS（国内下载）”，工作流见 `.github/workflows/sync-release-to-oss.yml`。
+5. GitHub Actions 已支持“打 tag 自动构建服务端发布资产”，工作流见 `.github/workflows/release-linux.yml`。
+6. GitHub Actions 已支持“打 tag 自动构建并签名 Android APK，再上传到对应 GitHub Release”，工作流见 `.github/workflows/release-android.yml`。
+7. GitHub Actions 已支持“按 tag 同步服务端发布资产到阿里云 OSS（国内下载）”，工作流见 `.github/workflows/sync-release-to-oss.yml`。
 8. 国内下载地址模板：`https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX>/<tag>/<file>`
-9. Mobile App 当前不在 Release 资产中分发；上线形态以 App Store / TestFlight / Play Console 为准。
 
 ## 质量门禁
 
@@ -88,6 +91,21 @@ make check-all
    - `RUST_LOG`：仅影响 stdout 级别，不影响文件日志
 5. 配对信息（配对码、配对链接、模拟扫码命令）会以高亮 banner 直接输出到终端，便于现场配对。
 6. 详细说明见：`docs/系统日志与归档-v1.md`
+
+## Android 签名
+
+1. 本地测试包与 release 包统一使用 `scripts/mobile/sign-android-apk.sh` 签名。
+2. `make build-mobile-tauri-android-apk-test` 与 `make build-mobile-tauri-android-apk-signed` 都会执行签名。
+3. 本地签名需要的环境变量/参数：
+   - `ANDROID_KEYSTORE_PATH`
+   - `ANDROID_KEY_ALIAS`
+   - `ANDROID_KEYSTORE_PASSWORD`
+   - `ANDROID_KEY_PASSWORD`（可选，默认等于 `ANDROID_KEYSTORE_PASSWORD`）
+4. GitHub `release-android` 工作流需要配置仓库 Secrets：
+   - `ANDROID_KEYSTORE_BASE64`（`base64` 后的 keystore 内容）
+   - `ANDROID_KEY_ALIAS`
+   - `ANDROID_KEYSTORE_PASSWORD`
+   - `ANDROID_KEY_PASSWORD`（可选）
 
 ## 文档入口
 

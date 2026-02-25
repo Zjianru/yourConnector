@@ -2,9 +2,15 @@
 // 1. 启动 Tauri Mobile 应用并监听配对深链。
 // 2. 提供前端可调用的安全凭证命令（设备密钥、签名、会话存取）。
 
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+#[cfg(all(
+    not(any(target_os = "ios", target_os = "macos")),
+    not(target_os = "android")
+))]
 use std::collections::HashMap;
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+#[cfg(all(
+    not(any(target_os = "ios", target_os = "macos")),
+    not(target_os = "android")
+))]
 use std::sync::{Mutex, OnceLock};
 use std::{
     fs::{self, OpenOptions},
@@ -14,10 +20,16 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signer, SigningKey};
+#[cfg(target_os = "android")]
+use jni::objects::{JByteArray, JObject, JString, JValue};
+#[cfg(target_os = "android")]
+use jni::JavaVM;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{Manager, RunEvent};
+use tauri::Manager;
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+use tauri::RunEvent;
 
 /// Keychain 服务名：设备私钥。
 const KEYCHAIN_SERVICE_DEVICE_KEY: &str = "dev.yourconnector.mobile.device-key";
@@ -60,11 +72,168 @@ struct ChatStoreBootstrap {
     index: serde_json::Value,
 }
 
-/// 非 Apple 平台下的简易内存安全存储（仅用于开发构建兜底）。
-#[cfg(not(any(target_os = "ios", target_os = "macos")))]
+/// 仅非 Apple / 非 Android 平台下的简易内存安全存储（开发构建兜底）。
+#[cfg(all(
+    not(any(target_os = "ios", target_os = "macos")),
+    not(target_os = "android")
+))]
 fn fallback_secure_store() -> &'static Mutex<HashMap<String, Vec<u8>>> {
     static STORE: OnceLock<Mutex<HashMap<String, Vec<u8>>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Android 端安全存储桥接类路径。
+#[cfg(target_os = "android")]
+const ANDROID_SECURE_STORE_CLASS: &str = "dev/yourconnector/mobile/SecureStoreBridge";
+
+#[cfg(target_os = "android")]
+fn with_android_context<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut jni::JNIEnv<'_>, &JObject<'_>) -> Result<T, String>,
+{
+    let ctx = ndk_context::android_context();
+    let vm = unsafe { JavaVM::from_raw(ctx.vm().cast()) }
+        .map_err(|err| format!("android vm init failed: {err}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|err| format!("android attach thread failed: {err}"))?;
+
+    // ndk_context 给出的 context 是 Android runtime 持有的对象句柄，避免在 Rust drop 时误释放。
+    let context = unsafe { JObject::from_raw(ctx.context().cast()) };
+    let output = f(&mut env, &context);
+    std::mem::forget(context);
+    output
+}
+
+#[cfg(target_os = "android")]
+fn android_secure_get(service: &str, account: &str) -> Result<Option<Vec<u8>>, String> {
+    with_android_context(|env, context| {
+        let class = env
+            .find_class(ANDROID_SECURE_STORE_CLASS)
+            .map_err(|err| format!("find SecureStoreBridge failed: {err}"))?;
+        let service_arg = env
+            .new_string(service)
+            .map_err(|err| format!("new service string failed: {err}"))?;
+        let account_arg = env
+            .new_string(account)
+            .map_err(|err| format!("new account string failed: {err}"))?;
+        let service_obj = JObject::from(service_arg);
+        let account_obj = JObject::from(account_arg);
+
+        let result = env
+            .call_static_method(
+                class,
+                "get",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)[B",
+                &[
+                    JValue::Object(context),
+                    JValue::Object(&service_obj),
+                    JValue::Object(&account_obj),
+                ],
+            )
+            .map_err(|err| format!("call SecureStoreBridge.get failed: {err}"))?;
+        let value_obj = result
+            .l()
+            .map_err(|err| format!("SecureStoreBridge.get decode failed: {err}"))?;
+        if value_obj.is_null() {
+            return Ok(None);
+        }
+
+        let value_array = JByteArray::from(value_obj);
+        let bytes = env
+            .convert_byte_array(&value_array)
+            .map_err(|err| format!("decode secure bytes failed: {err}"))?;
+        Ok(Some(bytes))
+    })
+}
+
+#[cfg(target_os = "android")]
+fn android_secure_set(service: &str, account: &str, value: &[u8]) -> Result<(), String> {
+    with_android_context(|env, context| {
+        let class = env
+            .find_class(ANDROID_SECURE_STORE_CLASS)
+            .map_err(|err| format!("find SecureStoreBridge failed: {err}"))?;
+        let service_arg = env
+            .new_string(service)
+            .map_err(|err| format!("new service string failed: {err}"))?;
+        let account_arg = env
+            .new_string(account)
+            .map_err(|err| format!("new account string failed: {err}"))?;
+        let value_arg = env
+            .byte_array_from_slice(value)
+            .map_err(|err| format!("new value bytes failed: {err}"))?;
+        let service_obj = JObject::from(service_arg);
+        let account_obj = JObject::from(account_arg);
+        let value_obj = JObject::from(value_arg);
+
+        let result = env
+            .call_static_method(
+                class,
+                "set",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;[B)Ljava/lang/String;",
+                &[
+                    JValue::Object(context),
+                    JValue::Object(&service_obj),
+                    JValue::Object(&account_obj),
+                    JValue::Object(&value_obj),
+                ],
+            )
+            .map_err(|err| format!("call SecureStoreBridge.set failed: {err}"))?;
+        let err_obj = result
+            .l()
+            .map_err(|err| format!("SecureStoreBridge.set decode failed: {err}"))?;
+        if err_obj.is_null() {
+            return Ok(());
+        }
+        let err_jstr = JString::from(err_obj);
+        let err_msg: String = env
+            .get_string(&err_jstr)
+            .map_err(|err| format!("read SecureStoreBridge.set error failed: {err}"))?
+            .into();
+        Err(format!("android secure set failed: {err_msg}"))
+    })
+}
+
+#[cfg(target_os = "android")]
+fn android_secure_delete(service: &str, account: &str) -> Result<(), String> {
+    with_android_context(|env, context| {
+        let class = env
+            .find_class(ANDROID_SECURE_STORE_CLASS)
+            .map_err(|err| format!("find SecureStoreBridge failed: {err}"))?;
+        let service_arg = env
+            .new_string(service)
+            .map_err(|err| format!("new service string failed: {err}"))?;
+        let account_arg = env
+            .new_string(account)
+            .map_err(|err| format!("new account string failed: {err}"))?;
+        let service_obj = JObject::from(service_arg);
+        let account_obj = JObject::from(account_arg);
+
+        let result = env
+            .call_static_method(
+                class,
+                "delete",
+                "(Landroid/content/Context;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                &[
+                    JValue::Object(context),
+                    JValue::Object(&service_obj),
+                    JValue::Object(&account_obj),
+                ],
+            )
+            .map_err(|err| format!("call SecureStoreBridge.delete failed: {err}"))?;
+        let err_obj = result
+            .l()
+            .map_err(|err| format!("SecureStoreBridge.delete decode failed: {err}"))?;
+        if err_obj.is_null() {
+            return Ok(());
+        }
+        let err_jstr = JString::from(err_obj);
+        let err_msg: String = env
+            .get_string(&err_jstr)
+            .map_err(|err| format!("read SecureStoreBridge.delete error failed: {err}"))?
+            .into();
+        Err(format!("android secure delete failed: {err_msg}"))
+    })
 }
 
 /// 从 Keychain（或兜底存储）读取字节。
@@ -73,7 +242,20 @@ fn secure_get(service: &str, account: &str) -> Option<Vec<u8>> {
     {
         security_framework::passwords::get_generic_password(service, account).ok()
     }
-    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        match android_secure_get(service, account) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("[secure_store][android] get failed: {err}");
+                None
+            }
+        }
+    }
+    #[cfg(all(
+        not(any(target_os = "ios", target_os = "macos")),
+        not(target_os = "android")
+    ))]
     {
         let key = format!("{service}::{account}");
         fallback_secure_store()
@@ -90,7 +272,14 @@ fn secure_set(service: &str, account: &str, value: &[u8]) -> Result<(), String> 
         security_framework::passwords::set_generic_password(service, account, value)
             .map_err(|err| format!("keychain set failed: {err}"))
     }
-    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        android_secure_set(service, account, value)
+    }
+    #[cfg(all(
+        not(any(target_os = "ios", target_os = "macos")),
+        not(target_os = "android")
+    ))]
     {
         let key = format!("{service}::{account}");
         let mut guard = fallback_secure_store()
@@ -108,7 +297,14 @@ fn secure_delete(service: &str, account: &str) -> Result<(), String> {
         security_framework::passwords::delete_generic_password(service, account)
             .map_err(|err| format!("keychain delete failed: {err}"))
     }
-    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    #[cfg(target_os = "android")]
+    {
+        android_secure_delete(service, account)
+    }
+    #[cfg(all(
+        not(any(target_os = "ios", target_os = "macos")),
+        not(target_os = "android")
+    ))]
     {
         let key = format!("{service}::{account}");
         let mut guard = fallback_secure_store()
@@ -412,6 +608,7 @@ fn chat_store_delete_conversation(
 }
 
 /// 将系统深链事件透传给 WebView。前端通过 `window.__YC_HANDLE_PAIR_LINK__` 接收并解析。
+#[cfg(any(target_os = "ios", target_os = "macos"))]
 fn forward_pairing_link(app: &tauri::AppHandle, raw_url: &str) {
     let encoded = match serde_json::to_string(raw_url) {
         Ok(value) => value,
@@ -443,11 +640,12 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to build mobile tauri app")
-        .run(|app, event| {
-            if let RunEvent::Opened { urls } = event {
+        .run(|_app, _event| {
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            if let RunEvent::Opened { urls } = _event {
                 for url in urls {
                     if url.scheme() == "yc" && url.host_str() == Some("pair") {
-                        forward_pairing_link(app, url.as_str());
+                        forward_pairing_link(_app, url.as_str());
                     }
                 }
             }

@@ -3,6 +3,16 @@ SHELL := /bin/zsh
 IOS_SIM ?= iPhone 17 Pro
 ANDROID_TARGETS ?= aarch64
 ANDROID_DEVICE ?=
+ANDROID_MANIFEST_PATCH ?= ./scripts/mobile/ensure-android-camera-permissions.sh
+ANDROID_APK_SIGN_SCRIPT ?= ./scripts/mobile/sign-android-apk.sh
+ANDROID_SECURE_STORE_SRC ?= app/mobile/src-tauri/android/SecureStoreBridge.kt
+ANDROID_SECURE_STORE_DST ?= app/mobile/src-tauri/gen/android/app/src/main/java/dev/yourconnector/mobile/SecureStoreBridge.kt
+ANDROID_UNSIGNED_APK_PATH ?= app/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
+ANDROID_SIGNED_APK_PATH ?= app/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-signed.apk
+ANDROID_KEYSTORE_PATH ?=
+ANDROID_KEY_ALIAS ?=
+ANDROID_KEYSTORE_PASSWORD ?=
+ANDROID_KEY_PASSWORD ?=
 PAIR_DIR ?= $(HOME)/.config/yourconnector/sidecar
 PAIR_RELAY_WS ?= ws://127.0.0.1:18080/v1/ws
 PAIR_NAME ?=
@@ -14,8 +24,10 @@ PAIR_ARGS ?=
 .PHONY: run-relay run-sidecar stop-relay stop-sidecar restart-relay restart-sidecar
 .PHONY: install-tauri-cli boot-ios-sim stop-mobile-tauri-ios repair-ios-sim
 .PHONY: run-mobile-tauri-ios run-mobile-tauri-ios-dev run-mobile-tauri-ios-dev-clean
-.PHONY: ensure-mobile-tauri-android init-mobile-tauri-android run-mobile-tauri-android-dev
+.PHONY: sync-mobile-tauri-android-secure-store ensure-mobile-tauri-android
+.PHONY: init-mobile-tauri-android run-mobile-tauri-android-dev
 .PHONY: build-mobile-tauri-android-apk build-mobile-tauri-android-aab
+.PHONY: sign-mobile-tauri-android-apk build-mobile-tauri-android-apk-signed build-mobile-tauri-android-apk-test
 .PHONY: pairing show-pairing show-pairing-code show-pairing-link show-pairing-qr show-pairing-json simulate-ios-scan
 .PHONY: self-debug-loop
 .PHONY: help
@@ -31,7 +43,13 @@ help:
 	@echo "  make run-mobile-tauri-ios-dev       # iOS dev 模式（热更新）"
 	@echo "  make init-mobile-tauri-android      # 初始化 Android 工程（首次一次）"
 	@echo "  make run-mobile-tauri-android-dev   # Android dev 模式（真机/模拟器）"
-	@echo "  make build-mobile-tauri-android-apk # 构建 Android APK（默认 aarch64）"
+	@echo "  make build-mobile-tauri-android-apk # 构建 Android unsigned APK（内部中间产物）"
+	@echo "  make build-mobile-tauri-android-apk-test \\" 
+	@echo "      ANDROID_KEYSTORE_PATH=... ANDROID_KEY_ALIAS=... \\" 
+	@echo "      ANDROID_KEYSTORE_PASSWORD=... [ANDROID_KEY_PASSWORD=...]"
+	@echo "  make build-mobile-tauri-android-apk-signed \\" 
+	@echo "      ANDROID_KEYSTORE_PATH=... ANDROID_KEY_ALIAS=... \\" 
+	@echo "      ANDROID_KEYSTORE_PASSWORD=... [ANDROID_KEY_PASSWORD=...]"
 	@echo "  make build-mobile-tauri-android-aab # 构建 Android AAB（默认 aarch64）"
 	@echo "  make pairing PAIR_ARGS='--show all' # 统一配对命令（relay 签发）"
 	@echo "  make show-pairing                   # 输出配对信息 + 终端二维码"
@@ -39,6 +57,15 @@ help:
 	@echo "  make simulate-ios-scan              # 模拟二维码扫码（simctl openurl）"
 	@echo "  make self-debug-loop                # 自动闭环：检查+服务+iOS启动+扫码+日志扫描"
 	@echo "  make repair-ios-sim                 # 修复模拟器异常状态"
+
+sync-mobile-tauri-android-secure-store:
+	@if [ -f "$(ANDROID_SECURE_STORE_SRC)" ]; then \
+		mkdir -p "$$(dirname "$(ANDROID_SECURE_STORE_DST)")"; \
+		cp "$(ANDROID_SECURE_STORE_SRC)" "$(ANDROID_SECURE_STORE_DST)"; \
+	else \
+		echo "missing android secure store source: $(ANDROID_SECURE_STORE_SRC)"; \
+		exit 1; \
+	fi
 
 check:
 	cargo check --workspace
@@ -131,6 +158,13 @@ ensure-mobile-tauri-android:
 	else \
 		cd app/mobile/src-tauri && cargo tauri android init --ci; \
 	fi
+	@$(MAKE) -s sync-mobile-tauri-android-secure-store
+	@if [ -x "$(ANDROID_MANIFEST_PATCH)" ]; then \
+		"$(ANDROID_MANIFEST_PATCH)"; \
+	else \
+		echo "missing android manifest patch script: $(ANDROID_MANIFEST_PATCH)"; \
+		exit 1; \
+	fi
 
 init-mobile-tauri-android: ensure-mobile-tauri-android
 
@@ -139,9 +173,35 @@ run-mobile-tauri-android-dev: ensure-mobile-tauri-android
 
 build-mobile-tauri-android-apk: ensure-mobile-tauri-android
 	cd app/mobile/src-tauri && cargo tauri android build --apk --target $(ANDROID_TARGETS)
+	@echo "unsigned apk: $(ANDROID_UNSIGNED_APK_PATH)"
 
 build-mobile-tauri-android-aab: ensure-mobile-tauri-android
 	cd app/mobile/src-tauri && cargo tauri android build --aab --target $(ANDROID_TARGETS)
+
+sign-mobile-tauri-android-apk:
+	@if [ -x "$(ANDROID_APK_SIGN_SCRIPT)" ]; then \
+		:; \
+	else \
+		echo "missing android apk sign script: $(ANDROID_APK_SIGN_SCRIPT)"; \
+		exit 1; \
+	fi
+	@if [ -n "$(ANDROID_KEYSTORE_PATH)" ] && [ -n "$(ANDROID_KEY_ALIAS)" ] && [ -n "$(ANDROID_KEYSTORE_PASSWORD)" ]; then \
+		:; \
+	else \
+		echo "missing signing vars. required: ANDROID_KEYSTORE_PATH ANDROID_KEY_ALIAS ANDROID_KEYSTORE_PASSWORD"; \
+		exit 1; \
+	fi
+	"$(ANDROID_APK_SIGN_SCRIPT)" \
+		--in "$(ANDROID_UNSIGNED_APK_PATH)" \
+		--out "$(ANDROID_SIGNED_APK_PATH)" \
+		--keystore "$(ANDROID_KEYSTORE_PATH)" \
+		--alias "$(ANDROID_KEY_ALIAS)" \
+		--store-pass "$(ANDROID_KEYSTORE_PASSWORD)" \
+		$(if $(strip $(ANDROID_KEY_PASSWORD)),--key-pass "$(ANDROID_KEY_PASSWORD)",)
+
+build-mobile-tauri-android-apk-signed: build-mobile-tauri-android-apk sign-mobile-tauri-android-apk
+
+build-mobile-tauri-android-apk-test: build-mobile-tauri-android-apk-signed
 
 pairing:
 	@./scripts/pairing.sh \

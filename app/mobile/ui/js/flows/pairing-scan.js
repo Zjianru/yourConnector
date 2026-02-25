@@ -8,6 +8,54 @@ export function createPairingScanner({ state, ui, runPairingFromLink, showPairFa
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  function hasMediaCaptureSupport() {
+    return Boolean(
+      typeof navigator !== "undefined" &&
+      navigator.mediaDevices &&
+      typeof navigator.mediaDevices.getUserMedia === "function",
+    );
+  }
+
+  async function supportsQrBarcodeDetector() {
+    if (typeof window === "undefined" || typeof window.BarcodeDetector !== "function") {
+      return false;
+    }
+    if (typeof window.BarcodeDetector.getSupportedFormats !== "function") {
+      return true;
+    }
+    try {
+      const formats = await window.BarcodeDetector.getSupportedFormats();
+      return !Array.isArray(formats) || formats.includes("qr_code");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  async function ensureDetector() {
+    if (state.scanDetector) {
+      return state.scanDetector;
+    }
+    if (!(await supportsQrBarcodeDetector())) {
+      return null;
+    }
+    state.scanDetector = new window.BarcodeDetector({
+      formats: ["qr_code"],
+    });
+    return state.scanDetector;
+  }
+
+  async function requestCameraStream() {
+    const preferred = {
+      video: { facingMode: { ideal: "environment" } },
+      audio: false,
+    };
+    try {
+      return await navigator.mediaDevices.getUserMedia(preferred);
+    } catch (_) {
+      return navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    }
+  }
+
   function setPairScanStatus(text = "", level = "normal") {
     ui.pairScanStatus.textContent = String(text || "");
     ui.pairScanStatus.style.color = level === "warn" ? "var(--warn)" : "var(--text-sub)";
@@ -54,9 +102,18 @@ export function createPairingScanner({ state, ui, runPairingFromLink, showPairFa
     if (state.scanning) {
       return;
     }
-    if (typeof window.BarcodeDetector !== "function") {
+    if (!hasMediaCaptureSupport()) {
       setPairScanStatus(
-        "当前环境不支持实时扫码，可改用“从图库导入二维码”或“粘贴配对链接”。",
+        "当前环境不支持相机扫码，可改用“从图库导入二维码”或“粘贴配对链接”。",
+        "warn",
+      );
+      return;
+    }
+
+    const detector = await ensureDetector();
+    if (!detector) {
+      setPairScanStatus(
+        "当前环境不支持二维码识别，可改用“从图库导入二维码”或“粘贴配对链接”。",
         "warn",
       );
       return;
@@ -65,14 +122,10 @@ export function createPairingScanner({ state, ui, runPairingFromLink, showPairFa
     try {
       state.scanning = true;
       setPairScanStatus("请将二维码放入取景框，识别后会自动配对。");
-      state.scanDetector = state.scanDetector || new window.BarcodeDetector({
-        formats: ["qr_code"],
-      });
-      state.scanStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
-        audio: false,
-      });
+      state.scanDetector = detector;
+      state.scanStream = await requestCameraStream();
       ui.pairScanVideo.srcObject = state.scanStream;
+      ui.pairScanVideo.setAttribute("playsinline", "true");
       await ui.pairScanVideo.play();
       void scanLoop();
     } catch (_) {
@@ -87,7 +140,8 @@ export function createPairingScanner({ state, ui, runPairingFromLink, showPairFa
     if (!file) {
       return;
     }
-    if (typeof window.BarcodeDetector !== "function") {
+    const detector = await ensureDetector();
+    if (!detector) {
       const mapped = {
         reason: "当前环境不支持二维码识别",
         suggestion: "请改用粘贴链接方式。",
@@ -99,9 +153,6 @@ export function createPairingScanner({ state, ui, runPairingFromLink, showPairFa
     }
     try {
       const bitmap = await createImageBitmap(file);
-      const detector = state.scanDetector || new window.BarcodeDetector({
-        formats: ["qr_code"],
-      });
       const detected = await detector.detect(bitmap);
       const first = Array.isArray(detected) && detected.length > 0 ? detected[0] : null;
       const rawValue = first && typeof first.rawValue === "string" ? first.rawValue : "";

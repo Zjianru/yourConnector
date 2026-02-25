@@ -5,6 +5,20 @@
 import { parseRelayWsUrl } from "./relay-api.js";
 
 /**
+ * 规范化粘贴文本，去除富文本与不可见字符干扰。
+ * @param {string} rawValue 用户粘贴原文。
+ * @returns {string}
+ */
+function normalizePairingInput(rawValue) {
+  return String(rawValue || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/&amp;/gi, "&")
+    .replace(/＆/g, "&")
+    .replace(/？/g, "?")
+    .trim();
+}
+
+/**
  * 解析历史 `systemId.pairToken` 形式配对码。
  * @param {string} rawValue 用户输入原文。
  * @returns {{systemId: string, pairToken: string}|null} 成功返回结构化结果。
@@ -35,29 +49,28 @@ export function parsePairCode(rawValue) {
  * @returns {{relayUrl: string, pairCode: string, systemId: string, pairToken: string, pairTicket: string, hostName: string}|null}
  */
 export function parsePairingLink(rawValue) {
-  const raw = String(rawValue || "").trim();
+  const raw = normalizePairingInput(rawValue);
   if (!raw) {
     return null;
   }
 
-  const matched = raw.match(/yc:\/\/pair\?[^ "'<>]+/i);
+  const matched = raw.match(/yc:\/\/pair\?[^\s"'<>]+/i);
   const linkText = matched ? matched[0] : raw;
-  let parsedUrl = null;
-  try {
-    parsedUrl = new URL(linkText);
-  } catch (_) {
+  if (!/^yc:\/\/pair\?/i.test(linkText)) {
     return null;
   }
 
-  if (parsedUrl.protocol !== "yc:" || parsedUrl.hostname !== "pair") {
+  const queryStart = linkText.indexOf("?");
+  if (queryStart < 0 || queryStart >= linkText.length - 1) {
     return null;
   }
+  const params = new URLSearchParams(linkText.slice(queryStart + 1));
 
-  const relayUrl = String(parsedUrl.searchParams.get("relay") || "").trim();
-  const pairCode = String(parsedUrl.searchParams.get("code") || "").trim();
-  const systemIdFromSid = String(parsedUrl.searchParams.get("sid") || "").trim();
-  const pairTicket = String(parsedUrl.searchParams.get("ticket") || "").trim();
-  const hostName = String(parsedUrl.searchParams.get("name") || "").trim();
+  const relayUrl = String(params.get("relay") || "").trim();
+  const pairCode = String(params.get("code") || "").trim();
+  const systemIdFromSid = String(params.get("sid") || "").trim();
+  const pairTicket = String(params.get("ticket") || "").trim();
+  const hostName = String(params.get("name") || "").trim();
   if (!relayUrl) {
     return null;
   }

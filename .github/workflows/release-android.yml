@@ -1,0 +1,164 @@
+name: release-android
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, for example v0.4.1"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  resolve-tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.value }}
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-and-release-android-apk:
+    needs: resolve-tag
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.resolve-tag.outputs.tag }}
+      ANDROID_TARGETS: aarch64
+      ANDROID_SDK_API_LEVEL: "34"
+      ANDROID_BUILD_TOOLS_VERSION: "35.0.0"
+      ANDROID_NDK_VERSION: "27.0.12077973"
+      SIGNED_APK_NAME: yourconnector-mobile-${{ needs.resolve-tag.outputs.tag }}-android-arm64-signed.apk
+      SIGNED_APK_SHA256_NAME: yourconnector-mobile-${{ needs.resolve-tag.outputs.tag }}-android-arm64-signed.apk.sha256
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.resolve-tag.outputs.tag }}
+
+      - name: Validate Android signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          missing=0
+          for var in ANDROID_KEYSTORE_BASE64 ANDROID_KEY_ALIAS ANDROID_KEYSTORE_PASSWORD; do
+            if [[ -z "${!var:-}" ]]; then
+              echo "::error::missing required secret: ${var}"
+              missing=1
+            fi
+          done
+          if [[ "${missing}" -ne 0 ]]; then
+            echo "::error::configure repository secrets before running release-android workflow"
+            exit 1
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-${ANDROID_SDK_API_LEVEL}" \
+            "build-tools;${ANDROID_BUILD_TOOLS_VERSION}" \
+            "ndk;${ANDROID_NDK_VERSION}"
+
+      - name: Export Android environment
+        run: |
+          echo "ANDROID_SDK_ROOT=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+          echo "ANDROID_BUILD_TOOLS_DIR=${ANDROID_HOME}/build-tools/${ANDROID_BUILD_TOOLS_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked
+
+      - name: Build Android unsigned APK
+        run: make build-mobile-tauri-android-apk ANDROID_TARGETS="${ANDROID_TARGETS}"
+
+      - name: Decode keystore from secret
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          mkdir -p .tmp/ci-signing dist
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > .tmp/ci-signing/release.jks
+          ls -la .tmp/ci-signing
+
+      - name: Resolve unsigned APK path
+        id: apk
+        run: |
+          unsigned_apk="$(find app/mobile/src-tauri/gen/android/app/build/outputs/apk -type f -name '*release-unsigned.apk' | sort | tail -n1)"
+          if [[ -z "${unsigned_apk}" ]]; then
+            echo "::error::cannot find release unsigned apk"
+            exit 1
+          fi
+          echo "unsigned_apk=${unsigned_apk}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign Android APK
+        env:
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          key_pass="${ANDROID_KEY_PASSWORD:-${ANDROID_KEYSTORE_PASSWORD}}"
+          scripts/mobile/sign-android-apk.sh \
+            --in "${{ steps.apk.outputs.unsigned_apk }}" \
+            --out "dist/${SIGNED_APK_NAME}" \
+            --keystore ".tmp/ci-signing/release.jks" \
+            --alias "${ANDROID_KEY_ALIAS}" \
+            --store-pass "${ANDROID_KEYSTORE_PASSWORD}" \
+            --key-pass "${key_pass}"
+
+      - name: Generate APK checksum
+        run: |
+          (
+            cd dist
+            sha256sum "${SIGNED_APK_NAME}" > "${SIGNED_APK_SHA256_NAME}"
+          )
+
+      - name: Upload Android release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-signed-apk-${{ needs.resolve-tag.outputs.tag }}
+          path: |
+            dist/${{ env.SIGNED_APK_NAME }}
+            dist/${{ env.SIGNED_APK_SHA256_NAME }}
+          if-no-files-found: error
+
+      - name: Upload signed Android APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.resolve-tag.outputs.tag }}
+          files: |
+            dist/${{ env.SIGNED_APK_NAME }}
+            dist/${{ env.SIGNED_APK_SHA256_NAME }}
+          overwrite_files: true

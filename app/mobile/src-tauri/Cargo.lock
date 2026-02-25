@@ -4849,6 +4849,8 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",
+ "jni",
+ "ndk-context",
  "rand 0.8.5",
  "security-framework",
  "serde",
