@@ -1,119 +1,143 @@
 # yourConnector
 
-## 项目结构
+`yourConnector` 是一套面向 `Mobile App -> Relay -> Sidecar -> OpenClaw/OpenCode` 的连接与能力编排系统。
 
-1. `app/mobile`：Tauri Mobile App（iOS + Android）
-2. `services/relay`：Relay 服务（Rust）
-3. `services/sidecar`：Sidecar 服务（Rust）
-4. `protocol/rust`：共享协议类型（Rust）
-5. `docs`：设计、治理、验收文档
+## 1. 项目介绍
 
-## 核心命令
+项目核心目标是把“配对接入、宿主运维、工具控制、聊天、报告读取”放在同一条可治理链路里，而不是拆成多个互不一致的小工具。
+
+它要解决的具体问题是：
+
+1. 在手机端统一接入并管理多台宿主机。
+2. 在不暴露 `pairToken` 给 App 的前提下完成安全配对与会话换发。
+3. 在同一套事件协议中收敛工具接入、详情采集、聊天与报告读取。
+
+边界说明：
+
+1. 这不是单一 IM 或单一工具的“页面插件”，而是独立的连接层与运维层。
+2. Relay 只做配对、鉴权与路由，不执行工具命令。
+3. 工具执行、详情采集、聊天和报告读取全部在 Sidecar 完成。
+
+## 2. 项目能力矩阵（按代码事实）
+
+| 能力域 | 当前能力 | 代码入口 |
+| --- | --- | --- |
+| 配对与宿主机接入 | `pairTicket` 流程、三入口配对（扫码/链接/手动）、会话安全落盘、多宿主自动连接 | `app/mobile/ui/js/flows/pairing-*.js` `services/relay/src/pairing/*` |
+| 运维页 | 宿主机 Banner、连接/重连、工具接入/断开、控制端重绑、宿主机删除补偿 | `app/mobile/ui/js/flows/connection-*.js` `host-manage.js` `tool-manage.js` |
+| 聊天页 | 会话列表/详情/完整消息三态、消息队列、取消生成、会话本地持久化 | `app/mobile/ui/js/flows/chat.js` `app/mobile/src-tauri/src/lib.rs` |
+| 报告读取 | 通过 `tool_report_fetch_*` 拉取 Markdown 报告、进度与错误可视化 | `app/mobile/ui/js/modals/report-viewer.js` `services/sidecar/src/session/loop/report.rs` |
+| 工具详情页 | `openclaw.v1` 五屏详情、`opencode.v1` 详情卡片、过期数据 `stale` 回退 | `app/mobile/ui/js/modals/tool-detail.js` `services/sidecar/src/tooling/adapters/*` |
+| 发布与部署 | Linux/macOS 分发脚本、GitHub Release、OSS 同步、Android APK Release | `scripts/dist/*` `.github/workflows/*` |
+
+## 3. 架构总览
+
+```mermaid
+flowchart LR
+  App["Mobile App\nTauri iOS/Android"]
+  Relay["Relay\nAxum HTTP + WebSocket"]
+  SidecarA["Sidecar A\nTool Adapter Core"]
+  SidecarB["Sidecar B\nTool Adapter Core"]
+  Tool["OpenClaw / OpenCode"]
+
+  App <-->|"HTTP: pair/auth\nWS: events"| Relay
+  Relay <-->|"WS sidecar"| SidecarA
+  Relay <-->|"WS sidecar"| SidecarB
+  SidecarA --> Tool
+  SidecarB --> Tool
+```
+
+架构细节见 `docs/架构与数据流.md`。
+
+## 4. 仓库结构
+
+1. `app/mobile`：移动端（页面 + Tauri 原生命令）。
+2. `services/relay`：配对、鉴权、WS 转发。
+3. `services/sidecar`：工具发现、详情采集、控制、聊天、报告。
+4. `protocol/rust`：共享 envelope 与 payload 结构。
+5. `scripts`：配对辅助、分发安装、质量门禁脚本。
+6. `docs`：单版本中文文档系统。
+
+## 5. 本地快速开始
+
+### 5.1 前置环境
+
+1. Rust + Cargo。
+2. Node.js（用于 `app/mobile/ui/js` 语法检查）。
+3. iOS 调试：Xcode / `xcrun`。
+4. Android 调试：Android SDK / `adb`。
+
+### 5.2 启动服务
 
 ```bash
-cd yourConnector
-
-# 服务启动
 make run-relay
 make run-sidecar
+```
 
-# iOS 启动
+健康检查：
+
+```bash
+curl -sS http://127.0.0.1:18080/healthz
+curl -sS http://127.0.0.1:18081/healthz
+```
+
+### 5.3 启动移动端（iOS 示例）
+
+```bash
 make run-mobile-tauri-ios IOS_SIM="iPhone 17 Pro"
+```
 
-# Android 初始化与打包
-make init-mobile-tauri-android
-make build-mobile-tauri-android-apk-test \
-  ANDROID_KEYSTORE_PATH="/abs/path/release.jks" \
-  ANDROID_KEY_ALIAS="your_alias" \
-  ANDROID_KEYSTORE_PASSWORD="***" \
-  ANDROID_KEY_PASSWORD="***"
-make build-mobile-tauri-android-aab ANDROID_TARGETS="aarch64"
+### 5.4 配对调试
 
-# 配对辅助
+```bash
 make show-pairing
 make show-pairing-link
 make simulate-ios-scan
+make simulate-android-scan ANDROID_DEVICE="emulator-5554"
 ```
 
-## 安装流程（A/B 宿主机）
+## 6. 部署方式
+
+### 6.1 A 机（Relay + Sidecar）
 
 ```bash
-# A机：先安装 relay
-sudo bash /path/to/yc-relay.sh install \
+sudo bash scripts/dist/yc-relay.sh install \
   --acme-email you@example.com \
-  --public-ip <公网IPv4>
+  --public-ip <A公网IPv4>
 
-# A机：再安装 sidecar（接入本机 relay）
-sudo bash /path/to/yc-sidecar.sh install \
-  --relay-ip <公网IPv4>
-
-# B机：只安装 sidecar（接入 A 机 relay）
-sudo bash /path/to/yc-sidecar.sh install \
-  --relay-ip <公网IPv4>
+sudo bash scripts/dist/yc-sidecar.sh install \
+  --relay-ip <A公网IPv4>
 ```
 
-说明：
-
-1. 公网默认仅支持 `wss://.../v1/ws`，`ws://` 仅用于开发调试开关。
-2. 安装脚本面向用户输入统一为公网 IPv4；脚本内部自动拼接标准 Relay 地址。
-3. `yc-relay.sh` 在 Linux 上使用 Let’s Encrypt shortlived IP 证书（HTTP-01 + webroot）。
-4. 详细参数、卸载与 `doctor/status` 见 `docs/分发安装与卸载-v1.md`。
-5. GitHub Actions 已支持“打 tag 自动构建服务端发布资产”，工作流见 `.github/workflows/release-linux.yml`。
-6. GitHub Actions 已支持“打 tag 自动构建并签名 Android APK，再上传到对应 GitHub Release”，工作流见 `.github/workflows/release-android.yml`。
-7. GitHub Actions 已支持“按 tag 同步服务端发布资产到阿里云 OSS（国内下载）”，工作流见 `.github/workflows/sync-release-to-oss.yml`。
-8. 国内下载地址模板：`https://<ALIYUN_OSS_DOMAIN>/<ALIYUN_OSS_PREFIX>/<tag>/<file>`
-
-## 质量门禁
+### 6.2 B 机（仅 Sidecar）
 
 ```bash
-cd yourConnector
+sudo bash scripts/dist/yc-sidecar.sh install \
+  --relay-ip <A公网IPv4>
+```
 
-# 治理门禁（注释/行长/文档一致性）
+说明：`scripts/dist/yc-sidecar.sh` 当前推荐使用 `--relay-ip`，脚本会拼接 `wss://<ip>/v1/ws`。
+
+## 7. 文档入口（代码优先）
+
+1. 总导航：`docs/文档导航.md`
+2. 代码事实总索引：`docs/代码事实总索引.md`
+3. 配对能力：`docs/配对与宿主机接入/`
+4. 运维能力：`docs/运维与工具管理/`
+5. 聊天能力：`docs/聊天与报告/`
+6. 工具详情能力：`docs/工具详情与数据采集/`
+7. 协议与部署：`docs/API与事件协议.md` `docs/CLI与环境变量.md` `docs/分发安装与卸载.md`
+
+## 8. 质量门禁
+
+```bash
 make check-governance
-
-# 全量门禁（编译、格式、静态检查、测试、JS 语法、治理）
 make check-all
 ```
 
-## 系统日志
+## 9. 当前实现约束（重要）
 
-1. Relay 与 Sidecar 启动后会同时写入 stdout 与文件日志。
-2. 默认目录：
-   - 原始日志：`logs/raw`
-   - 每日归档：`logs/archive`
-3. 归档规则：
-   - 文件按天命名：`<service>.log.YYYY-MM-DD`
-   - 已完成日期会自动打包为 `YYYY-MM-DD.7z`
-4. 常用环境变量：
-   - `YC_LOG_DIR`：日志根目录（默认 `logs`）
-   - `YC_LOG_ARCHIVE_INTERVAL_SEC`：归档轮询周期（默认 `3600` 秒）
-   - `YC_FILE_LOG_LEVEL`：文件日志级别（默认 `debug`）
-   - `RUST_LOG`：仅影响 stdout 级别，不影响文件日志
-5. 配对信息（配对码、配对链接、模拟扫码命令）会以高亮 banner 直接输出到终端，便于现场配对。
-6. 详细说明见：`docs/系统日志与归档-v1.md`
-
-## Android 签名
-
-1. 本地测试包与 release 包统一使用 `scripts/mobile/sign-android-apk.sh` 签名。
-2. `make build-mobile-tauri-android-apk-test` 与 `make build-mobile-tauri-android-apk-signed` 都会执行签名。
-3. 本地签名需要的环境变量/参数：
-   - `ANDROID_KEYSTORE_PATH`
-   - `ANDROID_KEY_ALIAS`
-   - `ANDROID_KEYSTORE_PASSWORD`
-   - `ANDROID_KEY_PASSWORD`（可选，默认等于 `ANDROID_KEYSTORE_PASSWORD`）
-4. GitHub `release-android` 工作流需要配置仓库 Secrets：
-   - `ANDROID_KEYSTORE_BASE64`（`base64` 后的 keystore 内容）
-   - `ANDROID_KEY_ALIAS`
-   - `ANDROID_KEYSTORE_PASSWORD`
-   - `ANDROID_KEY_PASSWORD`（可选）
-
-## 文档入口
-
-1. `docs/文档导航-v2.md`
-2. `docs/代码治理与注释规范-v1.md`
-3. `docs/质量门禁与检查规范-v1.md`
-4. `docs/分发安装与卸载-v1.md`
-5. `docs/系统日志与归档-v1.md`
-6. `docs/已完成功能验收-v1.md`
-7. `docs/工具接入核心组件-v1.md`
-8. `docs/跨宿主联调测试-v1.md`
+1. App 不支持 `pairToken` 直连配对或 WS，必须走 `pairTicket -> access/refresh + PoP`。
+2. 移动端自动重连固定为 `2s` 间隔，最多 `5` 次，超限转手动重连。
+3. 工具进程控制中，`restart` 当前仅支持 OpenClaw；OpenCode 仅支持 `stop`。
+4. 聊天队列上限为每会话 `20` 条（含运行中请求）。
+5. 报告读取仅允许“当前工具工作区内的绝对路径 `.md` 文件”。
