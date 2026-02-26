@@ -43,7 +43,7 @@ export function createToolDetailModal({
     state.detailOpenClawAgentOpenIds = {};
     state.detailOpenClawSecurityExpanded = false;
     if (typeof requestToolDetailsRefresh === "function") {
-      requestToolDetailsRefresh(hostId, toolId, true);
+      requestToolDetailsRefresh(hostId, toolId, true, "user");
     }
     renderToolModal();
   }

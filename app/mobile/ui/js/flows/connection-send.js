@@ -113,8 +113,10 @@ export function createConnectionSendOps({
    * @param {string} hostId 宿主机标识。
    * @param {string} toolId 工具标识；为空时刷新全部工具详情。
    * @param {boolean} force 是否强制刷新。
+   * @param {"user"|"background"} priority 刷新优先级。
    */
-  function requestToolDetailsRefresh(hostId, toolId = "", force = false) {
+  function requestToolDetailsRefresh(hostId, toolId = "", force = false, priority = "background") {
+    const runtime = ensureRuntime(hostId);
     const normalizedToolId = String(toolId || "").trim();
     const logicalToolId = normalizedToolId && typeof resolveLogicalToolId === "function"
       ? String(resolveLogicalToolId(hostId, normalizedToolId) || "").trim() || normalizedToolId
@@ -122,16 +124,37 @@ export function createConnectionSendOps({
     const runtimeToolId = logicalToolId && typeof resolveRuntimeToolId === "function"
       ? String(resolveRuntimeToolId(hostId, logicalToolId) || "").trim() || logicalToolId
       : logicalToolId;
+    const normalizedPriority = String(priority || "").trim().toLowerCase() === "user"
+      ? "user"
+      : "background";
+    const refreshId = createEventId().replace(/^evt_/, "drf_");
     const payload = {
+      refreshId,
       force: Boolean(force),
+      priority: normalizedPriority,
     };
     if (runtimeToolId) {
       payload.toolId = runtimeToolId;
     }
-    sendSocketEvent(hostId, "tool_details_refresh_request", payload, {
+    if (runtime) {
+      if (runtimeToolId) {
+        runtime.toolDetailsPendingRefreshByToolId[runtimeToolId] = refreshId;
+      } else {
+        runtime.toolDetailsPendingAllRefreshId = refreshId;
+      }
+    }
+    const sent = sendSocketEvent(hostId, "tool_details_refresh_request", payload, {
       action: "refresh_tool_details",
       toolId: runtimeToolId,
     });
+    if (!sent && runtime) {
+      if (runtimeToolId) {
+        delete runtime.toolDetailsPendingRefreshByToolId[runtimeToolId];
+      } else if (runtime.toolDetailsPendingAllRefreshId === refreshId) {
+        runtime.toolDetailsPendingAllRefreshId = "";
+      }
+    }
+    return sent;
   }
 
   /**

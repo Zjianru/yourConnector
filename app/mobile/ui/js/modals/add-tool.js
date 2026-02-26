@@ -10,7 +10,15 @@ import { localizedCategory } from "../utils/host-format.js";
  * 创建“添加工具”弹窗能力。
  * @param {object} deps 依赖集合。
  */
-export function createAddToolModal({ state, ui, hostById, ensureRuntime, requestToolsRefresh, resolveToolDisplayName }) {
+export function createAddToolModal({
+  state,
+  ui,
+  hostById,
+  ensureRuntime,
+  requestToolsRefresh,
+  resolveToolDisplayName,
+  queueDispatcher,
+}) {
   let onConnectCandidateTool = null;
   let onOpenDebug = null;
 
@@ -53,10 +61,23 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
     if (runtime) {
       runtime.candidateRefreshPending = true;
       runtime.candidateExpectedVersion = Number(runtime.candidateSnapshotVersion || 0) + 1;
-      if (runtime.candidateRefreshTimer) {
-        clearTimeout(runtime.candidateRefreshTimer);
-      }
-      runtime.candidateRefreshTimer = setTimeout(() => {
+      runtime.candidateRefreshTimer = queueDispatcher && typeof queueDispatcher.replaceTimeout === "function"
+        ? queueDispatcher.replaceTimeout(
+          runtime.candidateRefreshTimer,
+          3000,
+          () => {
+            const latest = ensureRuntime(hostId);
+            if (!latest || !latest.candidateRefreshPending) {
+              return;
+            }
+            latest.candidateRefreshPending = false;
+            latest.candidateExpectedVersion = 0;
+            latest.candidateRefreshTimer = null;
+            renderAddToolModal();
+          },
+          "candidate_refresh_timeout",
+        )
+        : setTimeout(() => {
         const latest = ensureRuntime(hostId);
         if (!latest || !latest.candidateRefreshPending) {
           return;
@@ -65,7 +86,7 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
         latest.candidateExpectedVersion = 0;
         latest.candidateRefreshTimer = null;
         renderAddToolModal();
-      }, 3000);
+        }, 3000);
     }
     requestToolsRefresh(hostId);
     renderAddToolModal();
@@ -74,7 +95,11 @@ export function createAddToolModal({ state, ui, hostById, ensureRuntime, request
   function closeAddToolModal() {
     const runtime = ensureRuntime(state.addToolHostId);
     if (runtime && runtime.candidateRefreshTimer) {
-      clearTimeout(runtime.candidateRefreshTimer);
+      if (queueDispatcher && typeof queueDispatcher.cancelTimeout === "function") {
+        queueDispatcher.cancelTimeout(runtime.candidateRefreshTimer);
+      } else {
+        clearTimeout(runtime.candidateRefreshTimer);
+      }
       runtime.candidateRefreshTimer = null;
     }
     if (runtime) {

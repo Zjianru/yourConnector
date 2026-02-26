@@ -32,6 +32,7 @@ export function createConnectionEvents({
   onToolReportFetchChunk,
   onToolReportFetchFinished,
   addLog,
+  queueDispatcher,
 }) {
   function findRuntimeTool(runtime, hostId, toolId) {
     const rawToolId = String(toolId || "").trim();
@@ -162,7 +163,7 @@ export function createConnectionEvents({
       }
 
       if (type === "tool_details_snapshot") {
-        applyToolDetailsSnapshot(hostId, payload);
+        applyToolDetailsSnapshot(hostId, payload, { traceId, eventId, eventType: type });
         return;
       }
 
@@ -392,7 +393,15 @@ export function createConnectionEvents({
           },
         );
         requestToolsRefresh(hostId);
-        setTimeout(() => connectCandidateTool(hostId, toolId), 350);
+        if (queueDispatcher && typeof queueDispatcher.scheduleTimeout === "function") {
+          queueDispatcher.scheduleTimeout(
+            350,
+            () => connectCandidateTool(hostId, toolId),
+            "auto_rebind_connect_retry",
+          );
+        } else {
+          setTimeout(() => connectCandidateTool(hostId, toolId), 350);
+        }
       } else if (toolId && shouldRetryCandidateByReason(reason) && retryCount < 1) {
         // 候选快照存在延迟时先主动刷新再重试一次，避免用户看到“先失败后成功”的误导弹窗。
         runtime.toolConnectRetryCount[toolId] = retryCount + 1;
@@ -412,7 +421,15 @@ export function createConnectionEvents({
           },
         );
         requestToolsRefresh(hostId);
-        setTimeout(() => connectCandidateTool(hostId, toolId), 350);
+        if (queueDispatcher && typeof queueDispatcher.scheduleTimeout === "function") {
+          queueDispatcher.scheduleTimeout(
+            350,
+            () => connectCandidateTool(hostId, toolId),
+            "candidate_connect_retry",
+          );
+        } else {
+          setTimeout(() => connectCandidateTool(hostId, toolId), 350);
+        }
       } else {
         if (toolId) {
           delete runtime.toolConnectRetryCount[toolId];
@@ -641,9 +658,56 @@ export function createConnectionEvents({
    * @param {string} hostId 宿主机标识。
    * @param {Record<string, any>} payload 事件载荷。
    */
-  function applyToolDetailsSnapshot(hostId, payload) {
+  function applyToolDetailsSnapshot(hostId, payload, eventMeta = {}) {
     const runtime = ensureRuntime(hostId);
     if (!runtime) {
+      return;
+    }
+    const snapshotIdRaw = Number(payload.snapshotId || 0);
+    const snapshotId = Number.isFinite(snapshotIdRaw) && snapshotIdRaw > 0
+      ? Math.trunc(snapshotIdRaw)
+      : 0;
+    const refreshId = String(payload.refreshId || "").trim();
+    const trigger = String(payload.trigger || "").trim().toLowerCase();
+    const targetToolId = String(payload.targetToolId || "").trim();
+    const queueWaitMs = Number(payload.queueWaitMs || 0);
+    const collectMs = Number(payload.collectMs || 0);
+    const sendMs = Number(payload.sendMs || 0);
+    const droppedRefreshes = Number(payload.droppedRefreshes || 0);
+
+    const pendingByTool = runtime.toolDetailsPendingRefreshByToolId || {};
+    const expectedRefreshId = targetToolId
+      ? String(pendingByTool[targetToolId] || "")
+      : String(runtime.toolDetailsPendingAllRefreshId || "");
+    if (expectedRefreshId && expectedRefreshId !== refreshId) {
+      addLog(`忽略过期详情快照 (${hostById(hostId)?.displayName || hostId})`, {
+        level: "warn",
+        scope: "tool_details",
+        action: "apply_tool_details_snapshot",
+        outcome: "ignored",
+        traceId: String(eventMeta.traceId || ""),
+        eventId: String(eventMeta.eventId || ""),
+        eventType: String(eventMeta.eventType || ""),
+        hostId,
+        toolId: targetToolId,
+        detail: `expected_refresh_id=${expectedRefreshId} incoming_refresh_id=${refreshId || "--"}`,
+      });
+      return;
+    }
+    const lastSnapshotId = Number(runtime.toolDetailsLastSnapshotId || 0);
+    if (snapshotId > 0 && snapshotId <= lastSnapshotId) {
+      addLog(`忽略旧详情快照 (${hostById(hostId)?.displayName || hostId})`, {
+        level: "warn",
+        scope: "tool_details",
+        action: "apply_tool_details_snapshot",
+        outcome: "ignored",
+        traceId: String(eventMeta.traceId || ""),
+        eventId: String(eventMeta.eventId || ""),
+        eventType: String(eventMeta.eventType || ""),
+        hostId,
+        toolId: targetToolId,
+        detail: `last_snapshot_id=${lastSnapshotId} incoming_snapshot_id=${snapshotId}`,
+      });
       return;
     }
 
@@ -690,6 +754,42 @@ export function createConnectionEvents({
     runtime.toolDetailsById = detailsById;
     runtime.toolDetailStaleById = staleById;
     runtime.toolDetailUpdatedAtById = updatedAtById;
+    runtime.toolDetailsLastSnapshotId = snapshotId > 0
+      ? snapshotId
+      : Number(runtime.toolDetailsLastSnapshotId || 0);
+    runtime.toolDetailsLastRefreshId = refreshId;
+    runtime.toolDetailsLastTrigger = trigger;
+    if (targetToolId) {
+      if (expectedRefreshId && expectedRefreshId === refreshId) {
+        delete runtime.toolDetailsPendingRefreshByToolId[targetToolId];
+      }
+    } else if (expectedRefreshId && expectedRefreshId === refreshId) {
+      runtime.toolDetailsPendingAllRefreshId = "";
+    }
+    const queueWaitText = Number.isFinite(queueWaitMs) ? Math.max(0, Math.trunc(queueWaitMs)) : 0;
+    const collectText = Number.isFinite(collectMs) ? Math.max(0, Math.trunc(collectMs)) : 0;
+    const sendText = Number.isFinite(sendMs) ? Math.max(0, Math.trunc(sendMs)) : 0;
+    const droppedText = Number.isFinite(droppedRefreshes) ? Math.max(0, Math.trunc(droppedRefreshes)) : 0;
+    const detailText = [
+      `snapshot_id=${snapshotId || 0}`,
+      `refresh_id=${refreshId || "--"}`,
+      `trigger=${trigger || "--"}`,
+      `queue_wait_ms=${queueWaitText}`,
+      `collect_ms=${collectText}`,
+      `send_ms=${sendText}`,
+      `dropped_refreshes=${droppedText}`,
+    ].join(" ");
+    addLog(`已应用详情快照 (${hostById(hostId)?.displayName || hostId})`, {
+      scope: "tool_details",
+      action: "apply_tool_details_snapshot",
+      outcome: "success",
+      traceId: String(eventMeta.traceId || ""),
+      eventId: String(eventMeta.eventId || ""),
+      eventType: String(eventMeta.eventType || ""),
+      hostId,
+      toolId: targetToolId,
+      detail: detailText,
+    });
   }
 
   return { ingestEvent };

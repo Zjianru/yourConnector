@@ -19,6 +19,7 @@ import { createRuntimeState } from "./state/runtime.js";
 import { createConnectionAuth } from "./flows/connection-auth.js";
 import { createConnectionFlow } from "./flows/connection.js";
 import { createPairingFlow } from "./flows/pairing.js";
+import { createQueueDispatcher } from "./flows/queue-dispatcher.js";
 import { createToolManageFlow } from "./flows/tool-manage.js";
 import { createHostManageFlow } from "./flows/host-manage.js";
 import { createChatFlow } from "./flows/chat.js";
@@ -34,6 +35,7 @@ const runtimeState = createRuntimeState({ persistConfig: hostState.persistConfig
 const noticeModal = createHostNoticeModal({ state, ui });
 const pairFailureModal = createPairFailureModal({ state, ui });
 const reportViewerModal = createReportViewerModal({ state, ui });
+const queueDispatcher = createQueueDispatcher({ addLog });
 
 const authFlow = createConnectionAuth({
   state,
@@ -80,6 +82,7 @@ const connectionFlow = createConnectionFlow({
   setToolHidden: runtimeState.setToolHidden,
   resolveToolDisplayName: runtimeState.resolveToolDisplayName,
   auth: authFlow,
+  queueDispatcher,
 });
 
 const toolsView = createToolsView({
@@ -100,6 +103,7 @@ const addToolModal = createAddToolModal({
   ensureRuntime: runtimeState.ensureRuntime,
   requestToolsRefresh: connectionFlow.requestToolsRefresh,
   resolveToolDisplayName: runtimeState.resolveToolDisplayName,
+  queueDispatcher,
 });
 
 const toolDetailModal = createToolDetailModal({
@@ -115,7 +119,7 @@ const toolDetailModal = createToolDetailModal({
 
 /**
  * 统一关闭弹窗栈，避免多个 modal 叠加导致“关一个露一个”。
- * @param {"none"|"pairFailure"|"pairFlow"|"toolDetail"|"addTool"|"hostManage"|"hostEdit"|"hostMetrics"|"hostNotice"|"reportViewer"} keep 保留的弹窗类型。
+ * @param {string} keep 保留的弹窗类型。
  */
 function closeModalStack(keep = "none") {
   if (keep !== "pairFailure") pairFailureModal.closePairFailureModal();
@@ -228,6 +232,7 @@ const toolManageFlow = createToolManageFlow({
   openHostManageModal: openHostManageModalGuard,
   deleteChatConversationByTool: chatFlow.deleteConversationByTool,
   render,
+  queueDispatcher,
 });
 
 hostManageFlowRef = createHostManageFlow({
@@ -253,6 +258,7 @@ hostManageFlowRef = createHostManageFlow({
   sendSocketEvent: connectionFlow.sendSocketEvent,
   openPairFlow: openPairFlowGuard,
   render,
+  queueDispatcher,
 });
 
 addToolModal.setHandlers({
@@ -506,9 +512,11 @@ function init() {
 
   bindEvents();
 
-  setInterval(() => {
-    void hostManageFlowRef.processPendingDeletes();
-  }, DELETE_RETRY_INTERVAL_MS);
+  queueDispatcher.scheduleInterval(
+    DELETE_RETRY_INTERVAL_MS,
+    () => hostManageFlowRef.processPendingDeletes(),
+    "process_pending_deletes",
+  );
 
   if (hostState.visibleHosts().length > 0) {
     void connectionFlow.connectAllHosts();

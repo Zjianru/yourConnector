@@ -27,6 +27,7 @@ export function createConnectionFlow({
   setToolHidden,
   resolveToolDisplayName,
   auth,
+  queueDispatcher,
 }) {
   const hooks = {
     openHostNoticeModal: () => {},
@@ -82,6 +83,7 @@ export function createConnectionFlow({
     onToolReportFetchChunk: (...args) => hooks.onToolReportFetchChunk(...args),
     onToolReportFetchFinished: (...args) => hooks.onToolReportFetchFinished(...args),
     addLog,
+    queueDispatcher,
   });
 
   const socketOps = createConnectionSocketOps({

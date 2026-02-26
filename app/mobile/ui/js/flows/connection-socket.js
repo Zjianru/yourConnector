@@ -256,6 +256,11 @@ export function createConnectionSocketOps({
     runtime.toolDetailsById = {};
     runtime.toolDetailStaleById = {};
     runtime.toolDetailUpdatedAtById = {};
+    runtime.toolDetailsLastSnapshotId = 0;
+    runtime.toolDetailsLastRefreshId = "";
+    runtime.toolDetailsLastTrigger = "";
+    runtime.toolDetailsPendingAllRefreshId = "";
+    runtime.toolDetailsPendingRefreshByToolId = {};
 
     const host = hostById(hostId);
     addLog(`disconnected host: ${host ? host.displayName : hostId}`, {

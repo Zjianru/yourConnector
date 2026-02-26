@@ -35,6 +35,7 @@ export function createToolManageFlow({
   openHostManageModal,
   deleteChatConversationByTool,
   render,
+  queueDispatcher,
 }) {
   const removeChatConversation = typeof deleteChatConversationByTool === "function"
     ? deleteChatConversationByTool
@@ -175,7 +176,29 @@ export function createToolManageFlow({
     clearToolConnectTimer(runtime, id);
     const traceId = createTraceId();
     runtime.toolConnectTraceIds[id] = traceId;
-    runtime.toolConnectTimers[id] = setTimeout(() => {
+    runtime.toolConnectTimers[id] = queueDispatcher && typeof queueDispatcher.scheduleTimeout === "function"
+      ? queueDispatcher.scheduleTimeout(5000, () => {
+        const current = ensureRuntime(hostId);
+        if (!current || !current.connectingToolIds[id]) return;
+        if (String(current.toolConnectTraceIds[id] || "") !== traceId) return;
+        delete current.connectingToolIds[id];
+        delete current.toolConnectRetryCount[id];
+        delete current.toolConnectTraceIds[id];
+        clearToolConnectTimer(current, id);
+        requestToolsRefresh(hostId);
+        renderAddToolModal();
+        addLog(`工具接入等待超时，已自动刷新候选列表 (${host.displayName}): ${id}`, {
+          level: "warn",
+          scope: "tool_whitelist",
+          action: "connect_tool",
+          outcome: "timeout",
+          traceId,
+          hostId,
+          hostName: host.displayName,
+          toolId: id,
+        });
+      }, "tool_connect_timeout")
+      : setTimeout(() => {
       const current = ensureRuntime(hostId);
       if (!current || !current.connectingToolIds[id]) return;
       if (String(current.toolConnectTraceIds[id] || "") !== traceId) return;

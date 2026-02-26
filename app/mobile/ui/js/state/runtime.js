@@ -80,6 +80,21 @@ export function createRuntimeState({ persistConfig }) {
     if (!runtime.openclawWorkspaceByToolId || typeof runtime.openclawWorkspaceByToolId !== "object") {
       runtime.openclawWorkspaceByToolId = {};
     }
+    if (!Number.isFinite(Number(runtime.toolDetailsLastSnapshotId || 0))) {
+      runtime.toolDetailsLastSnapshotId = 0;
+    }
+    if (typeof runtime.toolDetailsLastRefreshId !== "string") {
+      runtime.toolDetailsLastRefreshId = "";
+    }
+    if (typeof runtime.toolDetailsLastTrigger !== "string") {
+      runtime.toolDetailsLastTrigger = "";
+    }
+    if (typeof runtime.toolDetailsPendingAllRefreshId !== "string") {
+      runtime.toolDetailsPendingAllRefreshId = "";
+    }
+    if (!runtime.toolDetailsPendingRefreshByToolId || typeof runtime.toolDetailsPendingRefreshByToolId !== "object") {
+      runtime.toolDetailsPendingRefreshByToolId = {};
+    }
   }
 
   function ensureRuntime(hostId) {
