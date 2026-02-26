@@ -471,14 +471,40 @@ async fn refresh_and_send_details(
     request: ToolDetailsCollectRequest,
 ) -> Result<()> {
     let connected_tools = request.tools.clone();
-
+    let target_tool_id = request.target_tool_id.clone().unwrap_or_default();
+    let force_refresh = request.force;
+    let collect_started_at = Instant::now();
     let details = tool_core.collect_details_snapshot(request).await;
+    let collect_elapsed_ms = collect_started_at.elapsed().as_millis();
+    debug!(
+        "tool details collected target_tool_id={} force={} connected_tools={} details={} collect_ms={}",
+        target_tool_id,
+        force_refresh,
+        connected_tools.len(),
+        details.len(),
+        collect_elapsed_ms
+    );
 
     if details.is_empty() && connected_tools.is_empty() {
+        debug!(
+            "tool details snapshot skipped target_tool_id={} force={} reason=empty",
+            target_tool_id,
+            force_refresh
+        );
         return Ok(());
     }
 
+    let send_started_at = Instant::now();
     send_tool_details_snapshot(ws_writer, &cfg.system_id, seq, &details).await?;
+    let send_elapsed_ms = send_started_at.elapsed().as_millis();
+    debug!(
+        "tool details snapshot sent target_tool_id={} force={} details={} send_ms={} total_ms={}",
+        target_tool_id,
+        force_refresh,
+        details.len(),
+        send_elapsed_ms,
+        collect_elapsed_ms + send_elapsed_ms
+    );
     Ok(())
 }
 

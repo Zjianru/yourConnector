@@ -16,6 +16,8 @@ export function createConnectionSendOps({
   createEventId,
   addLog,
   formatWireLog,
+  resolveLogicalToolId,
+  resolveRuntimeToolId,
 }) {
   /**
    * 发送统一协议事件。
@@ -114,15 +116,21 @@ export function createConnectionSendOps({
    */
   function requestToolDetailsRefresh(hostId, toolId = "", force = false) {
     const normalizedToolId = String(toolId || "").trim();
+    const logicalToolId = normalizedToolId && typeof resolveLogicalToolId === "function"
+      ? String(resolveLogicalToolId(hostId, normalizedToolId) || "").trim() || normalizedToolId
+      : normalizedToolId;
+    const runtimeToolId = logicalToolId && typeof resolveRuntimeToolId === "function"
+      ? String(resolveRuntimeToolId(hostId, logicalToolId) || "").trim() || logicalToolId
+      : logicalToolId;
     const payload = {
       force: Boolean(force),
     };
-    if (normalizedToolId) {
-      payload.toolId = normalizedToolId;
+    if (runtimeToolId) {
+      payload.toolId = runtimeToolId;
     }
     sendSocketEvent(hostId, "tool_details_refresh_request", payload, {
       action: "refresh_tool_details",
-      toolId: normalizedToolId,
+      toolId: runtimeToolId,
     });
   }
 

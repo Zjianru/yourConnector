@@ -55,6 +55,8 @@ export function createConnectionFlow({
     createEventId,
     addLog,
     formatWireLog,
+    resolveLogicalToolId,
+    resolveRuntimeToolId,
   });
 
   const events = createConnectionEvents({
