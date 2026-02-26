@@ -7,6 +7,8 @@ ANDROID_MANIFEST_PATCH ?= ./scripts/mobile/ensure-android-camera-permissions.sh
 ANDROID_APK_SIGN_SCRIPT ?= ./scripts/mobile/sign-android-apk.sh
 ANDROID_SECURE_STORE_SRC ?= app/mobile/src-tauri/android/SecureStoreBridge.kt
 ANDROID_SECURE_STORE_DST ?= app/mobile/src-tauri/gen/android/app/src/main/java/dev/yourconnector/mobile/SecureStoreBridge.kt
+ANDROID_MAIN_ACTIVITY_SRC ?= app/mobile/src-tauri/android/MainActivity.kt
+ANDROID_MAIN_ACTIVITY_DST ?= app/mobile/src-tauri/gen/android/app/src/main/java/dev/yourconnector/mobile/MainActivity.kt
 ANDROID_UNSIGNED_APK_PATH ?= app/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-unsigned.apk
 ANDROID_SIGNED_APK_PATH ?= app/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/release/app-universal-release-signed.apk
 ANDROID_KEYSTORE_PATH ?=
@@ -24,11 +26,11 @@ PAIR_ARGS ?=
 .PHONY: run-relay run-sidecar stop-relay stop-sidecar restart-relay restart-sidecar
 .PHONY: install-tauri-cli boot-ios-sim stop-mobile-tauri-ios repair-ios-sim
 .PHONY: run-mobile-tauri-ios run-mobile-tauri-ios-dev run-mobile-tauri-ios-dev-clean
-.PHONY: sync-mobile-tauri-android-secure-store ensure-mobile-tauri-android
+.PHONY: sync-mobile-tauri-android-secure-store sync-mobile-tauri-android-main-activity ensure-mobile-tauri-android
 .PHONY: init-mobile-tauri-android run-mobile-tauri-android-dev
 .PHONY: build-mobile-tauri-android-apk build-mobile-tauri-android-aab
 .PHONY: sign-mobile-tauri-android-apk build-mobile-tauri-android-apk-signed build-mobile-tauri-android-apk-test
-.PHONY: pairing show-pairing show-pairing-code show-pairing-link show-pairing-qr show-pairing-json simulate-ios-scan
+.PHONY: pairing show-pairing show-pairing-code show-pairing-link show-pairing-qr show-pairing-json simulate-ios-scan simulate-android-scan
 .PHONY: self-debug-loop
 .PHONY: help
 
@@ -55,6 +57,7 @@ help:
 	@echo "  make show-pairing                   # 输出配对信息 + 终端二维码"
 	@echo "  make show-pairing-link              # 输出 yc://pair 链接"
 	@echo "  make simulate-ios-scan              # 模拟二维码扫码（simctl openurl）"
+	@echo "  make simulate-android-scan          # Android 模拟器拉起 yc://pair（自动 adb reverse 到本机 Relay）"
 	@echo "  make self-debug-loop                # 自动闭环：检查+服务+iOS启动+扫码+日志扫描"
 	@echo "  make repair-ios-sim                 # 修复模拟器异常状态"
 
@@ -64,6 +67,15 @@ sync-mobile-tauri-android-secure-store:
 		cp "$(ANDROID_SECURE_STORE_SRC)" "$(ANDROID_SECURE_STORE_DST)"; \
 	else \
 		echo "missing android secure store source: $(ANDROID_SECURE_STORE_SRC)"; \
+		exit 1; \
+	fi
+
+sync-mobile-tauri-android-main-activity:
+	@if [ -f "$(ANDROID_MAIN_ACTIVITY_SRC)" ]; then \
+		mkdir -p "$$(dirname "$(ANDROID_MAIN_ACTIVITY_DST)")"; \
+		cp "$(ANDROID_MAIN_ACTIVITY_SRC)" "$(ANDROID_MAIN_ACTIVITY_DST)"; \
+	else \
+		echo "missing android main activity source: $(ANDROID_MAIN_ACTIVITY_SRC)"; \
 		exit 1; \
 	fi
 
@@ -159,6 +171,7 @@ ensure-mobile-tauri-android:
 		cd app/mobile/src-tauri && cargo tauri android init --ci; \
 	fi
 	@$(MAKE) -s sync-mobile-tauri-android-secure-store
+	@$(MAKE) -s sync-mobile-tauri-android-main-activity
 	@if [ -x "$(ANDROID_MANIFEST_PATCH)" ]; then \
 		"$(ANDROID_MANIFEST_PATCH)"; \
 	else \
@@ -227,6 +240,13 @@ show-pairing-json:
 
 simulate-ios-scan:
 	@$(MAKE) -s pairing PAIR_DIR="$(PAIR_DIR)" PAIR_RELAY_WS="$(PAIR_RELAY_WS)" PAIR_NAME="$(PAIR_NAME)" PAIR_ARGS="--show link --simulate-ios-scan"
+
+simulate-android-scan:
+	@DEVICE="$(if $(strip $(ANDROID_DEVICE)),$(ANDROID_DEVICE),emulator-5554)"; \
+	adb -s "$$DEVICE" reverse tcp:18080 tcp:18080 >/dev/null; \
+	LINK="$$( $(MAKE) -s show-pairing-link PAIR_DIR="$(PAIR_DIR)" PAIR_RELAY_WS="$(PAIR_RELAY_WS)" PAIR_NAME="$(PAIR_NAME)" | tail -n1 )"; \
+	echo "$$LINK"; \
+	adb -s "$$DEVICE" shell "am start -a android.intent.action.VIEW -d '$$LINK'"
 
 self-debug-loop:
 	@./scripts/self-debug-loop.sh

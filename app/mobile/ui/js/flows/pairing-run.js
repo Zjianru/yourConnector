@@ -250,6 +250,15 @@ export function createPairingRunner({
     window.__YC_HANDLE_PAIR_LINK__ = (rawUrl) => {
       void runPairingFromLink(rawUrl, "deep-link");
     };
+
+    const pending = Array.isArray(window.__YC_PENDING_PAIR_LINKS__)
+      ? [...window.__YC_PENDING_PAIR_LINKS__]
+      : [];
+    window.__YC_PENDING_PAIR_LINKS__ = [];
+    pending.forEach((rawUrl) => {
+      if (!rawUrl) return;
+      void runPairingFromLink(rawUrl, "deep-link");
+    });
   }
 
   function tryApplyLaunchPairingLink() {

@@ -143,6 +143,16 @@ export function createPairingFlow({
       openPairFlow("import", "");
       void runner.runPairingFromLink(rawUrl, "deep-link");
     };
+
+    const pending = Array.isArray(window.__YC_PENDING_PAIR_LINKS__)
+      ? [...window.__YC_PENDING_PAIR_LINKS__]
+      : [];
+    window.__YC_PENDING_PAIR_LINKS__ = [];
+    pending.forEach((rawUrl) => {
+      if (!rawUrl) return;
+      openPairFlow("import", "");
+      void runner.runPairingFromLink(rawUrl, "deep-link");
+    });
   }
 
   function tryApplyLaunchPairingLink() {
