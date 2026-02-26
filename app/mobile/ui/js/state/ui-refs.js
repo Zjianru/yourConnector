@@ -158,5 +158,16 @@ export function createUiRefs() {
     hostNoticeBody: document.getElementById("hostNoticeBody"),
     hostNoticePrimaryBtn: document.getElementById("hostNoticePrimaryBtn"),
     hostNoticeSecondaryBtn: document.getElementById("hostNoticeSecondaryBtn"),
+
+    // 报告查看弹窗。
+    reportViewerModal: document.getElementById("reportViewerModal"),
+    reportViewerTitle: document.getElementById("reportViewerTitle"),
+    reportViewerClose: document.getElementById("reportViewerClose"),
+    reportViewerPath: document.getElementById("reportViewerPath"),
+    reportViewerProgressWrap: document.getElementById("reportViewerProgressWrap"),
+    reportViewerProgressBar: document.getElementById("reportViewerProgressBar"),
+    reportViewerProgressLabel: document.getElementById("reportViewerProgressLabel"),
+    reportViewerError: document.getElementById("reportViewerError"),
+    reportViewerBody: document.getElementById("reportViewerBody"),
   };
 }

@@ -35,6 +35,14 @@ pub(crate) const TOOL_CHAT_STARTED_EVENT: &str = "tool_chat_started";
 pub(crate) const TOOL_CHAT_CHUNK_EVENT: &str = "tool_chat_chunk";
 /// sidecar 返回聊天结束事件。
 pub(crate) const TOOL_CHAT_FINISHED_EVENT: &str = "tool_chat_finished";
+/// 请求拉取工具工作区下的报告文件（仅 .md）。
+pub(crate) const TOOL_REPORT_FETCH_REQUEST_EVENT: &str = "tool_report_fetch_request";
+/// sidecar 返回报告拉取开始事件。
+pub(crate) const TOOL_REPORT_FETCH_STARTED_EVENT: &str = "tool_report_fetch_started";
+/// sidecar 返回报告拉取分片事件。
+pub(crate) const TOOL_REPORT_FETCH_CHUNK_EVENT: &str = "tool_report_fetch_chunk";
+/// sidecar 返回报告拉取结束事件。
+pub(crate) const TOOL_REPORT_FETCH_FINISHED_EVENT: &str = "tool_report_fetch_finished";
 
 /// Relay 注入的可信来源客户端类型字段。
 const SOURCE_CLIENT_TYPE_FIELD: &str = "sourceClientType";
@@ -86,6 +94,13 @@ pub(crate) enum SidecarCommand {
         conversation_key: String,
         request_id: String,
         queue_item_id: String,
+    },
+    /// 拉取工具工作区内的 Markdown 报告文件。
+    ToolReportFetchRequest {
+        tool_id: String,
+        conversation_key: String,
+        request_id: String,
+        file_path: String,
     },
 }
 
@@ -305,6 +320,39 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 queue_item_id,
             })
         }
+        TOOL_REPORT_FETCH_REQUEST_EVENT => {
+            let tool_id = payload
+                .get("toolId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let conversation_key = payload
+                .get("conversationKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let file_path = payload
+                .get("filePath")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+
+            Some(SidecarCommand::ToolReportFetchRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                file_path,
+            })
+        }
         _ => None,
     }?;
 
@@ -336,6 +384,7 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
         }
         SidecarCommand::ToolChatRequest { tool_id, .. } => ("chat-request", tool_id.clone()),
         SidecarCommand::ToolChatCancel { tool_id, .. } => ("chat-cancel", tool_id.clone()),
+        SidecarCommand::ToolReportFetchRequest { tool_id, .. } => ("report-fetch", tool_id.clone()),
     }
 }
 
@@ -345,6 +394,7 @@ pub(crate) fn command_feedback_event(command: &SidecarCommand) -> &'static str {
         SidecarCommand::ControlToolProcess { .. } => TOOL_PROCESS_CONTROL_UPDATED_EVENT,
         SidecarCommand::ToolChatRequest { .. } => TOOL_CHAT_FINISHED_EVENT,
         SidecarCommand::ToolChatCancel { .. } => TOOL_CHAT_FINISHED_EVENT,
+        SidecarCommand::ToolReportFetchRequest { .. } => TOOL_REPORT_FETCH_FINISHED_EVENT,
         _ => TOOL_WHITELIST_UPDATED_EVENT,
     }
 }
@@ -502,6 +552,37 @@ mod tests {
                 assert_eq!(conversation_key, "host_a::opencode_workspace_p1");
                 assert_eq!(request_id, "req_1");
                 assert_eq!(queue_item_id, "req_1");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_report_fetch_request_command() {
+        let raw = r#"{
+            "type":"tool_report_fetch_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{
+                "toolId":"opencode_workspace_p1",
+                "conversationKey":"host_a::opencode_workspace_p1",
+                "requestId":"rpt_1",
+                "filePath":"/Users/codez/report.md"
+            }
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ToolReportFetchRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                file_path,
+            } => {
+                assert_eq!(tool_id, "opencode_workspace_p1");
+                assert_eq!(conversation_key, "host_a::opencode_workspace_p1");
+                assert_eq!(request_id, "rpt_1");
+                assert_eq!(file_path, "/Users/codez/report.md");
             }
             _ => panic!("unexpected command"),
         }

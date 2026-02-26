@@ -403,6 +403,26 @@
         </section>
       </div>
     </div>
+    <div id="reportViewerModal" class="modal">
+      <div class="modal-card report-viewer-modal-card">
+        <div class="modal-top">
+          <h3 id="reportViewerTitle">报告预览</h3>
+          <button id="reportViewerClose" class="icon-btn" aria-label="关闭">×</button>
+        </div>
+        <section class="detail-card">
+          <p id="reportViewerPath" class="section-sub report-viewer-path"></p>
+          <div id="reportViewerProgressWrap" class="report-viewer-progress-wrap">
+            <div class="report-viewer-progress-track">
+              <div id="reportViewerProgressBar" class="report-viewer-progress-bar"></div>
+            </div>
+            <span id="reportViewerProgressLabel" class="report-viewer-progress-label">0%</span>
+          </div>
+          <p id="reportViewerError" class="section-sub report-viewer-error"></p>
+          <div id="reportViewerBody" class="report-viewer-body markdown-body"></div>
+        </section>
+      </div>
+    </div>
+    <script src="./js/vendor/markdown-it.min.js"></script>
     <script type="module" src="./js/main.js"></script>
   </body>
 </html>

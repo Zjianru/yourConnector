@@ -35,6 +35,9 @@ export function createConnectionFlow({
     onToolChatStarted: () => {},
     onToolChatChunk: () => {},
     onToolChatFinished: () => {},
+    onToolReportFetchStarted: () => {},
+    onToolReportFetchChunk: () => {},
+    onToolReportFetchFinished: () => {},
   };
 
   /**
@@ -73,6 +76,9 @@ export function createConnectionFlow({
     onToolChatStarted: (...args) => hooks.onToolChatStarted(...args),
     onToolChatChunk: (...args) => hooks.onToolChatChunk(...args),
     onToolChatFinished: (...args) => hooks.onToolChatFinished(...args),
+    onToolReportFetchStarted: (...args) => hooks.onToolReportFetchStarted(...args),
+    onToolReportFetchChunk: (...args) => hooks.onToolReportFetchChunk(...args),
+    onToolReportFetchFinished: (...args) => hooks.onToolReportFetchFinished(...args),
     addLog,
   });
 

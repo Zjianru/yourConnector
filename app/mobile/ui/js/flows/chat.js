@@ -3,6 +3,7 @@
 // 2. 对接 WS 聊天事件与 Tauri 文件存储。
 
 import { asMap, asListOfMap } from "../utils/type.js";
+import { resolveReportPathFromTarget } from "../utils/markdown.js";
 import {
   CHAT_QUEUE_LIMIT,
   chatConversationKey,
@@ -63,6 +64,24 @@ export function createChatFlow({
   if (typeof state.chat.swipedConversationKey !== "string") {
     state.chat.swipedConversationKey = "";
   }
+  if (!state.chat.reportViewer || typeof state.chat.reportViewer !== "object") {
+    state.chat.reportViewer = {
+      visible: false,
+      conversationKey: "",
+      hostId: "",
+      toolId: "",
+      requestId: "",
+      filePath: "",
+      content: "",
+      status: "idle",
+      error: "",
+      bytesSent: 0,
+      bytesTotal: 0,
+    };
+  }
+  if (!state.chat.reportTransfersByRequestId || typeof state.chat.reportTransfersByRequestId !== "object") {
+    state.chat.reportTransfersByRequestId = {};
+  }
 
   let suppressOpenUntil = 0;
   const swipeState = {
@@ -77,6 +96,23 @@ export function createChatFlow({
       return `${prefix}_${window.crypto.randomUUID()}`;
     }
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  function createReportViewerState(overrides = {}) {
+    return {
+      visible: false,
+      conversationKey: "",
+      hostId: "",
+      toolId: "",
+      requestId: "",
+      filePath: "",
+      content: "",
+      status: "idle",
+      error: "",
+      bytesSent: 0,
+      bytesTotal: 0,
+      ...overrides,
+    };
   }
 
   function isChatTool(tool) {
@@ -816,6 +852,146 @@ export function createChatFlow({
     });
   }
 
+  function ensureReportTransfer(requestId, meta = {}) {
+    const normalizedRequestId = String(requestId || "").trim();
+    if (!normalizedRequestId) return null;
+    const existing = asMap(state.chat.reportTransfersByRequestId[normalizedRequestId]);
+    const next = {
+      requestId: normalizedRequestId,
+      conversationKey: String(meta.conversationKey || existing.conversationKey || ""),
+      hostId: String(meta.hostId || existing.hostId || ""),
+      runtimeToolId: String(meta.runtimeToolId || existing.runtimeToolId || ""),
+      filePath: String(meta.filePath || existing.filePath || ""),
+      content: String(existing.content || ""),
+      status: String(meta.status || existing.status || "requested"),
+      error: String(meta.error || existing.error || ""),
+      bytesSent: Number(meta.bytesSent ?? existing.bytesSent ?? 0),
+      bytesTotal: Number(meta.bytesTotal ?? existing.bytesTotal ?? 0),
+      chunkIndex: Number(meta.chunkIndex ?? existing.chunkIndex ?? -1),
+    };
+    state.chat.reportTransfersByRequestId[normalizedRequestId] = next;
+    return next;
+  }
+
+  function removeReportTransfer(requestId) {
+    const normalizedRequestId = String(requestId || "").trim();
+    if (!normalizedRequestId) return;
+    delete state.chat.reportTransfersByRequestId[normalizedRequestId];
+  }
+
+  function syncReportViewerByRequestId(requestId, overrides = {}) {
+    const viewer = asMap(state.chat.reportViewer);
+    const normalizedRequestId = String(requestId || "").trim();
+    if (!normalizedRequestId || String(viewer.requestId || "") !== normalizedRequestId) return;
+    const transfer = asMap(state.chat.reportTransfersByRequestId[normalizedRequestId]);
+    state.chat.reportViewer = createReportViewerState({
+      ...viewer,
+      visible: Boolean(viewer.visible),
+      requestId: normalizedRequestId,
+      conversationKey: String(transfer.conversationKey || viewer.conversationKey || ""),
+      hostId: String(transfer.hostId || viewer.hostId || ""),
+      toolId: String(transfer.runtimeToolId || viewer.toolId || ""),
+      filePath: String(transfer.filePath || viewer.filePath || ""),
+      content: String(transfer.content || viewer.content || ""),
+      status: String(transfer.status || viewer.status || "loading"),
+      error: String(transfer.error || viewer.error || ""),
+      bytesSent: Number(transfer.bytesSent || 0),
+      bytesTotal: Number(transfer.bytesTotal || 0),
+      ...overrides,
+    });
+  }
+
+  function showReportError(conv, filePath, reason) {
+    const viewer = createReportViewerState({
+      visible: true,
+      conversationKey: String(conv?.key || ""),
+      hostId: String(conv?.hostId || ""),
+      toolId: resolveConversationRuntimeToolId(conv),
+      requestId: "",
+      filePath: String(filePath || ""),
+      content: "",
+      status: "failed",
+      error: String(reason || "报告拉取失败"),
+      bytesSent: 0,
+      bytesTotal: 0,
+    });
+    state.chat.reportViewer = viewer;
+  }
+
+  function requestReportFetch(conv, filePath) {
+    const normalizedPath = String(filePath || "").trim();
+    if (!conv || !normalizedPath) return;
+    if (!normalizedPath.startsWith("/") || !normalizedPath.toLowerCase().endsWith(".md")) {
+      showReportError(conv, normalizedPath, "仅支持读取绝对路径下的 .md 报告。");
+      render();
+      return;
+    }
+    const runtimeToolId = resolveConversationRuntimeToolId(conv);
+    if (!runtimeToolId) {
+      showReportError(conv, normalizedPath, "当前工具未在线，无法读取报告。");
+      render();
+      return;
+    }
+    const requestId = createId("rpt");
+    const transfer = ensureReportTransfer(requestId, {
+      conversationKey: conv.key,
+      hostId: conv.hostId,
+      runtimeToolId,
+      filePath: normalizedPath,
+      status: "requested",
+      error: "",
+      bytesSent: 0,
+      bytesTotal: 0,
+      chunkIndex: -1,
+    });
+    if (!transfer) return;
+    state.chat.reportViewer = createReportViewerState({
+      visible: true,
+      conversationKey: conv.key,
+      hostId: conv.hostId,
+      toolId: runtimeToolId,
+      requestId,
+      filePath: normalizedPath,
+      content: "",
+      status: "loading",
+      error: "",
+      bytesSent: 0,
+      bytesTotal: 0,
+    });
+    const sent = sendSocketEvent(
+      conv.hostId,
+      "tool_report_fetch_request",
+      {
+        toolId: runtimeToolId,
+        conversationKey: conv.key,
+        requestId,
+        filePath: normalizedPath,
+      },
+      {
+        action: "tool_report_fetch_request",
+        traceId: requestId.replace(/^rpt_/, "trc_"),
+        toolId: runtimeToolId,
+      },
+    );
+    if (!sent) {
+      removeReportTransfer(requestId);
+      showReportError(conv, normalizedPath, "发送失败：宿主机未连接。");
+    }
+    render();
+  }
+
+  function onReportPathClick(event) {
+    const reportPath = resolveReportPathFromTarget(event.target);
+    if (!reportPath) return false;
+    const conv = activeConversation();
+    if (!conv) return false;
+    if (state.chat.messageSelectionModeByKey[conv.key]) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    requestReportFetch(conv, reportPath);
+    return true;
+  }
+
   function ensureConversationByPayload(hostId, payload) {
     const runtimeToolId = String(payload.toolId || "").trim();
     const logicalToolId = mapLogicalToolId(hostId, runtimeToolId);
@@ -977,6 +1153,102 @@ export function createChatFlow({
     maybeDispatchNext(conv.key);
   }
 
+  function onToolReportFetchStarted(hostId, payload) {
+    const data = asMap(payload);
+    const conv = ensureConversationByPayload(hostId, data);
+    if (!conv) return;
+    const requestId = String(data.requestId || "").trim();
+    if (!requestId) return;
+    const transfer = ensureReportTransfer(requestId, {
+      conversationKey: conv.key,
+      hostId: conv.hostId,
+      runtimeToolId: String(data.toolId || conv.runtimeToolId || ""),
+      filePath: String(data.filePath || ""),
+      status: "started",
+      error: "",
+      bytesSent: Number(data.bytesSent || 0),
+      bytesTotal: Number(data.bytesTotal || 0),
+      chunkIndex: -1,
+    });
+    if (!transfer) return;
+    syncReportViewerByRequestId(requestId, {
+      status: "loading",
+      error: "",
+      bytesSent: transfer.bytesSent,
+      bytesTotal: transfer.bytesTotal,
+    });
+    render();
+  }
+
+  function onToolReportFetchChunk(hostId, payload) {
+    const data = asMap(payload);
+    const conv = ensureConversationByPayload(hostId, data);
+    if (!conv) return;
+    const requestId = String(data.requestId || "").trim();
+    if (!requestId) return;
+    const transfer = ensureReportTransfer(requestId, {
+      conversationKey: conv.key,
+      hostId: conv.hostId,
+      runtimeToolId: String(data.toolId || conv.runtimeToolId || ""),
+      filePath: String(data.filePath || ""),
+      status: "streaming",
+      error: "",
+      bytesSent: Number(data.bytesSent || 0),
+      bytesTotal: Number(data.bytesTotal || 0),
+      chunkIndex: Number(data.chunkIndex || 0),
+    });
+    if (!transfer) return;
+    transfer.content = `${transfer.content || ""}${String(data.chunk || "")}`;
+    syncReportViewerByRequestId(requestId, {
+      status: "streaming",
+      content: transfer.content,
+      error: "",
+      bytesSent: Number(data.bytesSent || 0),
+      bytesTotal: Number(data.bytesTotal || transfer.bytesTotal || 0),
+    });
+    render();
+  }
+
+  function onToolReportFetchFinished(hostId, payload) {
+    const data = asMap(payload);
+    const conv = ensureConversationByPayload(hostId, data);
+    if (!conv) return;
+    const requestId = String(data.requestId || "").trim();
+    if (!requestId) return;
+    const status = String(data.status || "failed").trim().toLowerCase();
+    const reason = String(data.reason || "").trim();
+    const transfer = ensureReportTransfer(requestId, {
+      conversationKey: conv.key,
+      hostId: conv.hostId,
+      runtimeToolId: String(data.toolId || conv.runtimeToolId || ""),
+      filePath: String(data.filePath || ""),
+      status,
+      error: reason,
+      bytesSent: Number(data.bytesSent || 0),
+      bytesTotal: Number(data.bytesTotal || 0),
+      chunkIndex: Number(data.chunkIndex || 0),
+    });
+    if (!transfer) return;
+    if (status === "completed") {
+      syncReportViewerByRequestId(requestId, {
+        status: "completed",
+        error: "",
+        content: transfer.content || "",
+        bytesSent: Number(data.bytesSent || transfer.bytesSent || 0),
+        bytesTotal: Number(data.bytesTotal || transfer.bytesTotal || 0),
+      });
+    } else {
+      syncReportViewerByRequestId(requestId, {
+        status,
+        error: reason || "报告拉取失败",
+        bytesSent: Number(data.bytesSent || transfer.bytesSent || 0),
+        bytesTotal: Number(data.bytesTotal || transfer.bytesTotal || 0),
+      });
+    }
+    removeReportTransfer(requestId);
+    render();
+  }
+
   function onChatListTouchStart(event) {
     const row = event.target.closest("[data-chat-row]");
     const touch = event.touches && event.touches[0];
@@ -1103,6 +1375,9 @@ export function createChatFlow({
   function onMessagesClick(event) {
     const conv = activeConversation();
     if (!conv) return;
+    if (onReportPathClick(event)) {
+      return;
+    }
     const expandBtn = event.target.closest("[data-chat-expand-message]");
     if (expandBtn) {
       if (state.chat.messageSelectionModeByKey[conv.key]) return;
@@ -1125,6 +1400,10 @@ export function createChatFlow({
     state.chat.selectedMessageIdsByKey[conv.key] = selected;
     normalizeMessageSelectionByConversation(conv);
     render();
+  }
+
+  function onMessageFullBodyClick(event) {
+    onReportPathClick(event);
   }
 
   function deleteSelectedMessages() {
@@ -1268,6 +1547,8 @@ export function createChatFlow({
       state.chat.messageSelectionModeByKey = {};
       state.chat.selectedMessageIdsByKey = {};
       state.chat.swipedConversationKey = "";
+      state.chat.reportViewer = createReportViewerState();
+      state.chat.reportTransfersByRequestId = {};
       state.chat.hydrated = true;
       normalizeConversationOnlineState();
       void persistIndex();
@@ -1285,6 +1566,8 @@ export function createChatFlow({
       state.chat.messageSelectionModeByKey = {};
       state.chat.selectedMessageIdsByKey = {};
       state.chat.swipedConversationKey = "";
+      state.chat.reportViewer = createReportViewerState();
+      state.chat.reportTransfersByRequestId = {};
       state.chat.hydrated = true;
       normalizeConversationOnlineState();
       render();
@@ -1304,6 +1587,7 @@ export function createChatFlow({
     ui.chatQueue.addEventListener("click", onQueueClick);
     ui.chatQueueSummary.addEventListener("click", onQueueSummaryClick);
     ui.chatMessages.addEventListener("click", onMessagesClick);
+    ui.chatMessageFullBody.addEventListener("click", onMessageFullBodyClick);
     ui.chatInput.addEventListener("input", () => onDraftInput(ui.chatInput.value));
     ui.chatSendBtn.addEventListener("click", enqueueMessage);
     ui.chatStopBtn.addEventListener("click", stopRunningMessage);
@@ -1324,6 +1608,9 @@ export function createChatFlow({
     onToolChatStarted,
     onToolChatChunk,
     onToolChatFinished,
+    onToolReportFetchStarted,
+    onToolReportFetchChunk,
+    onToolReportFetchFinished,
     enqueueMessage,
     stopRunningMessage,
     openConversation,

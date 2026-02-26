@@ -19,8 +19,9 @@ use crate::{
     config::Config,
     control::{
         CONTROLLER_BIND_UPDATED_EVENT, SidecarCommand, SidecarCommandEnvelope,
-        TOOL_CHAT_FINISHED_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT, TOOL_WHITELIST_UPDATED_EVENT,
-        ToolProcessAction, command_feedback_event, command_feedback_parts,
+        TOOL_CHAT_FINISHED_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT,
+        TOOL_REPORT_FETCH_FINISHED_EVENT, TOOL_WHITELIST_UPDATED_EVENT, ToolProcessAction,
+        command_feedback_event, command_feedback_parts,
     },
     session::{snapshots::is_fallback_tool, transport::send_event},
     stores::{ControllerDevicesStore, ToolWhitelistStore},
@@ -31,6 +32,7 @@ use super::chat::{
     CancelChatOutcome, ChatCancelInput, ChatEventSender, ChatRequestInput, ChatRuntime,
     StartChatOutcome,
 };
+use super::report::{ReportEventSender, ReportRequestInput, ReportRuntime, StartReportOutcome};
 
 /// Relay WebSocket 写端类型别名。
 pub(crate) type RelayWriter = SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, Message>;
@@ -45,6 +47,8 @@ pub(crate) struct SidecarCommandContext<'a> {
     pub(crate) controllers: &'a mut ControllerDevicesStore,
     pub(crate) chat_runtime: &'a mut ChatRuntime,
     pub(crate) chat_event_tx: &'a ChatEventSender,
+    pub(crate) report_runtime: &'a mut ReportRuntime,
+    pub(crate) report_event_tx: &'a ReportEventSender,
 }
 
 /// sidecar 命令处理结果：声明后续是否需要刷新快照/详情。
@@ -116,6 +120,8 @@ pub(crate) async fn handle_sidecar_command(
         controllers,
         chat_runtime,
         chat_event_tx,
+        report_runtime,
+        report_event_tx,
     } = ctx;
 
     let trace_id = if command_envelope.trace_id.trim().is_empty() {
@@ -181,39 +187,67 @@ pub(crate) async fn handle_sidecar_command(
     };
 
     if !allowed {
-        if let SidecarCommand::ToolChatRequest {
-            tool_id,
-            conversation_key,
-            request_id,
-            queue_item_id,
-            ..
-        }
-        | SidecarCommand::ToolChatCancel {
-            tool_id,
-            conversation_key,
-            request_id,
-            queue_item_id,
-        } = &command_envelope.command
-        {
-            send_event(
-                ws_writer,
-                &cfg.system_id,
-                seq,
-                TOOL_CHAT_FINISHED_EVENT,
-                trace_id.as_deref(),
-                json!({
-                    "toolId": tool_id,
-                    "conversationKey": conversation_key,
-                    "requestId": request_id,
-                    "queueItemId": queue_item_id,
-                    "status": "failed",
-                    "text": "",
-                    "reason": allow_reason,
-                    "meta": {},
-                }),
-            )
-            .await?;
-            return Ok(SidecarCommandOutcome::default());
+        match &command_envelope.command {
+            SidecarCommand::ToolChatRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                queue_item_id,
+                ..
+            }
+            | SidecarCommand::ToolChatCancel {
+                tool_id,
+                conversation_key,
+                request_id,
+                queue_item_id,
+            } => {
+                send_event(
+                    ws_writer,
+                    &cfg.system_id,
+                    seq,
+                    TOOL_CHAT_FINISHED_EVENT,
+                    trace_id.as_deref(),
+                    json!({
+                        "toolId": tool_id,
+                        "conversationKey": conversation_key,
+                        "requestId": request_id,
+                        "queueItemId": queue_item_id,
+                        "status": "failed",
+                        "text": "",
+                        "reason": allow_reason,
+                        "meta": {},
+                    }),
+                )
+                .await?;
+                return Ok(SidecarCommandOutcome::default());
+            }
+            SidecarCommand::ToolReportFetchRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                file_path,
+            } => {
+                send_event(
+                    ws_writer,
+                    &cfg.system_id,
+                    seq,
+                    TOOL_REPORT_FETCH_FINISHED_EVENT,
+                    trace_id.as_deref(),
+                    json!({
+                        "toolId": tool_id,
+                        "conversationKey": conversation_key,
+                        "requestId": request_id,
+                        "filePath": file_path,
+                        "status": "failed",
+                        "reason": allow_reason,
+                        "bytesSent": 0,
+                        "bytesTotal": 0,
+                    }),
+                )
+                .await?;
+                return Ok(SidecarCommandOutcome::default());
+            }
+            _ => {}
         }
 
         let (action, tool_id) = command_feedback_parts(&command_envelope.command);
@@ -518,6 +552,75 @@ pub(crate) async fn handle_sidecar_command(
                             "text": "",
                             "reason": "未找到可取消的运行中请求。",
                             "meta": {},
+                        }),
+                    )
+                    .await?;
+                    SidecarCommandOutcome::default()
+                }
+            }
+        }
+        SidecarCommand::ToolReportFetchRequest {
+            tool_id,
+            conversation_key,
+            request_id,
+            file_path,
+        } => {
+            let tool = discovered_tools
+                .iter()
+                .find(|item| item.tool_id == tool_id)
+                .cloned();
+            let Some(target_tool) = tool else {
+                send_event(
+                    ws_writer,
+                    &cfg.system_id,
+                    seq,
+                    TOOL_REPORT_FETCH_FINISHED_EVENT,
+                    trace_id.as_deref(),
+                    json!({
+                        "toolId": tool_id,
+                        "conversationKey": conversation_key,
+                        "requestId": request_id,
+                        "filePath": file_path,
+                        "status": "failed",
+                        "reason": "工具未在线或未接入，无法读取报告。",
+                        "bytesSent": 0,
+                        "bytesTotal": 0,
+                    }),
+                )
+                .await?;
+                return Ok(SidecarCommandOutcome::default());
+            };
+
+            let start = report_runtime.start_request(
+                ReportRequestInput {
+                    tool_id: tool_id.clone(),
+                    conversation_key: conversation_key.clone(),
+                    request_id: request_id.clone(),
+                    file_path: file_path.clone(),
+                },
+                target_tool,
+                trace_id.clone(),
+                report_event_tx.clone(),
+            );
+
+            match start {
+                StartReportOutcome::Started => SidecarCommandOutcome::default(),
+                StartReportOutcome::Busy { reason } => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_REPORT_FETCH_FINISHED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolId": tool_id,
+                            "conversationKey": conversation_key,
+                            "requestId": request_id,
+                            "filePath": file_path,
+                            "status": "busy",
+                            "reason": reason,
+                            "bytesSent": 0,
+                            "bytesTotal": 0,
                         }),
                     )
                     .await?;

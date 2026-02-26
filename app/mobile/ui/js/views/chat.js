@@ -3,6 +3,7 @@
 // 2. 提供基础 Markdown 安全渲染（段落/列表/代码）。
 
 import { escapeHtml } from "../utils/dom.js";
+import { renderMarkdown } from "../utils/markdown.js";
 
 /**
  * 创建聊天视图渲染器。
@@ -19,107 +20,15 @@ export function createChatView({ state, ui }) {
     return `${hh}:${mm}`;
   }
 
-  function renderMarkdown(text) {
-    const escaped = escapeHtml(String(text || ""))
-      .replace(/\r\n/g, "\n")
-      .replace(/\\n/g, "\n");
-
-    const codeBlocks = [];
-    const withCodeTokens = escaped.replace(/```([\s\S]*?)```/g, (_all, code) => {
-      const tokenIndex = codeBlocks.push(
-        `<pre><code>${String(code || "").replace(/^\n+|\n+$/g, "")}</code></pre>`,
-      ) - 1;
-      return `@@CODE_BLOCK_${tokenIndex}@@`;
-    });
-
-    function renderInline(line) {
-      const inlineCodeTokens = [];
-      let output = String(line || "").replace(/`([^`]+)`/g, (_all, code) => {
-        const tokenIndex = inlineCodeTokens.push(`<code>${code}</code>`) - 1;
-        return `@@INLINE_CODE_${tokenIndex}@@`;
-      });
-      output = output
-        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-        .replace(/__([^_]+)__/g, "<strong>$1</strong>");
-      output = output.replace(/@@INLINE_CODE_(\d+)@@/g, (_all, idx) => {
-        const token = inlineCodeTokens[Number(idx)];
-        return token || "";
-      });
-      return output;
+  function renderBubbleMarkdown(text) {
+    const html = String(renderMarkdown(text || "") || "").trim();
+    if (html.startsWith("<p>") && html.endsWith("</p>")) {
+      const inner = html.slice(3, -4);
+      if (!inner.includes("<p>") && !inner.includes("</p>")) {
+        return inner;
+      }
     }
-
-    const html = [];
-    const lines = withCodeTokens.split("\n");
-    let paragraphLines = [];
-    let listType = "";
-    let listItems = [];
-
-    function flushParagraph() {
-      if (!paragraphLines.length) return;
-      html.push(`<p>${paragraphLines.map((line) => renderInline(line)).join("<br />")}</p>`);
-      paragraphLines = [];
-    }
-
-    function flushList() {
-      if (!listItems.length) return;
-      const tag = listType === "ordered" ? "ol" : "ul";
-      html.push(`<${tag}>${listItems.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${tag}>`);
-      listItems = [];
-      listType = "";
-    }
-
-    for (const rawLine of lines) {
-      const line = String(rawLine || "");
-      const trimmed = line.trim();
-
-      if (!trimmed) {
-        flushParagraph();
-        flushList();
-        continue;
-      }
-
-      if (/^@@CODE_BLOCK_\d+@@$/.test(trimmed)) {
-        flushParagraph();
-        flushList();
-        html.push(trimmed);
-        continue;
-      }
-
-      const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
-      if (heading) {
-        flushParagraph();
-        flushList();
-        const level = heading[1].length;
-        html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-        continue;
-      }
-
-      const unordered = trimmed.match(/^[\-*]\s+(.+)$/);
-      const ordered = trimmed.match(/^\d+\.\s+(.+)$/);
-      if (unordered || ordered) {
-        flushParagraph();
-        const nextType = ordered ? "ordered" : "unordered";
-        if (listType && listType !== nextType) {
-          flushList();
-        }
-        listType = nextType;
-        listItems.push((ordered || unordered)[1]);
-        continue;
-      }
-
-      if (listItems.length) {
-        flushList();
-      }
-      paragraphLines.push(trimmed);
-    }
-
-    flushParagraph();
-    flushList();
-
-    return html.join("").replace(/@@CODE_BLOCK_(\d+)@@/g, (_all, idx) => {
-      const token = codeBlocks[Number(idx)];
-      return token || "";
-    });
+    return html;
   }
 
   function initials(text) {
@@ -320,6 +229,7 @@ export function createChatView({ state, ui }) {
             ? `<div class="chat-message-status-row"><span class="chat-message-status">${escapeHtml(msg.status)}</span></div>`
             : "";
           const timeText = formatTime(msg.ts);
+          const messageBodyHtml = renderBubbleMarkdown(msg.text || "");
           return `
           <div
             class="chat-message ${escapeHtml(msg.role || "assistant")} ${escapeHtml(msg.status || "")} ${selectClass}"
@@ -327,10 +237,13 @@ export function createChatView({ state, ui }) {
             data-chat-message-selectable="${selectable ? "1" : "0"}"
           >
             <div class="chat-message-body-wrap ${collapsed ? "collapsed" : ""}">
-              <div class="chat-message-body markdown-body">${renderMarkdown(msg.text || "")}</div>
+              <div class="chat-message-body markdown-body">
+                ${messageBodyHtml}
+                ${collapsed ? "" : `<span class="chat-message-time-inline">${timeText}</span>`}
+              </div>
               ${collapsed ? '<div class="chat-message-body-fade"></div>' : ""}
-              <span class="chat-message-time-inline">${timeText}</span>
             </div>
+            ${collapsed ? `<div class="chat-message-time-row"><span class="chat-message-time-inline">${timeText}</span></div>` : ""}
             ${collapsed ? `
               <div class="chat-message-expand-wrap">
                 <button

@@ -2,6 +2,7 @@
 
 mod chat;
 mod command;
+mod report;
 mod url;
 
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use self::{
     chat::{ChatEventSender, ChatRuntime},
     command::{SidecarCommandContext, handle_sidecar_command},
+    report::{ReportEventSender, ReportRuntime},
     url::{raw_payload_logging_enabled, sidecar_ws_url},
 };
 use crate::{
@@ -40,10 +42,12 @@ struct PendingDetailsRefresh {
     dirty: bool,
 }
 
-fn is_chat_priority_command(command: &SidecarCommandEnvelope) -> bool {
+fn is_priority_command(command: &SidecarCommandEnvelope) -> bool {
     matches!(
         command.command,
-        SidecarCommand::ToolChatRequest { .. } | SidecarCommand::ToolChatCancel { .. }
+        SidecarCommand::ToolChatRequest { .. }
+            | SidecarCommand::ToolChatCancel { .. }
+            | SidecarCommand::ToolReportFetchRequest { .. }
     )
 }
 
@@ -84,6 +88,8 @@ async fn handle_command_envelope(
     controllers: &mut ControllerDevicesStore,
     chat_runtime: &mut ChatRuntime,
     chat_event_tx: &ChatEventSender,
+    report_runtime: &mut ReportRuntime,
+    report_event_tx: &ReportEventSender,
     command_envelope: SidecarCommandEnvelope,
     pending_details_refresh: &mut PendingDetailsRefresh,
 ) -> Result<()> {
@@ -97,6 +103,8 @@ async fn handle_command_envelope(
             controllers,
             chat_runtime,
             chat_event_tx,
+            report_runtime,
+            report_event_tx,
         },
         command_envelope,
     )
@@ -186,6 +194,8 @@ async fn run_session(cfg: &Config) -> Result<()> {
     let (high_cmd_tx, mut high_cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
     let (normal_cmd_tx, mut normal_cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
     let (chat_event_tx, mut chat_event_rx) = mpsc::unbounded_channel::<chat::ChatEventEnvelope>();
+    let (report_event_tx, mut report_event_rx) =
+        mpsc::unbounded_channel::<report::ReportEventEnvelope>();
     let log_raw_payload = raw_payload_logging_enabled();
 
     // reader_task 专门读取 relay 下行消息，并抽取 sidecar 控制命令。
@@ -202,7 +212,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
                             command.source_client_type,
                             command.source_device_id
                         );
-                        let target = if is_chat_priority_command(&command) {
+                        let target = if is_priority_command(&command) {
                             &high_cmd_tx
                         } else {
                             &normal_cmd_tx
@@ -238,6 +248,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
     let mut whitelist = ToolWhitelistStore::load();
     let mut controllers = ControllerDevicesStore::load();
     let mut chat_runtime = ChatRuntime::default();
+    let mut report_runtime = ReportRuntime::default();
     if let Err(err) = controllers.seed(&cfg.controller_device_ids) {
         warn!("seed controller devices failed: {err}");
     }
@@ -283,9 +294,14 @@ async fn run_session(cfg: &Config) -> Result<()> {
     loop {
         tokio::select! {
             biased;
-            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::signal::ctrl_c() => {
+                chat_runtime.abort_all();
+                report_runtime.abort_all();
+                return Ok(());
+            },
             done = &mut reader_task => {
                 chat_runtime.abort_all();
+                report_runtime.abort_all();
                 match done {
                     Ok(_) => return Err(anyhow!("relay read loop closed")),
                     Err(err) => return Err(anyhow!("relay read task join error: {err}")),
@@ -307,6 +323,8 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &mut controllers,
                     &mut chat_runtime,
                     &chat_event_tx,
+                    &mut report_runtime,
+                    &report_event_tx,
                     command_envelope,
                     &mut pending_details_refresh,
                 )
@@ -328,6 +346,8 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &mut controllers,
                     &mut chat_runtime,
                     &chat_event_tx,
+                    &mut report_runtime,
+                    &report_event_tx,
                     command_envelope,
                     &mut pending_details_refresh,
                 )
@@ -347,6 +367,22 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     chat_event.event_type,
                     chat_event.trace_id.as_deref(),
                     chat_event.payload,
+                ).await?;
+            }
+            maybe_report_event = report_event_rx.recv() => {
+                let Some(report_event) = maybe_report_event else {
+                    continue;
+                };
+                if let Some(finalize_key) = report_event.finalize.as_ref() {
+                    report_runtime.mark_finished(finalize_key);
+                }
+                send_event(
+                    &mut ws_writer,
+                    &cfg.system_id,
+                    &mut seq,
+                    report_event.event_type,
+                    report_event.trace_id.as_deref(),
+                    report_event.payload,
                 ).await?;
             }
             _ = heartbeat_ticker.tick() => {

@@ -26,12 +26,14 @@ import { createHostNoticeModal } from "./modals/host-notice.js";
 import { createPairFailureModal } from "./modals/pair-failure.js";
 import { createToolDetailModal } from "./modals/tool-detail.js";
 import { createAddToolModal } from "./modals/add-tool.js";
+import { createReportViewerModal } from "./modals/report-viewer.js";
 
 const hostState = createHostState();
 const runtimeState = createRuntimeState({ persistConfig: hostState.persistConfig });
 
 const noticeModal = createHostNoticeModal({ state, ui });
 const pairFailureModal = createPairFailureModal({ state, ui });
+const reportViewerModal = createReportViewerModal({ state, ui });
 
 const authFlow = createConnectionAuth({
   state,
@@ -113,7 +115,7 @@ const toolDetailModal = createToolDetailModal({
 
 /**
  * 统一关闭弹窗栈，避免多个 modal 叠加导致“关一个露一个”。
- * @param {"none"|"pairFailure"|"pairFlow"|"toolDetail"|"addTool"|"hostManage"|"hostEdit"|"hostMetrics"|"hostNotice"} keep 保留的弹窗类型。
+ * @param {"none"|"pairFailure"|"pairFlow"|"toolDetail"|"addTool"|"hostManage"|"hostEdit"|"hostMetrics"|"hostNotice"|"reportViewer"} keep 保留的弹窗类型。
  */
 function closeModalStack(keep = "none") {
   if (keep !== "pairFailure") pairFailureModal.closePairFailureModal();
@@ -124,6 +126,7 @@ function closeModalStack(keep = "none") {
   if (keep !== "hostEdit" && hostManageFlowRef) hostManageFlowRef.closeHostEditModal();
   if (keep !== "hostMetrics" && hostManageFlowRef) hostManageFlowRef.closeHostMetricsModal();
   if (keep !== "hostNotice") noticeModal.closeHostNoticeModal();
+  if (keep !== "reportViewer") reportViewerModal.closeReportViewer();
 }
 
 /** 打开宿主管理弹窗（互斥模式）。 */
@@ -263,6 +266,9 @@ connectionFlow.setHooks({
   onToolChatStarted: chatFlow.onToolChatStarted,
   onToolChatChunk: chatFlow.onToolChatChunk,
   onToolChatFinished: chatFlow.onToolChatFinished,
+  onToolReportFetchStarted: chatFlow.onToolReportFetchStarted,
+  onToolReportFetchChunk: chatFlow.onToolReportFetchChunk,
+  onToolReportFetchFinished: chatFlow.onToolReportFetchFinished,
 });
 
 /**
@@ -343,6 +349,7 @@ function render() {
     addToolModal.renderAddToolModal();
     hostManageFlowRef.renderHostManageModal();
     hostManageFlowRef.renderHostMetricsModal();
+    reportViewerModal.renderReportViewer();
   } catch (error) {
     reportUiError("render", error);
   }
@@ -434,6 +441,7 @@ function bindEvents() {
     closeModalStack("hostEdit");
     if (hostManageFlowRef) hostManageFlowRef.openHostEditModal(hostId);
   } });
+  reportViewerModal.bindReportViewerModalEvents();
   addToolModal.bindAddToolModalEvents();
   toolDetailModal.bindToolDetailModalEvents();
 

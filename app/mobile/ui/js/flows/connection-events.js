@@ -28,6 +28,9 @@ export function createConnectionEvents({
   onToolChatStarted,
   onToolChatChunk,
   onToolChatFinished,
+  onToolReportFetchStarted,
+  onToolReportFetchChunk,
+  onToolReportFetchFinished,
   addLog,
 }) {
   function findRuntimeTool(runtime, hostId, toolId) {
@@ -190,6 +193,27 @@ export function createConnectionEvents({
       if (type === "tool_chat_finished") {
         if (typeof onToolChatFinished === "function") {
           onToolChatFinished(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_report_fetch_started") {
+        if (typeof onToolReportFetchStarted === "function") {
+          onToolReportFetchStarted(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_report_fetch_chunk") {
+        if (typeof onToolReportFetchChunk === "function") {
+          onToolReportFetchChunk(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_report_fetch_finished") {
+        if (typeof onToolReportFetchFinished === "function") {
+          onToolReportFetchFinished(hostId, payload, { traceId, eventId, eventType: type });
         }
       }
     } catch (_) {

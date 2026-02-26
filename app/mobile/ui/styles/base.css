@@ -859,7 +859,7 @@
         margin-bottom: 0;
         min-height: 0;
         height: 100%;
-        padding: 12px 12px 0;
+        padding: 12px 12px calc(env(safe-area-inset-bottom, 0px) + 62px);
         border-radius: 20px;
         gap: 8px;
       }
@@ -875,15 +875,19 @@
       }
 
       .app.chat-detail-layout #chatDetailPage .chat-composer {
-        margin-top: auto;
-        margin-left: -12px;
-        margin-right: -12px;
+        position: fixed;
+        left: 50%;
+        bottom: 0;
+        transform: translateX(-50%);
+        width: min(432px, calc(100% - 28px));
+        margin: 0;
         border: 0;
         background: transparent;
-        padding: 0 0 calc(env(safe-area-inset-bottom, 0px) + 1px);
+        padding: 6px 0 calc(env(safe-area-inset-bottom, 0px) + 2px);
         display: flex;
-        align-items: center;
+        align-items: flex-end;
         gap: 6px;
+        z-index: 58;
       }
 
       .app.chat-detail-layout #chatDetailPage .chat-composer textarea {
@@ -1078,9 +1082,14 @@
         word-break: break-word;
       }
 
+      .chat-message-body::after {
+        content: "";
+        display: block;
+        clear: both;
+      }
+
       .chat-message-body-wrap {
         position: relative;
-        padding-right: 42px;
       }
 
       .chat-message-body-wrap.collapsed {
@@ -1124,18 +1133,36 @@
       }
 
       .markdown-body p,
+      .markdown-body ol,
       .markdown-body ul,
-      .markdown-body pre {
+      .markdown-body pre,
+      .markdown-body table,
+      .markdown-body blockquote {
         margin: 0 0 8px;
       }
 
       .markdown-body p:last-child,
+      .markdown-body ol:last-child,
       .markdown-body ul:last-child,
       .markdown-body pre:last-child,
+      .markdown-body table:last-child,
+      .markdown-body blockquote:last-child,
       .markdown-body p:last-of-type,
+      .markdown-body ol:last-of-type,
       .markdown-body ul:last-of-type,
-      .markdown-body pre:last-of-type {
+      .markdown-body pre:last-of-type,
+      .markdown-body table:last-of-type,
+      .markdown-body blockquote:last-of-type {
         margin-bottom: 0;
+      }
+
+      .markdown-body ul,
+      .markdown-body ol {
+        padding-left: 18px;
+      }
+
+      .markdown-body li {
+        margin: 4px 0;
       }
 
       .markdown-body pre {
@@ -1146,18 +1173,131 @@
         overflow-x: auto;
       }
 
+      .markdown-body table {
+        width: 100%;
+        border-collapse: collapse;
+        border: 1px solid var(--line-soft);
+        border-radius: 10px;
+        overflow: hidden;
+        font-size: 12px;
+      }
+
+      .markdown-body th,
+      .markdown-body td {
+        border: 1px solid var(--line-soft);
+        padding: 6px 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .markdown-body th {
+        background: rgba(56, 189, 248, 0.14);
+      }
+
+      .markdown-body blockquote {
+        margin-left: 0;
+        margin-right: 0;
+        padding: 6px 10px;
+        border-left: 3px solid rgba(56, 189, 248, 0.66);
+        background: rgba(56, 189, 248, 0.08);
+      }
+
+      .markdown-body hr {
+        border: 0;
+        border-top: 1px solid var(--line-soft);
+        margin: 10px 0;
+      }
+
       .markdown-body code {
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
       }
 
+      .markdown-body a {
+        color: #86d8ff;
+        text-decoration: underline;
+        word-break: break-all;
+      }
+
+      .report-viewer-modal-card {
+        max-height: calc(100vh - 120px);
+      }
+
+      .report-viewer-path {
+        margin: 0;
+        color: rgba(191, 219, 254, 0.94);
+        font-family: "SF Mono", "Menlo", "Consolas", monospace;
+        word-break: break-all;
+      }
+
+      .report-viewer-progress-wrap {
+        margin-top: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .report-viewer-progress-track {
+        flex: 1;
+        height: 8px;
+        border-radius: 999px;
+        border: 1px solid var(--line-soft);
+        background: rgba(255, 255, 255, 0.05);
+        overflow: hidden;
+      }
+
+      .report-viewer-progress-bar {
+        height: 100%;
+        width: 0;
+        background: linear-gradient(135deg, #0ea5e9, #22d3ee);
+        transition: width 120ms linear;
+      }
+
+      .report-viewer-progress-label {
+        color: var(--text-sub);
+        font-size: 11px;
+        font-weight: 700;
+        min-width: 84px;
+        text-align: right;
+      }
+
+      .report-viewer-error {
+        margin-top: 8px;
+        margin-bottom: 0;
+        color: #fda4af;
+        min-height: 16px;
+      }
+
+      .report-viewer-body {
+        margin-top: 10px;
+        border: 1px solid var(--line-soft);
+        border-radius: 12px;
+        background: rgba(2, 10, 20, 0.66);
+        padding: 10px;
+        min-height: 180px;
+        max-height: calc(100vh - 320px);
+        overflow: auto;
+      }
+
       .chat-message-time-inline {
-        position: absolute;
-        right: 0;
-        bottom: 0;
+        float: right;
+        margin-left: 8px;
+        margin-top: 4px;
         color: var(--text-sub);
         font-size: 11px;
         line-height: 1.2;
+        white-space: nowrap;
         pointer-events: none;
+      }
+
+      .chat-message-time-row {
+        margin-top: 4px;
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      .chat-message-time-row .chat-message-time-inline {
+        float: none;
+        margin: 0;
       }
 
       .chat-message-status-row {
