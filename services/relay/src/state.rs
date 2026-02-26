@@ -1,8 +1,10 @@
 //! Relay 状态：在线连接房间与认证存储句柄。
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use axum::extract::ws::Message;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{RwLock, mpsc};
 use tracing::warn;
 use uuid::Uuid;
@@ -42,6 +44,33 @@ impl Default for AppState {
     }
 }
 
+/// 判定事件是否属于可丢弃/可覆盖的快照类消息。
+fn is_snapshot_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "heartbeat"
+            | "metrics_snapshot"
+            | "tools_snapshot"
+            | "tools_candidates"
+            | "tool_details_snapshot"
+    )
+}
+
+/// 生成快照队列覆盖键：同键仅保留最后一条。
+fn snapshot_queue_key(event_type: &str, raw: &str) -> String {
+    if event_type != "tool_details_snapshot" {
+        return event_type.to_string();
+    }
+
+    let target_tool_id = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .and_then(|value| value.get("payload").cloned())
+        .and_then(|payload| payload.get("targetToolId").cloned())
+        .and_then(|value| value.as_str().map(ToString::to_string))
+        .unwrap_or_default();
+    format!("{event_type}:{target_tool_id}")
+}
+
 /// 单个 system 房间状态。
 pub(crate) struct SystemRoom {
     /// 当前 system 配对令牌（sidecar 注册）。
@@ -68,8 +97,20 @@ impl SystemRoom {
 pub(crate) struct ClientHandle {
     /// 连接端类型（`app` / `sidecar`），用于在线 sidecar 判定。
     pub(crate) client_type: String,
-    pub(crate) sender: mpsc::UnboundedSender<Message>,
+    pub(crate) sender: mpsc::Sender<RelayWriteCommand>,
+    /// 慢客户端累计丢弃计数（仅快照类消息）。
+    pub(crate) drop_count: Arc<AtomicU64>,
 }
+
+/// Relay -> WS writer 命令。
+#[derive(Debug, Clone)]
+pub(crate) enum RelayWriteCommand {
+    Direct(Message),
+    Snapshot { key: String, msg: Message },
+}
+
+/// 单连接写队列上限。
+pub(crate) const WS_WRITE_QUEUE_CAPACITY: usize = 256;
 
 impl AppState {
     /// 注册 system 房间连接。
@@ -103,7 +144,7 @@ impl AppState {
             }
         }
         for sender in close_senders {
-            let _ = sender.send(Message::Close(None));
+            let _ = sender.try_send(RelayWriteCommand::Direct(Message::Close(None)));
         }
         if should_drop_room {
             guard.remove(system_id);
@@ -111,8 +152,20 @@ impl AppState {
     }
 
     /// 广播到同 system 其他连接。
-    pub(crate) async fn broadcast(&self, system_id: &str, origin_id: Uuid, msg: String) {
+    pub(crate) async fn broadcast(
+        &self,
+        system_id: &str,
+        origin_id: Uuid,
+        msg: String,
+        event_type: &str,
+    ) {
         let mut stale = Vec::new();
+        let snapshot_event = is_snapshot_event(event_type);
+        let snapshot_key = if snapshot_event {
+            snapshot_queue_key(event_type, &msg)
+        } else {
+            String::new()
+        };
 
         {
             let guard = self.systems.read().await;
@@ -121,12 +174,49 @@ impl AppState {
                     if *client_id == origin_id {
                         continue;
                     }
-                    if handle
-                        .sender
-                        .send(Message::Text(msg.clone().into()))
-                        .is_err()
-                    {
-                        stale.push(*client_id);
+                    let payload = Message::Text(msg.clone().into());
+                    let queued = if snapshot_event {
+                        handle.sender.try_send(RelayWriteCommand::Snapshot {
+                            key: snapshot_key.clone(),
+                            msg: payload,
+                        })
+                    } else {
+                        handle.sender.try_send(RelayWriteCommand::Direct(payload))
+                    };
+
+                    match queued {
+                        Ok(_) => {}
+                        Err(TrySendError::Closed(_)) => {
+                            stale.push(*client_id);
+                        }
+                        Err(TrySendError::Full(_)) => {
+                            let queue_depth =
+                                WS_WRITE_QUEUE_CAPACITY.saturating_sub(handle.sender.capacity());
+                            if snapshot_event {
+                                let drop_count =
+                                    handle.drop_count.fetch_add(1, Ordering::Relaxed) + 1;
+                                warn!(
+                                    concat!(
+                                        "ws writer queue full system={} client={} type={} ",
+                                        "queueDepth={} dropCount={} slowClientDisconnect=false"
+                                    ),
+                                    system_id, client_id, event_type, queue_depth, drop_count
+                                );
+                                continue;
+                            }
+                            warn!(
+                                concat!(
+                                    "ws writer queue full system={} client={} type={} ",
+                                    "queueDepth={} dropCount={} slowClientDisconnect=true"
+                                ),
+                                system_id,
+                                client_id,
+                                event_type,
+                                queue_depth,
+                                handle.drop_count.load(Ordering::Relaxed)
+                            );
+                            stale.push(*client_id);
+                        }
                     }
                 }
             }
@@ -149,7 +239,7 @@ impl AppState {
             }
         }
         for sender in close_senders {
-            let _ = sender.send(Message::Close(None));
+            let _ = sender.try_send(RelayWriteCommand::Direct(Message::Close(None)));
         }
         if should_drop_room {
             guard.remove(system_id);

@@ -6,6 +6,8 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 use yc_shared_protocol::{EventEnvelope, now_rfc3339_nanos};
 
+use crate::state::RelayWriteCommand;
+
 /// 事件摘要：用于日志追踪，避免打印完整 payload。
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EnvelopeSummary {
@@ -144,7 +146,7 @@ pub(crate) fn summarize_envelope(raw: &str) -> EnvelopeSummary {
 
 /// 连接成功后回推 server_presence。
 pub(crate) fn send_server_presence(
-    tx: &mpsc::UnboundedSender<Message>,
+    tx: &mpsc::Sender<RelayWriteCommand>,
     system_id: &str,
     client_type: &str,
     device_id: &str,
@@ -160,6 +162,6 @@ pub(crate) fn send_server_presence(
     );
 
     if let Ok(raw) = serde_json::to_string(&env) {
-        let _ = tx.send(Message::Text(raw.into()));
+        let _ = tx.try_send(RelayWriteCommand::Direct(Message::Text(raw.into())));
     }
 }

@@ -9,6 +9,9 @@ use axum::{
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -16,7 +19,7 @@ use uuid::Uuid;
 use crate::{
     api::types::{PairBootstrapRequest, WsQuery},
     pairing::bootstrap::print_pairing_banner_from_relay,
-    state::{AppState, ClientHandle},
+    state::{AppState, ClientHandle, RelayWriteCommand, WS_WRITE_QUEUE_CAPACITY},
     ws::envelope::{sanitize_envelope, send_server_presence, summarize_envelope},
 };
 
@@ -53,7 +56,8 @@ pub(crate) async fn ws_handler(
 async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
     let client_id = Uuid::new_v4();
     let (mut ws_sender, mut ws_reader) = socket.split();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+    let (tx, mut rx) = mpsc::channel::<RelayWriteCommand>(WS_WRITE_QUEUE_CAPACITY);
+    let drop_count = Arc::new(AtomicU64::new(0));
 
     state
         .insert(
@@ -63,6 +67,7 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
             ClientHandle {
                 client_type: q.client_type.clone(),
                 sender: tx.clone(),
+                drop_count: drop_count.clone(),
             },
         )
         .await;
@@ -91,9 +96,41 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
     send_server_presence(&tx, &q.system_id, &q.client_type, &q.device_id);
 
     let writer = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if ws_sender.send(msg).await.is_err() {
-                break;
+        let mut snapshot_latest: HashMap<String, Message> = HashMap::new();
+        while let Some(command) = rx.recv().await {
+            match command {
+                RelayWriteCommand::Direct(msg) => {
+                    if ws_sender.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+                RelayWriteCommand::Snapshot { key, msg } => {
+                    snapshot_latest.insert(key, msg);
+                }
+            }
+
+            while !snapshot_latest.is_empty() {
+                let Some(next_key) = snapshot_latest.keys().next().cloned() else {
+                    break;
+                };
+                let Some(snapshot_msg) = snapshot_latest.remove(&next_key) else {
+                    continue;
+                };
+                if ws_sender.send(snapshot_msg).await.is_err() {
+                    return;
+                }
+                while let Ok(next_command) = rx.try_recv() {
+                    match next_command {
+                        RelayWriteCommand::Direct(msg) => {
+                            if ws_sender.send(msg).await.is_err() {
+                                return;
+                            }
+                        }
+                        RelayWriteCommand::Snapshot { key, msg } => {
+                            snapshot_latest.insert(key, msg);
+                        }
+                    }
+                }
             }
         }
     });
@@ -137,7 +174,9 @@ async fn handle_socket(state: AppState, socket: WebSocket, q: WsQuery) {
             summary.tool_id
         );
 
-        state.broadcast(&q.system_id, client_id, sanitized).await;
+        state
+            .broadcast(&q.system_id, client_id, sanitized, &summary.event_type)
+            .await;
     }
 
     state.remove(&q.system_id, client_id).await;
