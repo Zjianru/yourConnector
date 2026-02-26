@@ -273,17 +273,65 @@ pub struct ToolDetailEnvelopePayload {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDetailsSnapshotPayload {
+    // 单连接内递增的详情快照序号。
+    #[serde(default)]
+    pub snapshot_id: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 对应的刷新请求 ID（若由请求触发）。
+    pub refresh_id: Option<String>,
+    #[serde(default)]
+    // 快照触发来源（request/periodic/command/cache）。
+    pub trigger: ToolDetailsSnapshotTrigger,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    // 刷新目标工具 ID（若为单工具刷新）。
+    pub target_tool_id: Option<String>,
+    #[serde(default)]
+    // 从入队到开始采集的等待耗时（毫秒）。
+    pub queue_wait_ms: u64,
+    #[serde(default)]
+    // 数据采集耗时（毫秒）。
+    pub collect_ms: u64,
+    #[serde(default)]
+    // 下行发送耗时（毫秒）。
+    pub send_ms: u64,
+    #[serde(default)]
+    // 合并/覆盖丢弃的刷新请求数量。
+    pub dropped_refreshes: u32,
     // 当前详情快照列表。
     pub details: Vec<ToolDetailEnvelopePayload>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolDetailsSnapshotTrigger {
+    Request,
+    #[default]
+    Periodic,
+    Command,
+    Cache,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolDetailsRefreshPriority {
+    User,
+    #[default]
+    Background,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDetailsRefreshRequestPayload {
+    #[serde(default)]
+    // 刷新请求唯一 ID（由上游生成）。
+    pub refresh_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     // 指定刷新目标工具；空表示刷新当前宿主机全部工具详情。
     pub tool_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     // 是否忽略去抖与缓存直接强制刷新。
     pub force: Option<bool>,
+    #[serde(default)]
+    // 刷新优先级。
+    pub priority: ToolDetailsRefreshPriority,
 }

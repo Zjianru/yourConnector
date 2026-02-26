@@ -3,6 +3,7 @@
 use anyhow::{Context, anyhow};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// 配对签发请求。
 #[derive(Debug, Serialize)]
@@ -76,7 +77,10 @@ pub(crate) async fn fetch_pair_bootstrap(
         .join("pair/bootstrap")
         .context("build bootstrap endpoint failed")?;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("build relay pair bootstrap client failed")?;
     let req = PairBootstrapRequest {
         system_id: system_id.to_string(),
         pair_token: pair_token.to_string(),

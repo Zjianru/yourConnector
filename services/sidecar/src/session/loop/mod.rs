@@ -5,13 +5,17 @@ mod command;
 mod report;
 mod url;
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Result, anyhow};
 use futures_util::StreamExt;
 use serde_json::json;
 use sysinfo::System;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::time::MissedTickBehavior;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -27,62 +31,61 @@ use crate::{
     control::{SidecarCommand, SidecarCommandEnvelope, parse_sidecar_command},
     pairing::{banner::print_pairing_banner, bootstrap_client::fetch_pair_bootstrap},
     session::{
-        snapshots::{send_snapshots, send_tool_details_snapshot, summarize_wire_payload},
+        queue::{QueueKey, QueuePolicy, QueueScheduler},
+        snapshots::{
+            ToolDetailsSnapshotMeta, send_snapshots, send_tool_details_snapshot,
+            summarize_wire_payload,
+        },
         transport::send_event,
     },
     stores::{ControllerDevicesStore, ToolWhitelistStore},
     tooling::core::{ToolAdapterCore, types::ToolDetailsCollectRequest},
 };
-use yc_shared_protocol::ToolRuntimePayload;
+use yc_shared_protocol::{
+    ToolDetailEnvelopePayload, ToolDetailsRefreshPriority, ToolDetailsSnapshotTrigger,
+    ToolRuntimePayload,
+};
 
-#[derive(Debug, Clone, Default)]
-struct PendingDetailsRefresh {
+#[derive(Debug, Clone)]
+struct DetailsRefreshIntent {
+    generation: u64,
     target_tool_id: Option<String>,
     force: bool,
-    dirty: bool,
+    refresh_id: Option<String>,
+    priority: ToolDetailsRefreshPriority,
+    trigger: ToolDetailsSnapshotTrigger,
+    queued_at: Instant,
+    dropped_refreshes: u32,
 }
 
-fn is_priority_command(command: &SidecarCommandEnvelope) -> bool {
-    matches!(
-        command.command,
-        SidecarCommand::ToolChatRequest { .. }
-            | SidecarCommand::ToolChatCancel { .. }
-            | SidecarCommand::ToolReportFetchRequest { .. }
-    )
+#[derive(Debug)]
+struct DetailsWorkerRequest {
+    intent: DetailsRefreshIntent,
+    collect_request: ToolDetailsCollectRequest,
 }
 
-fn merge_pending_details_refresh(
-    pending: &mut PendingDetailsRefresh,
+#[derive(Debug)]
+struct DetailsWorkerEvent {
+    generation: u64,
+    refresh_id: Option<String>,
+    trigger: ToolDetailsSnapshotTrigger,
     target_tool_id: Option<String>,
-    force: bool,
-) {
-    if !pending.dirty {
-        pending.target_tool_id = target_tool_id;
-        pending.force = force;
-        pending.dirty = true;
-        return;
-    }
-
-    pending.force = pending.force || force;
-    match (&pending.target_tool_id, &target_tool_id) {
-        (_, None) => pending.target_tool_id = None,
-        (None, Some(_)) => {}
-        (Some(existing), Some(next)) => {
-            if existing != next {
-                pending.target_tool_id = None;
-            }
-        }
-    }
-    pending.dirty = true;
+    details: Vec<ToolDetailEnvelopePayload>,
+    queue_wait_ms: u64,
+    collect_ms: u64,
+    dropped_refreshes: u32,
+    connected_tools_count: usize,
 }
 
+/// 处理一条控制命令，并把详情刷新意图入队。
+#[allow(clippy::too_many_arguments)]
 async fn handle_command_envelope(
     ws_writer: &mut command::RelayWriter,
     cfg: &Config,
     seq: &mut u64,
     sys: &mut System,
     started_at: Instant,
-    tool_core: &mut ToolAdapterCore,
+    discover_core: &mut ToolAdapterCore,
     discovered_tools: &mut Vec<ToolRuntimePayload>,
     whitelist: &mut ToolWhitelistStore,
     controllers: &mut ControllerDevicesStore,
@@ -91,8 +94,9 @@ async fn handle_command_envelope(
     report_runtime: &mut ReportRuntime,
     report_event_tx: &ReportEventSender,
     command_envelope: SidecarCommandEnvelope,
-    pending_details_refresh: &mut PendingDetailsRefresh,
-) -> Result<()> {
+    details_scheduler: &mut QueueScheduler<DetailsRefreshIntent>,
+    latest_details_generation: &mut u64,
+) -> Result<bool> {
     let outcome = handle_sidecar_command(
         SidecarCommandContext {
             ws_writer,
@@ -111,7 +115,7 @@ async fn handle_command_envelope(
     .await?;
 
     if outcome.refresh_snapshots {
-        *discovered_tools = tool_core.discover_tools(sys);
+        *discovered_tools = discover_core.discover_tools(sys);
         send_snapshots(
             ws_writer,
             cfg,
@@ -123,15 +127,124 @@ async fn handle_command_envelope(
         )
         .await?;
     }
+
+    let mut dispatch_now = false;
     if outcome.refresh_details {
-        merge_pending_details_refresh(
-            pending_details_refresh,
+        enqueue_details_refresh(
+            details_scheduler,
+            latest_details_generation,
             outcome.detail_tool_id,
             outcome.force_detail_refresh,
+            outcome.detail_refresh_id,
+            outcome.detail_priority,
+            outcome.detail_trigger,
         );
+        dispatch_now = matches!(outcome.detail_priority, ToolDetailsRefreshPriority::User);
     }
 
-    Ok(())
+    Ok(dispatch_now)
+}
+
+/// 判定是否应进入高优先级控制队列。
+fn is_priority_command(command: &SidecarCommandEnvelope) -> bool {
+    matches!(
+        command.command,
+        SidecarCommand::ToolChatRequest { .. }
+            | SidecarCommand::ToolChatCancel { .. }
+            | SidecarCommand::ToolReportFetchRequest { .. }
+    )
+}
+
+/// 把详情刷新请求放入 latest-wins 队列，并累计被覆盖计数。
+fn enqueue_details_refresh(
+    scheduler: &mut QueueScheduler<DetailsRefreshIntent>,
+    latest_generation: &mut u64,
+    target_tool_id: Option<String>,
+    force: bool,
+    refresh_id: Option<String>,
+    priority: ToolDetailsRefreshPriority,
+    trigger: ToolDetailsSnapshotTrigger,
+) {
+    *latest_generation = latest_generation.saturating_add(1);
+    let intent = DetailsRefreshIntent {
+        generation: *latest_generation,
+        target_tool_id,
+        force,
+        refresh_id,
+        priority,
+        trigger,
+        queued_at: Instant::now(),
+        dropped_refreshes: 0,
+    };
+    let report = scheduler.enqueue(QueueKey::ToolDetails, intent);
+    if report.dropped > 0
+        && let Some(latest) = scheduler.latest_mut(QueueKey::ToolDetails)
+    {
+        latest.dropped_refreshes = latest.dropped_refreshes.saturating_add(report.dropped);
+    }
+}
+
+/// 从详情队列弹出一个请求并尝试派发给 worker。
+fn dispatch_details_refresh(
+    scheduler: &mut QueueScheduler<DetailsRefreshIntent>,
+    details_req_tx: &mpsc::Sender<DetailsWorkerRequest>,
+    discovered_tools: &[ToolRuntimePayload],
+    whitelist: &ToolWhitelistStore,
+) -> Result<()> {
+    let Some((queue_key, intent)) = scheduler.pop_next() else {
+        return Ok(());
+    };
+    if queue_key != QueueKey::ToolDetails {
+        return Ok(());
+    }
+
+    let collect_request = build_details_collect_request(
+        discovered_tools,
+        whitelist,
+        intent.target_tool_id.clone(),
+        intent.force,
+    );
+    debug!(
+        "dispatch details refresh generation={} priority={:?} trigger={:?} refresh_id={} target_tool_id={} force={} queue_depth={}",
+        intent.generation,
+        intent.priority,
+        intent.trigger,
+        intent.refresh_id.as_deref().unwrap_or_default(),
+        intent.target_tool_id.as_deref().unwrap_or_default(),
+        intent.force,
+        scheduler.depth_for_key(QueueKey::ToolDetails),
+    );
+    let request = DetailsWorkerRequest {
+        intent,
+        collect_request,
+    };
+
+    match details_req_tx.try_send(request) {
+        Ok(_) => Ok(()),
+        Err(TrySendError::Full(request)) => {
+            let report = scheduler.enqueue(QueueKey::ToolDetails, request.intent);
+            if report.dropped > 0
+                && let Some(latest) = scheduler.latest_mut(QueueKey::ToolDetails)
+            {
+                latest.dropped_refreshes = latest.dropped_refreshes.saturating_add(report.dropped);
+            }
+            Ok(())
+        }
+        Err(TrySendError::Closed(_)) => Err(anyhow!("details worker channel closed")),
+    }
+}
+
+/// 默认队列策略：详情/快照类 latest-wins，控制串行，业务 FIFO。
+fn default_queue_policies() -> HashMap<QueueKey, QueuePolicy> {
+    HashMap::from([
+        (QueueKey::ToolDetails, QueuePolicy::latest_wins()),
+        (QueueKey::ToolsRefresh, QueuePolicy::latest_wins()),
+        (QueueKey::Metrics, QueuePolicy::latest_wins()),
+        (QueueKey::PairingBanner, QueuePolicy::latest_wins()),
+        (QueueKey::Control, QueuePolicy::serialized(64)),
+        (QueueKey::Chat, QueuePolicy::fifo(128)),
+        (QueueKey::Report, QueuePolicy::fifo(64)),
+    ])
 }
 
 /// 维护 relay 会话生命周期，并在断线后执行指数退避重连。
@@ -188,7 +301,10 @@ async fn run_session(cfg: &Config) -> Result<()> {
     let (ws_stream, _) = connect_async(ws_url.as_str()).await?;
     info!("relay connected");
 
-    refresh_pairing_banner(cfg).await;
+    let startup_banner_cfg = cfg.clone();
+    tokio::spawn(async move {
+        refresh_pairing_banner(&startup_banner_cfg).await;
+    });
 
     let (mut ws_writer, mut ws_reader) = ws_stream.split();
     let (high_cmd_tx, mut high_cmd_rx) = mpsc::unbounded_channel::<SidecarCommandEnvelope>();
@@ -196,6 +312,8 @@ async fn run_session(cfg: &Config) -> Result<()> {
     let (chat_event_tx, mut chat_event_rx) = mpsc::unbounded_channel::<chat::ChatEventEnvelope>();
     let (report_event_tx, mut report_event_rx) =
         mpsc::unbounded_channel::<report::ReportEventEnvelope>();
+    let (details_req_tx, mut details_req_rx) = mpsc::channel::<DetailsWorkerRequest>(8);
+    let (details_event_tx, mut details_event_rx) = mpsc::unbounded_channel::<DetailsWorkerEvent>();
     let log_raw_payload = raw_payload_logging_enabled();
 
     // reader_task 专门读取 relay 下行消息，并抽取 sidecar 控制命令。
@@ -234,11 +352,79 @@ async fn run_session(cfg: &Config) -> Result<()> {
             }
         }
     });
+    let details_worker_cfg = cfg.clone();
+    let mut details_worker = tokio::spawn(async move {
+        let mut details_core = ToolAdapterCore::new(
+            details_worker_cfg.fallback_tool,
+            details_worker_cfg.details_interval,
+            details_worker_cfg.details_command_timeout,
+            details_worker_cfg.details_max_parallel,
+            details_worker_cfg.details_refresh_debounce,
+        );
+        while let Some(first_request) = details_req_rx.recv().await {
+            let mut active = first_request;
+            let mut dropped_refreshes = active.intent.dropped_refreshes;
+            while let Ok(next_request) = details_req_rx.try_recv() {
+                dropped_refreshes = dropped_refreshes
+                    .saturating_add(1)
+                    .saturating_add(next_request.intent.dropped_refreshes);
+                active = next_request;
+            }
+            active.intent.dropped_refreshes = dropped_refreshes;
+            let queue_wait_ms = active
+                .intent
+                .queued_at
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            let generation = active.intent.generation;
+            let refresh_id = active.intent.refresh_id.clone();
+            let target_tool_id = active.intent.target_tool_id.clone();
+            let trigger = active.intent.trigger;
+            let connected_tools_count = active.collect_request.tools.len();
+
+            let cache_details = details_core.cached_details_snapshot(&active.collect_request.tools);
+            if !cache_details.is_empty() {
+                let _ = details_event_tx.send(DetailsWorkerEvent {
+                    generation,
+                    refresh_id: refresh_id.clone(),
+                    trigger: ToolDetailsSnapshotTrigger::Cache,
+                    target_tool_id: target_tool_id.clone(),
+                    details: cache_details,
+                    queue_wait_ms,
+                    collect_ms: 0,
+                    dropped_refreshes,
+                    connected_tools_count,
+                });
+            }
+
+            let collect_started_at = Instant::now();
+            let details = details_core
+                .collect_details_snapshot(active.collect_request)
+                .await;
+            let collect_ms = collect_started_at
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            let _ = details_event_tx.send(DetailsWorkerEvent {
+                generation,
+                refresh_id,
+                trigger,
+                target_tool_id,
+                details,
+                queue_wait_ms,
+                collect_ms,
+                dropped_refreshes,
+                connected_tools_count,
+            });
+        }
+    });
 
     let mut seq = 0_u64;
+    let mut details_snapshot_id = 0_u64;
     let started_at = Instant::now();
     let mut sys = System::new_all();
-    let mut tool_core = ToolAdapterCore::new(
+    let mut discover_core = ToolAdapterCore::new(
         cfg.fallback_tool,
         cfg.details_interval,
         cfg.details_command_timeout,
@@ -252,7 +438,10 @@ async fn run_session(cfg: &Config) -> Result<()> {
     if let Err(err) = controllers.seed(&cfg.controller_device_ids) {
         warn!("seed controller devices failed: {err}");
     }
-    let mut discovered_tools = tool_core.discover_tools(&mut sys);
+    let mut discovered_tools = discover_core.discover_tools(&mut sys);
+    let mut details_scheduler =
+        QueueScheduler::new(QueuePolicy::fifo(256), default_queue_policies());
+    let mut latest_details_generation = 0_u64;
 
     send_snapshots(
         &mut ws_writer,
@@ -264,14 +453,21 @@ async fn run_session(cfg: &Config) -> Result<()> {
         &whitelist,
     )
     .await?;
-    refresh_and_send_details(
-        &mut ws_writer,
-        cfg,
-        &mut seq,
-        &mut tool_core,
-        build_details_collect_request(&discovered_tools, &whitelist, None, true),
-    )
-    .await?;
+    enqueue_details_refresh(
+        &mut details_scheduler,
+        &mut latest_details_generation,
+        None,
+        true,
+        None,
+        ToolDetailsRefreshPriority::Background,
+        ToolDetailsSnapshotTrigger::Command,
+    );
+    dispatch_details_refresh(
+        &mut details_scheduler,
+        &details_req_tx,
+        &discovered_tools,
+        &whitelist,
+    )?;
 
     let mut heartbeat_ticker = tokio::time::interval(cfg.heartbeat_interval);
     heartbeat_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -289,7 +485,6 @@ async fn run_session(cfg: &Config) -> Result<()> {
     details_dispatch_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // 跳过首次立即触发，避免连接瞬间重复跑一次详情。
     details_dispatch_ticker.tick().await;
-    let mut pending_details_refresh = PendingDetailsRefresh::default();
 
     loop {
         tokio::select! {
@@ -297,27 +492,37 @@ async fn run_session(cfg: &Config) -> Result<()> {
             _ = tokio::signal::ctrl_c() => {
                 chat_runtime.abort_all();
                 report_runtime.abort_all();
+                details_worker.abort();
                 return Ok(());
             },
             done = &mut reader_task => {
                 chat_runtime.abort_all();
                 report_runtime.abort_all();
+                details_worker.abort();
                 match done {
                     Ok(_) => return Err(anyhow!("relay read loop closed")),
                     Err(err) => return Err(anyhow!("relay read task join error: {err}")),
+                }
+            }
+            done = &mut details_worker => {
+                chat_runtime.abort_all();
+                report_runtime.abort_all();
+                match done {
+                    Ok(_) => return Err(anyhow!("details worker exited unexpectedly")),
+                    Err(err) => return Err(anyhow!("details worker join error: {err}")),
                 }
             }
             maybe_cmd = high_cmd_rx.recv() => {
                 let Some(command_envelope) = maybe_cmd else {
                     continue;
                 };
-                handle_command_envelope(
+                let dispatch_now = handle_command_envelope(
                     &mut ws_writer,
                     cfg,
                     &mut seq,
                     &mut sys,
                     started_at,
-                    &mut tool_core,
+                    &mut discover_core,
                     &mut discovered_tools,
                     &mut whitelist,
                     &mut controllers,
@@ -326,21 +531,30 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &mut report_runtime,
                     &report_event_tx,
                     command_envelope,
-                    &mut pending_details_refresh,
+                    &mut details_scheduler,
+                    &mut latest_details_generation,
                 )
                 .await?;
+                if dispatch_now {
+                    dispatch_details_refresh(
+                        &mut details_scheduler,
+                        &details_req_tx,
+                        &discovered_tools,
+                        &whitelist,
+                    )?;
+                }
             }
             maybe_cmd = normal_cmd_rx.recv() => {
                 let Some(command_envelope) = maybe_cmd else {
                     continue;
                 };
-                handle_command_envelope(
+                let dispatch_now = handle_command_envelope(
                     &mut ws_writer,
                     cfg,
                     &mut seq,
                     &mut sys,
                     started_at,
-                    &mut tool_core,
+                    &mut discover_core,
                     &mut discovered_tools,
                     &mut whitelist,
                     &mut controllers,
@@ -349,9 +563,18 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     &mut report_runtime,
                     &report_event_tx,
                     command_envelope,
-                    &mut pending_details_refresh,
+                    &mut details_scheduler,
+                    &mut latest_details_generation,
                 )
                 .await?;
+                if dispatch_now {
+                    dispatch_details_refresh(
+                        &mut details_scheduler,
+                        &details_req_tx,
+                        &discovered_tools,
+                        &whitelist,
+                    )?;
+                }
             }
             maybe_chat_event = chat_event_rx.recv() => {
                 let Some(chat_event) = maybe_chat_event else {
@@ -385,6 +608,63 @@ async fn run_session(cfg: &Config) -> Result<()> {
                     report_event.payload,
                 ).await?;
             }
+            maybe_details_event = details_event_rx.recv() => {
+                let Some(details_event) = maybe_details_event else {
+                    continue;
+                };
+                if details_event.generation < latest_details_generation {
+                    debug!(
+                        "drop stale details snapshot generation={} latest={} trigger={:?} refresh_id={} target_tool_id={}",
+                        details_event.generation,
+                        latest_details_generation,
+                        details_event.trigger,
+                        details_event.refresh_id.as_deref().unwrap_or_default(),
+                        details_event.target_tool_id.as_deref().unwrap_or_default(),
+                    );
+                    continue;
+                }
+                if details_event.details.is_empty() && details_event.connected_tools_count == 0 {
+                    continue;
+                }
+
+                details_snapshot_id = details_snapshot_id.saturating_add(1);
+                let send_started_at = Instant::now();
+                send_tool_details_snapshot(
+                    &mut ws_writer,
+                    &cfg.system_id,
+                    &mut seq,
+                    &details_event.details,
+                    ToolDetailsSnapshotMeta {
+                        snapshot_id: details_snapshot_id,
+                        refresh_id: details_event.refresh_id.clone(),
+                        trigger: details_event.trigger,
+                        target_tool_id: details_event.target_tool_id.clone(),
+                        queue_wait_ms: details_event.queue_wait_ms,
+                        collect_ms: details_event.collect_ms,
+                        send_ms: 0,
+                        dropped_refreshes: details_event.dropped_refreshes,
+                    },
+                )
+                .await?;
+                let send_ms = send_started_at.elapsed().as_millis().min(u64::MAX as u128) as u64;
+                debug!(
+                    concat!(
+                        "tool details snapshot sent snapshot_id={} generation={} trigger={:?} ",
+                        "refresh_id={} target_tool_id={} details={} queue_wait_ms={} ",
+                        "collect_ms={} send_ms={} dropped_refreshes={}"
+                    ),
+                    details_snapshot_id,
+                    details_event.generation,
+                    details_event.trigger,
+                    details_event.refresh_id.as_deref().unwrap_or_default(),
+                    details_event.target_tool_id.as_deref().unwrap_or_default(),
+                    details_event.details.len(),
+                    details_event.queue_wait_ms,
+                    details_event.collect_ms,
+                    send_ms,
+                    details_event.dropped_refreshes,
+                );
+            }
             _ = heartbeat_ticker.tick() => {
                 send_event(
                     &mut ws_writer,
@@ -399,7 +679,7 @@ async fn run_session(cfg: &Config) -> Result<()> {
                 ).await?;
             }
             _ = metrics_ticker.tick() => {
-                discovered_tools = tool_core.discover_tools(&mut sys);
+                discovered_tools = discover_core.discover_tools(&mut sys);
                 send_snapshots(
                     &mut ws_writer,
                     cfg,
@@ -412,31 +692,29 @@ async fn run_session(cfg: &Config) -> Result<()> {
                 .await?;
             }
             _ = pairing_banner_ticker.tick() => {
-                refresh_pairing_banner(cfg).await;
+                let refresh_cfg = cfg.clone();
+                tokio::spawn(async move {
+                    refresh_pairing_banner(&refresh_cfg).await;
+                });
             }
             _ = details_ticker.tick() => {
-                merge_pending_details_refresh(&mut pending_details_refresh, None, false);
+                enqueue_details_refresh(
+                    &mut details_scheduler,
+                    &mut latest_details_generation,
+                    None,
+                    false,
+                    None,
+                    ToolDetailsRefreshPriority::Background,
+                    ToolDetailsSnapshotTrigger::Periodic,
+                );
             }
             _ = details_dispatch_ticker.tick() => {
-                if !pending_details_refresh.dirty {
-                    continue;
-                }
-                let target_tool_id = pending_details_refresh.target_tool_id.clone();
-                let force_refresh = pending_details_refresh.force;
-                pending_details_refresh = PendingDetailsRefresh::default();
-                refresh_and_send_details(
-                    &mut ws_writer,
-                    cfg,
-                    &mut seq,
-                    &mut tool_core,
-                    build_details_collect_request(
-                        &discovered_tools,
-                        &whitelist,
-                        target_tool_id,
-                        force_refresh,
-                    ),
-                )
-                .await?;
+                dispatch_details_refresh(
+                    &mut details_scheduler,
+                    &details_req_tx,
+                    &discovered_tools,
+                    &whitelist,
+                )?;
             }
         }
     }
@@ -460,52 +738,6 @@ fn build_details_collect_request(
         target_tool_id,
         force,
     }
-}
-
-/// 刷新工具详情并发送 `tool_details_snapshot`。
-async fn refresh_and_send_details(
-    ws_writer: &mut command::RelayWriter,
-    cfg: &Config,
-    seq: &mut u64,
-    tool_core: &mut ToolAdapterCore,
-    request: ToolDetailsCollectRequest,
-) -> Result<()> {
-    let connected_tools = request.tools.clone();
-    let target_tool_id = request.target_tool_id.clone().unwrap_or_default();
-    let force_refresh = request.force;
-    let collect_started_at = Instant::now();
-    let details = tool_core.collect_details_snapshot(request).await;
-    let collect_elapsed_ms = collect_started_at.elapsed().as_millis();
-    debug!(
-        "tool details collected target_tool_id={} force={} connected_tools={} details={} collect_ms={}",
-        target_tool_id,
-        force_refresh,
-        connected_tools.len(),
-        details.len(),
-        collect_elapsed_ms
-    );
-
-    if details.is_empty() && connected_tools.is_empty() {
-        debug!(
-            "tool details snapshot skipped target_tool_id={} force={} reason=empty",
-            target_tool_id,
-            force_refresh
-        );
-        return Ok(());
-    }
-
-    let send_started_at = Instant::now();
-    send_tool_details_snapshot(ws_writer, &cfg.system_id, seq, &details).await?;
-    let send_elapsed_ms = send_started_at.elapsed().as_millis();
-    debug!(
-        "tool details snapshot sent target_tool_id={} force={} details={} send_ms={} total_ms={}",
-        target_tool_id,
-        force_refresh,
-        details.len(),
-        send_elapsed_ms,
-        collect_elapsed_ms + send_elapsed_ms
-    );
-    Ok(())
 }
 
 /// session 模块总入口，供 main 调用。

@@ -163,6 +163,19 @@ impl ToolAdapterCore {
         );
         self.details_cache.snapshot_for_tool_order(&ordered_ids)
     }
+
+    /// 读取当前缓存详情快照（不触发采集）。
+    pub(crate) fn cached_details_snapshot(
+        &mut self,
+        tools: &[ToolRuntimePayload],
+    ) -> Vec<ToolDetailEnvelopePayload> {
+        let ordered_ids = tools
+            .iter()
+            .map(|tool| tool.tool_id.clone())
+            .collect::<Vec<String>>();
+        self.details_cache.prune_inactive(&ordered_ids);
+        self.details_cache.snapshot_for_tool_order(&ordered_ids)
+    }
 }
 
 /// 按适配器类型拆分工具集合。

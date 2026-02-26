@@ -13,7 +13,9 @@ use tokio::net::TcpStream;
 use tokio::{process::Command, time::sleep};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 use tracing::{debug, info};
-use yc_shared_protocol::ToolRuntimePayload;
+use yc_shared_protocol::{
+    ToolDetailsRefreshPriority, ToolDetailsSnapshotTrigger, ToolRuntimePayload,
+};
 
 use crate::{
     config::Config,
@@ -62,6 +64,12 @@ pub(crate) struct SidecarCommandOutcome {
     pub(crate) detail_tool_id: Option<String>,
     /// 是否强制刷新详情（忽略去抖）。
     pub(crate) force_detail_refresh: bool,
+    /// 详情刷新请求标识（来自 app）。
+    pub(crate) detail_refresh_id: Option<String>,
+    /// 详情刷新优先级。
+    pub(crate) detail_priority: ToolDetailsRefreshPriority,
+    /// 详情快照触发来源。
+    pub(crate) detail_trigger: ToolDetailsSnapshotTrigger,
 }
 
 impl SidecarCommandOutcome {
@@ -72,16 +80,28 @@ impl SidecarCommandOutcome {
             refresh_details: true,
             detail_tool_id: None,
             force_detail_refresh: true,
+            detail_refresh_id: None,
+            detail_priority: ToolDetailsRefreshPriority::Background,
+            detail_trigger: ToolDetailsSnapshotTrigger::Command,
         }
     }
 
     /// 仅刷新详情。
-    fn details_only(detail_tool_id: Option<String>, force: bool) -> Self {
+    fn details_only(
+        detail_tool_id: Option<String>,
+        force: bool,
+        detail_refresh_id: Option<String>,
+        detail_priority: ToolDetailsRefreshPriority,
+        detail_trigger: ToolDetailsSnapshotTrigger,
+    ) -> Self {
         Self {
             refresh_snapshots: false,
             refresh_details: true,
             detail_tool_id,
             force_detail_refresh: force,
+            detail_refresh_id,
+            detail_priority,
+            detail_trigger,
         }
     }
 }
@@ -361,9 +381,18 @@ pub(crate) async fn handle_sidecar_command(
 
             SidecarCommandOutcome::snapshots_and_details()
         }
-        SidecarCommand::RefreshToolDetails { tool_id, force } => {
-            SidecarCommandOutcome::details_only(tool_id, force)
-        }
+        SidecarCommand::RefreshToolDetails {
+            refresh_id,
+            tool_id,
+            force,
+            priority,
+        } => SidecarCommandOutcome::details_only(
+            tool_id,
+            force,
+            Some(refresh_id),
+            priority,
+            ToolDetailsSnapshotTrigger::Request,
+        ),
         SidecarCommand::ControlToolProcess { tool_id, action } => {
             let candidate = discovered_tools.iter().find(|tool| tool.tool_id == tool_id);
             let pid = candidate.and_then(|tool| tool.pid);

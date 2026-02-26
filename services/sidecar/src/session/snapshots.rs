@@ -8,7 +8,8 @@ use sysinfo::{Disks, ProcessesToUpdate, System};
 use tokio_tungstenite::tungstenite::Message;
 use yc_shared_protocol::{
     MetricsSnapshotPayload, SidecarMetricsPayload, SystemMetricsPayload, ToolDetailEnvelopePayload,
-    ToolDetailsSnapshotPayload, ToolRuntimePayload, ToolsSnapshotPayload, now_rfc3339_nanos,
+    ToolDetailsSnapshotPayload, ToolDetailsSnapshotTrigger, ToolRuntimePayload,
+    ToolsSnapshotPayload, now_rfc3339_nanos,
 };
 
 use crate::{
@@ -24,6 +25,19 @@ pub(crate) const TOOLS_CANDIDATES_EVENT: &str = "tools_candidates";
 pub(crate) const METRICS_SNAPSHOT_EVENT: &str = "metrics_snapshot";
 /// 工具详情快照事件。
 pub(crate) const TOOL_DETAILS_SNAPSHOT_EVENT: &str = "tool_details_snapshot";
+
+/// 详情快照下行元信息。
+#[derive(Debug, Clone)]
+pub(crate) struct ToolDetailsSnapshotMeta {
+    pub(crate) snapshot_id: u64,
+    pub(crate) refresh_id: Option<String>,
+    pub(crate) trigger: ToolDetailsSnapshotTrigger,
+    pub(crate) target_tool_id: Option<String>,
+    pub(crate) queue_wait_ms: u64,
+    pub(crate) collect_ms: u64,
+    pub(crate) send_ms: u64,
+    pub(crate) dropped_refreshes: u32,
+}
 
 /// 一次性发送 tools_snapshot / tools_candidates / metrics_snapshot 三个事件。
 pub(crate) async fn send_snapshots<W>(
@@ -83,6 +97,7 @@ pub(crate) async fn send_tool_details_snapshot<W>(
     system_id: &str,
     seq: &mut u64,
     details: &[ToolDetailEnvelopePayload],
+    meta: ToolDetailsSnapshotMeta,
 ) -> Result<()>
 where
     W: Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
@@ -94,6 +109,14 @@ where
         TOOL_DETAILS_SNAPSHOT_EVENT,
         None,
         serde_json::to_value(ToolDetailsSnapshotPayload {
+            snapshot_id: meta.snapshot_id,
+            refresh_id: meta.refresh_id,
+            trigger: meta.trigger,
+            target_tool_id: meta.target_tool_id,
+            queue_wait_ms: meta.queue_wait_ms,
+            collect_ms: meta.collect_ms,
+            send_ms: meta.send_ms,
+            dropped_refreshes: meta.dropped_refreshes,
             details: details.to_vec(),
         })?,
     )

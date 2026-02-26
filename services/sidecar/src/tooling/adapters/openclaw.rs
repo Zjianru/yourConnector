@@ -252,35 +252,68 @@ async fn collect_profile_details(
     let model_lookup = build_model_lookup(&profile_config.models);
 
     let agents_timeout = effective_timeout(options.command_timeout, AGENTS_SESSIONS_TIMEOUT_CAP_MS);
-    let agents_list_json = run_openclaw_json(
-        profile_key,
-        &["agents", "list", "--json", "--bindings"],
-        agents_timeout,
-    )
-    .await
-    .ok();
-
     let channels_timeout = effective_timeout(options.command_timeout, CHANNELS_TIMEOUT_CAP_MS);
-    let channels_status_json = run_openclaw_json(
-        profile_key,
-        &["channels", "status", "--json"],
-        channels_timeout,
-    )
-    .await
-    .ok();
     let models_status_timeout =
         effective_timeout(options.command_timeout, MODELS_STATUS_TIMEOUT_CAP_MS);
-    let models_status_json = run_openclaw_json(
-        profile_key,
-        &["models", "status", "--json"],
-        models_status_timeout,
-    )
-    .await
-    .ok();
+    let health_timeout = effective_timeout(options.command_timeout, HEALTH_TIMEOUT_CAP_MS);
+    let gateway_timeout = effective_timeout(options.command_timeout, GATEWAY_TIMEOUT_CAP_MS);
 
-    let sessions_json = run_openclaw_json(profile_key, &["sessions", "--json"], agents_timeout)
-        .await
-        .ok();
+    let (
+        agents_list_json,
+        channels_status_json,
+        models_status_json,
+        sessions_json,
+        health_status,
+        gateway_status,
+    ) = tokio::join!(
+        async {
+            run_openclaw_json(
+                profile_key,
+                &["agents", "list", "--json", "--bindings"],
+                agents_timeout,
+            )
+            .await
+            .ok()
+        },
+        async {
+            run_openclaw_json(
+                profile_key,
+                &["channels", "status", "--json"],
+                channels_timeout,
+            )
+            .await
+            .ok()
+        },
+        async {
+            run_openclaw_json(
+                profile_key,
+                &["models", "status", "--json"],
+                models_status_timeout,
+            )
+            .await
+            .ok()
+        },
+        async {
+            run_openclaw_json(profile_key, &["sessions", "--json"], agents_timeout)
+                .await
+                .ok()
+        },
+        async {
+            run_openclaw_json(profile_key, &["health", "--json"], health_timeout)
+                .await
+                .ok()
+        },
+        async {
+            run_openclaw_json(
+                profile_key,
+                &["gateway", "status", "--json"],
+                gateway_timeout,
+            )
+            .await
+            .ok()
+        },
+    );
+
     let mut sessions_all = sessions_json
         .as_ref()
         .map(parse_sessions_rows_from_command)
@@ -339,11 +372,6 @@ async fn collect_profile_details(
         &usage_estimated_cost,
     );
 
-    let health_timeout = effective_timeout(options.command_timeout, HEALTH_TIMEOUT_CAP_MS);
-    let health_status = run_openclaw_json(profile_key, &["health", "--json"], health_timeout)
-        .await
-        .ok();
-
     let channel_identities = parse_channel_identities(
         channels_status_json.as_ref(),
         health_status.as_ref(),
@@ -351,30 +379,24 @@ async fn collect_profile_details(
     );
     let channel_overview = parse_channel_overview(channels_status_json.as_ref());
 
-    let gateway_timeout = effective_timeout(options.command_timeout, GATEWAY_TIMEOUT_CAP_MS);
-    let gateway_status = run_openclaw_json(
-        profile_key,
-        &["gateway", "status", "--json"],
-        gateway_timeout,
-    )
-    .await
-    .ok();
-
     let (memory_status, security_status) = if include_deep_details {
         let memory_timeout = effective_timeout(options.command_timeout, MEMORY_TIMEOUT_CAP_MS);
         let security_timeout = effective_timeout(options.command_timeout, SECURITY_TIMEOUT_CAP_MS);
-
-        (
-            run_openclaw_json(profile_key, &["memory", "status", "--json"], memory_timeout)
+        tokio::join!(
+            async {
+                run_openclaw_json(profile_key, &["memory", "status", "--json"], memory_timeout)
+                    .await
+                    .ok()
+            },
+            async {
+                run_openclaw_json(
+                    profile_key,
+                    &["security", "audit", "--json"],
+                    security_timeout,
+                )
                 .await
-                .ok(),
-            run_openclaw_json(
-                profile_key,
-                &["security", "audit", "--json"],
-                security_timeout,
-            )
-            .await
-            .ok(),
+                .ok()
+            },
         )
     } else {
         (None, None)

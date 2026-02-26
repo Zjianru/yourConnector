@@ -4,6 +4,8 @@
 //! 3. 提供统一的命令回执字段，减少主流程分支重复代码。
 
 use serde_json::Value;
+use uuid::Uuid;
+use yc_shared_protocol::ToolDetailsRefreshPriority;
 
 /// 请求接入某个候选工具。
 pub(crate) const TOOL_CONNECT_REQUEST_EVENT: &str = "tool_connect_request";
@@ -70,8 +72,10 @@ pub(crate) enum SidecarCommand {
     ResetToolWhitelist,
     /// 刷新工具详情（可指定单工具）。
     RefreshToolDetails {
+        refresh_id: String,
         tool_id: Option<String>,
         force: bool,
+        priority: ToolDetailsRefreshPriority,
     },
     /// 控制工具进程：当前仅支持 OpenClaw 的停止/重启。
     ControlToolProcess {
@@ -199,6 +203,13 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
             }),
         TOOL_WHITELIST_RESET_REQUEST_EVENT => Some(SidecarCommand::ResetToolWhitelist),
         TOOL_DETAILS_REFRESH_REQUEST_EVENT => {
+            let refresh_id = payload
+                .get("refreshId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("drf_{}", Uuid::new_v4()));
             let tool_id = payload
                 .get("toolId")
                 .and_then(Value::as_str)
@@ -209,7 +220,22 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 .get("force")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            Some(SidecarCommand::RefreshToolDetails { tool_id, force })
+            let priority = payload
+                .get("priority")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(|value| value.to_ascii_lowercase())
+                .map(|value| match value.as_str() {
+                    "user" => ToolDetailsRefreshPriority::User,
+                    _ => ToolDetailsRefreshPriority::Background,
+                })
+                .unwrap_or(ToolDetailsRefreshPriority::Background);
+            Some(SidecarCommand::RefreshToolDetails {
+                refresh_id,
+                tool_id,
+                force,
+                priority,
+            })
         }
         TOOL_PROCESS_CONTROL_REQUEST_EVENT => {
             let tool_id = payload
@@ -402,6 +428,7 @@ pub(crate) fn command_feedback_event(command: &SidecarCommand) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{SidecarCommand, ToolProcessAction, parse_sidecar_command};
+    use yc_shared_protocol::ToolDetailsRefreshPriority;
 
     #[test]
     fn parse_rebind_command_prefers_payload_device_id() {
@@ -445,14 +472,21 @@ mod tests {
             "type":"tool_details_refresh_request",
             "sourceClientType":"app",
             "sourceDeviceId":"ios_source",
-            "payload":{"toolId":"openclaw_xxx","force":true}
+            "payload":{"refreshId":"drf_1","toolId":"openclaw_xxx","force":true,"priority":"user"}
         }"#;
 
         let env = parse_sidecar_command(raw).expect("command should parse");
         match env.command {
-            SidecarCommand::RefreshToolDetails { tool_id, force } => {
+            SidecarCommand::RefreshToolDetails {
+                refresh_id,
+                tool_id,
+                force,
+                priority,
+            } => {
+                assert_eq!(refresh_id, "drf_1");
                 assert_eq!(tool_id.unwrap_or_default(), "openclaw_xxx");
                 assert!(force);
+                assert_eq!(priority, ToolDetailsRefreshPriority::User);
             }
             _ => panic!("unexpected command"),
         }
