@@ -806,7 +806,7 @@ fn parse_session_row(raw: &Value) -> Option<Value> {
         "totalTokens": read_i64(raw, "totalTokens"),
         "totalTokensFresh": read_bool(raw, "totalTokensFresh"),
         "contextTokens": read_i64(raw, "contextTokens"),
-        "remainingTokens": read_i64(raw, "remainingTokens"),
+        "remainingTokens": read_i64_nullable(raw, "remainingTokens"),
         "percentUsed": read_i64(raw, "percentUsed"),
         "updatedAt": read_i64(raw, "updatedAt"),
         "ageMs": age_ms,
@@ -2502,6 +2502,15 @@ fn read_i64(value: &Value, key: &str) -> i64 {
     value.get(key).and_then(Value::as_i64).unwrap_or(0)
 }
 
+/// 读取 i64，若字段不存在则返回 null（保留显式 0）。
+fn read_i64_nullable(value: &Value, key: &str) -> Value {
+    value
+        .get(key)
+        .and_then(Value::as_i64)
+        .map(|v| json!(v))
+        .unwrap_or(Value::Null)
+}
+
 /// 读取 f64 字段。
 fn read_f64(value: &Value, key: &str) -> f64 {
     value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
@@ -2688,6 +2697,20 @@ mod tests {
     }
 
     #[test]
+    fn parse_status_recent_sessions_keeps_missing_remaining_tokens_null() {
+        let status = json!({
+            "sessions": {
+                "recent": [
+                    {"sessionId":"s1","agentId":"main","updatedAt":1000,"contextTokens":90000}
+                ]
+            }
+        });
+        let rows = parse_status_recent_sessions(&status);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]["remainingTokens"].is_null());
+    }
+
+    #[test]
     fn parse_auth_user_prefers_label_parentheses() {
         let models_status = json!({
             "auth": {
@@ -2806,6 +2829,65 @@ mod tests {
         assert_eq!(rows[0]["contextMaxTokens"], 90000);
         assert_eq!(rows[0]["contextUsedTokens"], 17980);
         assert_eq!(rows[0]["remainingTokens"], 72020);
+        assert_eq!(rows[0]["contextLimitSource"], "session");
+    }
+
+    #[test]
+    fn attach_context_uses_total_tokens_when_status_session_omits_remaining() {
+        let agents = vec![json!({
+            "agentId":"main",
+            "name":"main",
+            "model":"deepseek-chat",
+            "isDefault":true
+        })];
+        let status = json!({
+            "sessions": {
+                "recent": [{
+                    "sessionId":"s1",
+                    "agentId":"main",
+                    "model":"deepseek-chat",
+                    "contextTokens":90000,
+                    "totalTokens":12400,
+                    "updatedAt":100
+                }]
+            }
+        });
+        let sessions = parse_status_recent_sessions(&status);
+        let model_lookup = build_model_lookup(&[]);
+        let rows = attach_agent_context_metrics(agents, &sessions, 9000, &model_lookup);
+        assert_eq!(rows[0]["contextMaxTokens"], 90000);
+        assert_eq!(rows[0]["contextUsedTokens"], 12400);
+        assert_eq!(rows[0]["remainingTokens"], 77600);
+        assert_eq!(rows[0]["contextLimitSource"], "session");
+    }
+
+    #[test]
+    fn attach_context_preserves_explicit_zero_remaining_tokens() {
+        let agents = vec![json!({
+            "agentId":"main",
+            "name":"main",
+            "model":"deepseek-chat",
+            "isDefault":true
+        })];
+        let status = json!({
+            "sessions": {
+                "recent": [{
+                    "sessionId":"s1",
+                    "agentId":"main",
+                    "model":"deepseek-chat",
+                    "contextTokens":90000,
+                    "remainingTokens":0,
+                    "totalTokens":12000,
+                    "updatedAt":100
+                }]
+            }
+        });
+        let sessions = parse_status_recent_sessions(&status);
+        let model_lookup = build_model_lookup(&[]);
+        let rows = attach_agent_context_metrics(agents, &sessions, 9000, &model_lookup);
+        assert_eq!(rows[0]["contextMaxTokens"], 90000);
+        assert_eq!(rows[0]["contextUsedTokens"], 90000);
+        assert_eq!(rows[0]["remainingTokens"], 0);
         assert_eq!(rows[0]["contextLimitSource"], "session");
     }
 
