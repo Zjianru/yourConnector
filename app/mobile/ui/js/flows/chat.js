@@ -3,7 +3,7 @@
 // 2. 对接 WS 聊天事件与 Tauri 文件存储。
 
 import { asMap, asListOfMap } from "../utils/type.js";
-import { resolveReportPathFromTarget } from "../utils/markdown.js";
+import { resolveReportPathFromTarget, normalizeReportPathForPreview } from "../utils/markdown.js";
 import {
   CHAT_QUEUE_LIMIT,
   chatConversationKey,
@@ -901,6 +901,67 @@ export function createChatFlow({
     });
   }
 
+  function extractHomeDirFromText(raw) {
+    const text = String(raw || "");
+    if (!text) return "";
+    const match = text.match(/(\/Users\/[^\s/]+|\/home\/[^\s/]+)/);
+    return match ? String(match[1] || "") : "";
+  }
+
+  function inferConversationHomeDir(conv) {
+    if (!conv) return "";
+    const runtime = ensureRuntime(String(conv.hostId || ""));
+    const runtimeToolId = resolveConversationRuntimeToolId(conv);
+    if (runtime && Array.isArray(runtime.tools)) {
+      const tool = runtime.tools.find((item) => {
+        const logical = String(item.toolId || "").trim();
+        const runtimeId = String(item.runtimeToolId || item.toolId || "").trim();
+        return runtimeId === runtimeToolId || logical === String(conv.toolId || "");
+      });
+      const workspace = String(tool?.workspaceDir || "").trim();
+      const byWorkspace = extractHomeDirFromText(workspace);
+      if (byWorkspace) return byWorkspace;
+    }
+
+    const messages = Array.isArray(conv.messages) ? conv.messages : [];
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const byMessage = extractHomeDirFromText(messages[i]?.text || "");
+      if (byMessage) return byMessage;
+    }
+    return "";
+  }
+
+  function normalizeReportFetchPath(conv, filePath) {
+    let next = String(filePath || "").trim();
+    if (!next) return "";
+
+    if (next.startsWith("yc-report://")) {
+      next = next.slice("yc-report://".length);
+    } else if (next.toLowerCase().startsWith("file://")) {
+      try {
+        const parsed = new URL(next);
+        next = String(parsed.pathname || "");
+      } catch (_) {
+        return "";
+      }
+    }
+
+    try {
+      next = decodeURIComponent(next);
+    } catch (_) {
+      // keep raw value when decode fails
+    }
+
+    if (next.startsWith("~/")) {
+      const homeDir = inferConversationHomeDir(conv);
+      if (homeDir) {
+        next = `${homeDir}/${next.slice(2)}`;
+      }
+    }
+
+    return String(next || "").trim();
+  }
+
   function showReportError(conv, filePath, reason) {
     const viewer = createReportViewerState({
       visible: true,
@@ -919,10 +980,24 @@ export function createChatFlow({
   }
 
   function requestReportFetch(conv, filePath) {
-    const normalizedPath = String(filePath || "").trim();
-    if (!conv || !normalizedPath) return;
-    if (!normalizedPath.startsWith("/") || !normalizedPath.toLowerCase().endsWith(".md")) {
-      showReportError(conv, normalizedPath, "仅支持读取绝对路径下的 .md 报告。");
+    const rawPath = String(filePath || "").trim();
+    const normalizedPath = normalizeReportFetchPath(conv, rawPath);
+    if (!conv || !rawPath) return;
+    if (!normalizedPath.toLowerCase().endsWith(".md")) {
+      showReportError(conv, rawPath, "仅支持读取 .md 报告。");
+      render();
+      return;
+    }
+    if (!normalizedPath.startsWith("/") && !normalizedPath.startsWith("~/")) {
+      const reason = rawPath.startsWith("~/")
+        ? "当前消息使用了 ~/ 路径，暂未推断到宿主机 home 目录。请让助手返回绝对路径。"
+        : "仅支持读取绝对路径下的 .md 报告。";
+      showReportError(conv, rawPath, reason);
+      render();
+      return;
+    }
+    if (!normalizeReportPathForPreview(normalizedPath)) {
+      showReportError(conv, normalizedPath, "该文件疑似系统规则文档，已禁止预览。");
       render();
       return;
     }

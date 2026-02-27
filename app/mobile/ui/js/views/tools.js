@@ -259,6 +259,47 @@ export function createToolsView(deps) {
   }
 
   /**
+   * 解析时间输入为毫秒时间戳（支持秒/毫秒/ISO）。
+   * @param {unknown} raw 原始时间值。
+   * @returns {number}
+   */
+  function parseTimeMs(raw) {
+    if (raw == null || raw === "") {
+      return NaN;
+    }
+    const num = Number(raw);
+    if (Number.isFinite(num) && num > 0) {
+      return num > 1_000_000_000_000 ? num : num * 1000;
+    }
+    const parsed = Date.parse(String(raw));
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+
+  /**
+   * 判断详情是否超过 expiresAt 失效时间。
+   * @param {Record<string, any>} detail 详情封装。
+   * @param {Record<string, any>} detailData 详情数据体。
+   * @returns {boolean}
+   */
+  function isDetailExpired(detail, detailData) {
+    const expiresMs = parseTimeMs(detail?.expiresAt || detailData?.expiresAt);
+    if (!Number.isFinite(expiresMs)) {
+      return false;
+    }
+    return Date.now() > expiresMs;
+  }
+
+  /**
+   * 选择 OpenClaw 时效文案使用的时间戳来源。
+   * @param {Record<string, any>} detail 详情封装。
+   * @param {Record<string, any>} detailData 详情数据体。
+   * @returns {unknown}
+   */
+  function openClawFreshnessTimestamp(detail, detailData) {
+    return detail?.collectedAt || detailData?.collectedAt || detailData?.collectingSince;
+  }
+
+  /**
    * 生成 OpenClaw 数据时效文案。
    * @param {"fresh"|"stale"|"collecting"|"unknown"} value 数据状态。
    * @param {unknown} collectedAt 最近采集时间。
@@ -388,15 +429,29 @@ export function createToolsView(deps) {
     const runtime = ensureRuntime(hostId);
     const capabilityChange = asMap(runtime?.toolCapabilityChangesByToolId?.[toolId] || {});
     const detailData = asMap(detail.data);
-    const summary = summarizeOpenClaw(detailData, asBool(detail.stale));
+    const detailExpired = isDetailExpired(detail, detailData);
+    const detailStale = asBool(detail.stale) || detailExpired;
+    const summary = summarizeOpenClaw(detailData, detailStale);
+    const runtimeOnline = runtime?.connected && String(runtime?.sidecarStatus || "").trim().toUpperCase() === "ONLINE";
+    const toolOnline = connected && String(metric.status ?? tool.status ?? "").trim().toLowerCase() !== "offline";
 
-    const gatewayLabel = statusDotLabel("gateway", summary.gatewayDot);
+    let gatewayDot = summary.gatewayDot;
+    let dataDot = summary.dataDot;
+    if (detailExpired && dataDot === "fresh") {
+      dataDot = "stale";
+    }
+    if (detailStale && runtimeOnline && toolOnline && gatewayDot !== "online") {
+      // 详情过期时优先显示当前运行态，避免“可聊天但网关离线”的误报。
+      gatewayDot = "online";
+    }
+
+    const gatewayLabel = statusDotLabel("gateway", gatewayDot);
     const dataLabel = openClawFreshnessLabel(
-      summary.dataDot,
-      detail.collectedAt || detailData.collectingSince,
+      dataDot,
+      openClawFreshnessTimestamp(detail, detailData),
     );
-    const gatewayClass = statusDotClass("gateway", summary.gatewayDot);
-    const dataClass = statusDotClass("data", summary.dataDot);
+    const gatewayClass = statusDotClass("gateway", gatewayDot);
+    const dataClass = statusDotClass("data", dataDot);
 
     return `
       <div class="tool-swipe" data-tool-swipe-key="${escapeHtml(swipeKey)}">

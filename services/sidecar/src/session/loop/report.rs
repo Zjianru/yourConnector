@@ -5,6 +5,7 @@
 
 use std::{
     collections::HashMap,
+    env,
     path::{Path, PathBuf},
 };
 
@@ -21,6 +22,8 @@ use crate::control::{
     TOOL_REPORT_FETCH_CHUNK_EVENT, TOOL_REPORT_FETCH_FINISHED_EVENT,
     TOOL_REPORT_FETCH_STARTED_EVENT,
 };
+
+const REPORT_ALLOWED_ROOTS_ENV: &str = "YC_REPORT_ALLOWED_ROOTS";
 
 /// 报告事件发送通道。
 pub(crate) type ReportEventSender = mpsc::UnboundedSender<ReportEventEnvelope>;
@@ -299,13 +302,7 @@ fn validate_report_path(
     tool: &ToolRuntimePayload,
     file_path: &str,
 ) -> Result<ValidatedPath, ReportExecError> {
-    let workspace = tool
-        .workspace_dir
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ReportExecError::Failed("工具工作区不可用，无法读取报告。".to_string()))?;
-    let requested = PathBuf::from(file_path.trim());
+    let requested = normalize_report_request_path(file_path);
     if !requested.is_absolute() {
         return Err(ReportExecError::Failed(
             "报告路径必须为绝对路径。".to_string(),
@@ -317,13 +314,21 @@ fn validate_report_path(
         ));
     }
 
-    let canonical_workspace = std::fs::canonicalize(workspace)
-        .map_err(|err| ReportExecError::Failed(format!("工作区路径无效: {err}")))?;
     let canonical_file = std::fs::canonicalize(&requested)
         .map_err(|err| ReportExecError::Failed(format!("报告文件不存在或不可访问: {err}")))?;
-    if !canonical_file.starts_with(&canonical_workspace) {
+    if is_sensitive_rule_markdown_path(&canonical_file) {
         return Err(ReportExecError::Failed(
-            "仅允许读取当前工具工作区内的报告文件。".to_string(),
+            "该 Markdown 疑似系统规则文件，已禁止通过报告预览读取。".to_string(),
+        ));
+    }
+    let allowed_roots = resolve_report_allowed_roots(tool)?;
+    if !allowed_roots
+        .iter()
+        .any(|root| canonical_file.starts_with(root))
+    {
+        return Err(ReportExecError::Failed(
+            "仅允许读取当前工具工作区、OpenClaw 产出目录或已配置白名单目录内的报告文件。"
+                .to_string(),
         ));
     }
     let metadata = std::fs::metadata(&canonical_file)
@@ -340,11 +345,141 @@ fn validate_report_path(
     })
 }
 
+fn resolve_report_allowed_roots(tool: &ToolRuntimePayload) -> Result<Vec<PathBuf>, ReportExecError> {
+    let mut candidates = Vec::<PathBuf>::new();
+    if let Some(workspace) = tool
+        .workspace_dir
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        candidates.push(normalize_report_request_path(workspace));
+    }
+    candidates.extend(parse_extra_allowed_roots_from_env());
+    candidates.extend(derive_openclaw_allowed_roots(tool));
+
+    let mut allowed_roots = Vec::<PathBuf>::new();
+    for root in candidates {
+        let canonical = match std::fs::canonicalize(&root) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if !canonical.is_dir() {
+            continue;
+        }
+        if allowed_roots.iter().any(|item| *item == canonical) {
+            continue;
+        }
+        allowed_roots.push(canonical);
+    }
+
+    if allowed_roots.is_empty() {
+        return Err(ReportExecError::Failed(
+            "工具可访问目录不可用，无法读取报告。".to_string(),
+        ));
+    }
+    Ok(allowed_roots)
+}
+
+fn parse_extra_allowed_roots_from_env() -> Vec<PathBuf> {
+    let Some(raw) = env::var_os(REPORT_ALLOWED_ROOTS_ENV) else {
+        return Vec::new();
+    };
+    env::split_paths(&raw)
+        .map(|value| normalize_report_request_path(value.to_string_lossy().as_ref()))
+        .filter(|value| !value.as_os_str().is_empty())
+        .collect()
+}
+
+fn derive_openclaw_allowed_roots(tool: &ToolRuntimePayload) -> Vec<PathBuf> {
+    if !is_openclaw_tool(tool) {
+        return Vec::new();
+    }
+    let profile = parse_openclaw_profile_key_from_source(tool.source.as_deref());
+    let Some(state_dir) = resolve_openclaw_state_dir(profile.as_str()) else {
+        return Vec::new();
+    };
+    vec![state_dir.join("agents")]
+}
+
+fn is_openclaw_tool(tool: &ToolRuntimePayload) -> bool {
+    let tool_id = tool.tool_id.to_ascii_lowercase();
+    let name = tool.name.to_ascii_lowercase();
+    let vendor = tool.vendor.to_ascii_lowercase();
+    tool_id.starts_with("openclaw_") || name.contains("openclaw") || vendor.contains("openclaw")
+}
+
+fn parse_openclaw_profile_key_from_source(source: Option<&str>) -> String {
+    let raw = source.unwrap_or_default();
+    let marker = "profile=";
+    if let Some(pos) = raw.find(marker) {
+        let value = raw[(pos + marker.len())..]
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+    "default".to_string()
+}
+
+fn resolve_openclaw_state_dir(profile_key: &str) -> Option<PathBuf> {
+    let home = env::var("HOME")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let home = PathBuf::from(home);
+    let normalized = profile_key.trim();
+    let path = match normalized {
+        "dev" => home.join(".openclaw-dev"),
+        "" | "default" => home.join(".openclaw"),
+        value => home.join(format!(".openclaw-{value}")),
+    };
+    Some(path)
+}
+
+fn normalize_report_request_path(file_path: &str) -> PathBuf {
+    let trimmed = file_path.trim();
+    if let Some(relative) = trimmed.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return PathBuf::from(home).join(relative);
+    }
+    PathBuf::from(trimmed)
+}
+
 fn is_markdown_file_path(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("md"))
         .unwrap_or(false)
+}
+
+fn is_sensitive_rule_markdown_path(path: &Path) -> bool {
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let sensitive = matches!(
+        file_name.as_str(),
+        "agents.md"
+            | "tools.md"
+            | "identity.md"
+            | "user.md"
+            | "heartbeat.md"
+            | "bootstrap.md"
+            | "memory.md"
+            | "soul.md"
+    );
+    if !sensitive {
+        return false;
+    }
+    let lowered = path.to_string_lossy().to_ascii_lowercase();
+    !(lowered.contains("/output/") || lowered.contains("/reports/") || lowered.contains("/report/"))
 }
 
 fn cancelled(cancel_rx: &watch::Receiver<bool>) -> bool {
@@ -447,7 +582,10 @@ mod tests {
 
     use yc_shared_protocol::ToolRuntimePayload;
 
-    use super::{ReportExecError, is_markdown_file_path, validate_report_path};
+    use super::{
+        ReportExecError, is_markdown_file_path, parse_openclaw_profile_key_from_source,
+        validate_report_path,
+    };
 
     fn make_temp_dir(prefix: &str) -> PathBuf {
         let mut dir = std::env::temp_dir();
@@ -513,11 +651,61 @@ mod tests {
         let result = validate_report_path(&tool, file_path.to_string_lossy().as_ref());
         assert!(matches!(
             result,
-            Err(ReportExecError::Failed(reason)) if reason.contains("工作区内")
+            Err(ReportExecError::Failed(reason)) if reason.contains("目录内")
         ));
 
         let _ = std::fs::remove_dir_all(workspace);
         let _ = std::fs::remove_dir_all(outside_root);
+    }
+
+    #[test]
+    fn validate_report_path_accepts_openclaw_agents_directory() {
+        let workspace = make_temp_dir("workspace_openclaw");
+        let home = std::env::var("HOME").expect("HOME should be set");
+        let marker = format!("yc_sidecar_report_agent_{}", uuid::Uuid::new_v4());
+        let agent_root = PathBuf::from(home)
+            .join(".openclaw")
+            .join("agents")
+            .join(marker);
+        let file_path = agent_root.join("workspace").join("output").join("report.md");
+        std::fs::create_dir_all(
+            file_path
+                .parent()
+                .expect("report path should include parent directory"),
+        )
+        .expect("create report dir");
+        std::fs::write(&file_path, "# OpenClaw report").expect("write report");
+
+        let mut tool = make_tool_with_workspace(&workspace);
+        tool.tool_id = "openclaw_test".to_string();
+        tool.vendor = "OpenClaw".to_string();
+        tool.source = Some("openclaw-process-probe:profile=default".to_string());
+
+        let validated =
+            validate_report_path(&tool, file_path.to_string_lossy().as_ref()).expect("valid path");
+        assert_eq!(
+            validated.path,
+            std::fs::canonicalize(&file_path).expect("canonical file path")
+        );
+
+        let _ = std::fs::remove_dir_all(workspace);
+        let _ = std::fs::remove_dir_all(agent_root);
+    }
+
+    #[test]
+    fn validate_report_path_rejects_sensitive_rule_file_in_workspace() {
+        let workspace = make_temp_dir("sensitive_rule");
+        let file_path = workspace.join("AGENTS.md");
+        std::fs::write(&file_path, "# rule").expect("write rule file");
+
+        let tool = make_tool_with_workspace(&workspace);
+        let result = validate_report_path(&tool, file_path.to_string_lossy().as_ref());
+        assert!(matches!(
+            result,
+            Err(ReportExecError::Failed(reason)) if reason.contains("系统规则文件")
+        ));
+
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -538,5 +726,18 @@ mod tests {
         assert!(is_markdown_file_path(&PathBuf::from("/tmp/a.md")));
         assert!(is_markdown_file_path(&PathBuf::from("/tmp/a.MD")));
         assert!(!is_markdown_file_path(&PathBuf::from("/tmp/a.txt")));
+    }
+
+    #[test]
+    fn parse_openclaw_profile_key_falls_back_to_default() {
+        assert_eq!(
+            parse_openclaw_profile_key_from_source(Some("openclaw-process-probe:profile=team")),
+            "team"
+        );
+        assert_eq!(parse_openclaw_profile_key_from_source(None), "default");
+        assert_eq!(
+            parse_openclaw_profile_key_from_source(Some("openclaw-process-probe")),
+            "default"
+        );
     }
 }

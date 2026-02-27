@@ -3,7 +3,7 @@
 // 2. 提供基础 Markdown 安全渲染（段落/列表/代码）。
 
 import { escapeHtml } from "../utils/dom.js";
-import { renderMarkdown } from "../utils/markdown.js";
+import { renderMarkdown, normalizeReportPathForPreview } from "../utils/markdown.js";
 
 /**
  * 创建聊天视图渲染器。
@@ -11,6 +11,66 @@ import { renderMarkdown } from "../utils/markdown.js";
  * @returns {{renderChat:function}}
  */
 export function createChatView({ state, ui }) {
+  const AUTO_SCROLL_BOTTOM_GAP_PX = 48;
+  const detailScrollState = {
+    listenerBound: false,
+    pinnedToBottom: true,
+    conversationKey: "",
+    messageCount: 0,
+    latestFingerprint: "",
+  };
+
+  function bindChatMessagesScrollListener() {
+    if (detailScrollState.listenerBound || !ui.chatMessages) return;
+    ui.chatMessages.addEventListener("scroll", () => {
+      const el = ui.chatMessages;
+      const distanceToBottom = Math.max(0, el.scrollHeight - el.scrollTop - el.clientHeight);
+      detailScrollState.pinnedToBottom = distanceToBottom <= AUTO_SCROLL_BOTTOM_GAP_PX;
+    }, { passive: true });
+    detailScrollState.listenerBound = true;
+  }
+
+  function messageTimelineFingerprint(conv) {
+    const messages = Array.isArray(conv?.messages) ? conv.messages : [];
+    if (messages.length === 0) return "";
+    const latest = messages[messages.length - 1] || {};
+    return [
+      String(latest.id || ""),
+      String(latest.status || ""),
+      String(latest.ts || ""),
+      String((latest.text || "").length),
+    ].join("|");
+  }
+
+  function maybeAutoScrollChatMessages(conv) {
+    if (!conv || !ui.chatMessages) return;
+    bindChatMessagesScrollListener();
+    const messageCount = Array.isArray(conv.messages) ? conv.messages.length : 0;
+    const latestFingerprint = messageTimelineFingerprint(conv);
+    const conversationChanged = detailScrollState.conversationKey !== String(conv.key || "");
+    const timelineChanged = detailScrollState.messageCount !== messageCount
+      || detailScrollState.latestFingerprint !== latestFingerprint;
+    const shouldScroll = conversationChanged || (timelineChanged && detailScrollState.pinnedToBottom);
+
+    detailScrollState.conversationKey = String(conv.key || "");
+    detailScrollState.messageCount = messageCount;
+    detailScrollState.latestFingerprint = latestFingerprint;
+
+    if (!shouldScroll) return;
+    requestAnimationFrame(() => {
+      if (!ui.chatMessages) return;
+      ui.chatMessages.scrollTop = ui.chatMessages.scrollHeight;
+      detailScrollState.pinnedToBottom = true;
+    });
+  }
+
+  function resetDetailScrollState() {
+    detailScrollState.conversationKey = "";
+    detailScrollState.messageCount = 0;
+    detailScrollState.latestFingerprint = "";
+    detailScrollState.pinnedToBottom = true;
+  }
+
   function formatTime(raw) {
     const ts = Date.parse(String(raw || ""));
     if (!Number.isFinite(ts)) return "--";
@@ -29,6 +89,43 @@ export function createChatView({ state, ui }) {
       }
     }
     return html;
+  }
+
+  function extractMessageReportPaths(msg) {
+    const text = normalizeMessageText(msg?.text || "");
+    const meta = msg && typeof msg.meta === "object" ? msg.meta : {};
+    const rawList = Array.isArray(meta.reportPaths) ? meta.reportPaths : [];
+    const paths = [];
+    rawList.forEach((rawPath) => {
+      const normalizedPath = normalizeReportPathForPreview(rawPath);
+      if (!normalizedPath) return;
+      if (paths.includes(normalizedPath)) return;
+      if (text.includes(normalizedPath)) return;
+      paths.push(normalizedPath);
+    });
+    return paths;
+  }
+
+  function reportPathLabel(path) {
+    const normalized = String(path || "").trim();
+    if (!normalized) return "打开报告";
+    const chunks = normalized.split("/");
+    const fileName = chunks[chunks.length - 1] || normalized;
+    return `打开报告：${fileName}`;
+  }
+
+  function renderReportPathLinks(paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return "";
+    const links = paths
+      .map((path) => (
+        `<a href="#" class="chat-report-link" data-chat-report-path="${escapeHtml(path)}">${escapeHtml(reportPathLabel(path))}</a>`
+      ))
+      .join('<span class="chat-report-link-sep">·</span>');
+    return `
+      <span class="chat-report-links">
+        ${links}
+      </span>
+    `;
   }
 
   function initials(text) {
@@ -141,6 +238,7 @@ export function createChatView({ state, ui }) {
     }
 
     if (!active) {
+      resetDetailScrollState();
       chatState.viewMode = "list";
       toggleMainTabs(true);
       ui.chatOfflineHint.textContent = "";
@@ -162,6 +260,7 @@ export function createChatView({ state, ui }) {
     }
 
     if (onMessagePage) {
+      resetDetailScrollState();
       const viewer = chatState.messageViewer || {};
       const sameConversation = String(viewer.conversationKey || "") === String(active.key || "");
       const targetId = String(viewer.messageId || "");
@@ -184,13 +283,14 @@ export function createChatView({ state, ui }) {
         ? Math.max(0.8, Math.min(1.4, rawScale))
         : 1;
       const scalePercent = Math.round(scale * 100);
+      const reportLinks = renderReportPathLinks(extractMessageReportPaths(target));
       ui.chatMessageTitle.textContent = `${roleLabel(target.role)} · 完整消息`;
       ui.chatMessageMeta.textContent = `${active.hostName || active.hostId} / ${active.toolName || active.toolId} · ${formatTime(target.ts)}`;
       ui.chatMessageZoomLabel.textContent = `${scalePercent}%`;
       ui.chatMessageZoomOutBtn.disabled = scale <= 0.8 + 0.001;
       ui.chatMessageZoomInBtn.disabled = scale >= 1.4 - 0.001;
       ui.chatMessageFullBody.style.fontSize = `${scalePercent}%`;
-      ui.chatMessageFullBody.innerHTML = renderMarkdown(target.text || "");
+      ui.chatMessageFullBody.innerHTML = `${renderMarkdown(target.text || "")}${reportLinks}`;
       return;
     }
 
@@ -230,6 +330,7 @@ export function createChatView({ state, ui }) {
             : "";
           const timeText = formatTime(msg.ts);
           const messageBodyHtml = renderBubbleMarkdown(msg.text || "");
+          const messageReportLinks = renderReportPathLinks(extractMessageReportPaths(msg));
           return `
           <div
             class="chat-message ${escapeHtml(msg.role || "assistant")} ${escapeHtml(msg.status || "")} ${selectClass}"
@@ -239,6 +340,7 @@ export function createChatView({ state, ui }) {
             <div class="chat-message-body-wrap ${collapsed ? "collapsed" : ""}">
               <div class="chat-message-body markdown-body">
                 ${messageBodyHtml}
+                ${messageReportLinks}
                 ${collapsed ? "" : `<span class="chat-message-time-inline">${timeText}</span>`}
               </div>
               ${collapsed ? '<div class="chat-message-body-fade"></div>' : ""}
@@ -301,6 +403,8 @@ export function createChatView({ state, ui }) {
     const showStop = Boolean(active.running);
     ui.chatStopBtn.classList.toggle("hidden", !showStop);
     ui.chatStopBtn.disabled = !showStop;
+
+    maybeAutoScrollChatMessages(active);
   }
 
   return { renderChat };

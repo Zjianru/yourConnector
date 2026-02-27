@@ -1218,6 +1218,47 @@
         word-break: break-all;
       }
 
+      .chat-report-links {
+        margin-left: 3px;
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 5px;
+        vertical-align: baseline;
+      }
+
+      .chat-report-link {
+        display: inline-flex;
+        align-items: center;
+        color: #86d8ff !important;
+        text-decoration: underline !important;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 2px;
+        font-size: 12px;
+        line-height: 1.45;
+        word-break: break-all;
+      }
+
+      .chat-report-link-sep {
+        color: rgba(148, 163, 184, 0.62);
+        font-size: 12px;
+      }
+
+      .chat-report-code-link {
+        display: inline-block;
+        max-width: 100%;
+        padding: 2px 8px;
+        border-radius: 9px;
+        border: 1px solid rgba(125, 211, 252, 0.32);
+        background: rgba(2, 132, 199, 0.14);
+        color: #86d8ff !important;
+        text-decoration: none !important;
+        font-family: "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 12px;
+        line-height: 1.4;
+        word-break: break-all;
+      }
+
       .report-viewer-modal-card {
         max-height: calc(100vh - 120px);
       }

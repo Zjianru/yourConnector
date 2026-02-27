@@ -6,8 +6,18 @@
 import { escapeHtml } from "./dom.js";
 
 const REPORT_LINK_SCHEME = "yc-report://";
-const REPORT_PATH_REGEX = /\/[^\s`<>\[\]\(\)"']+\.md\b/g;
+const REPORT_PATH_REGEX = /(?:\/|~\/)[^\s`<>\[\]\(\)"']+\.md\b/g;
 const INLINE_CODE_PLACEHOLDER_REGEX = /`[^`]*`/g;
+const SENSITIVE_RULE_MARKDOWN_BASENAMES = new Set([
+  "agents.md",
+  "tools.md",
+  "identity.md",
+  "user.md",
+  "heartbeat.md",
+  "bootstrap.md",
+  "memory.md",
+  "soul.md",
+]);
 
 let markdownRenderer = null;
 
@@ -33,10 +43,66 @@ function shouldSkipPathMatch(line, start) {
   return false;
 }
 
+function isSensitiveRuleMarkdownPath(path) {
+  const normalized = String(path || "").trim().toLowerCase();
+  if (!normalized.endsWith(".md")) return false;
+  const fileName = normalized.split("/").pop() || "";
+  if (!SENSITIVE_RULE_MARKDOWN_BASENAMES.has(fileName)) return false;
+  return !normalized.includes("/output/")
+    && !normalized.includes("/report/")
+    && !normalized.includes("/reports/");
+}
+
+function normalizeReportPath(raw) {
+  let path = String(raw || "").trim();
+  if (!path) return "";
+
+  if (path.startsWith(REPORT_LINK_SCHEME)) {
+    path = path.slice(REPORT_LINK_SCHEME.length);
+    try {
+      path = decodeURIComponent(path);
+    } catch (_) {
+      // keep raw value
+    }
+  } else if (path.toLowerCase().startsWith("file://")) {
+    try {
+      const url = new URL(path);
+      path = decodeURIComponent(url.pathname || "");
+    } catch (_) {
+      return "";
+    }
+  } else {
+    try {
+      path = decodeURIComponent(path);
+    } catch (_) {
+      // keep raw value
+    }
+  }
+
+  if (!path.startsWith("/") && !path.startsWith("~/")) return "";
+  if (!/\.md$/i.test(path)) return "";
+  if (isSensitiveRuleMarkdownPath(path)) return "";
+  return path;
+}
+
+function decodeReportPathFromHref(rawHref) {
+  const href = String(rawHref || "").trim();
+  if (!href) return "";
+  return normalizeReportPath(href);
+}
+
 function replaceReportPathsInLine(line) {
   const inlineCodeTokens = [];
+  let inlineReplaced = false;
   const protectedLine = String(line || "").replace(INLINE_CODE_PLACEHOLDER_REGEX, (chunk) => {
+    const inline = String(chunk || "");
+    const inlinePath = normalizeReportPath(inline.slice(1, -1));
     const token = `@@YC_INLINE_CODE_${inlineCodeTokens.length}@@`;
+    if (inlinePath) {
+      inlineReplaced = true;
+      inlineCodeTokens.push(`[${inlinePath}](${REPORT_LINK_SCHEME}${encodeURIComponent(inlinePath)})`);
+      return token;
+    }
     inlineCodeTokens.push(chunk);
     return token;
   });
@@ -48,13 +114,14 @@ function replaceReportPathsInLine(line) {
   let match = REPORT_PATH_REGEX.exec(protectedLine);
   while (match) {
     const path = String(match[0] || "");
+    const normalizedPath = normalizeReportPath(path);
     const start = Number(match.index || 0);
-    if (!path || shouldSkipPathMatch(protectedLine, start)) {
+    if (!normalizedPath || shouldSkipPathMatch(protectedLine, start)) {
       match = REPORT_PATH_REGEX.exec(protectedLine);
       continue;
     }
     output += protectedLine.slice(cursor, start);
-    output += `[${path}](${REPORT_LINK_SCHEME}${encodeURIComponent(path)})`;
+    output += `[${normalizedPath}](${REPORT_LINK_SCHEME}${encodeURIComponent(normalizedPath)})`;
     cursor = start + path.length;
     replaced = true;
     match = REPORT_PATH_REGEX.exec(protectedLine);
@@ -64,7 +131,17 @@ function replaceReportPathsInLine(line) {
     const index = Number(rawIndex);
     return inlineCodeTokens[index] || "";
   });
-  return replaced ? restored : String(line || "");
+  return (replaced || inlineReplaced) ? restored : String(line || "");
+}
+
+function rewriteMarkdownReportLinkTargets(line) {
+  return String(line || "").replace(/\]\(([^)\s]+)\)/g, (all, rawHref) => {
+    const reportPath = decodeReportPathFromHref(rawHref);
+    if (!reportPath) {
+      return all;
+    }
+    return `](${REPORT_LINK_SCHEME}${encodeURIComponent(reportPath)})`;
+  });
 }
 
 function replaceReportPathsOutsideCodeBlocks(text) {
@@ -100,21 +177,38 @@ function replaceReportPathsOutsideCodeBlocks(text) {
       output.push(line);
       continue;
     }
-    output.push(replaceReportPathsInLine(line));
+    const rewrittenLine = rewriteMarkdownReportLinkTargets(line);
+    output.push(replaceReportPathsInLine(rewrittenLine));
   }
 
   return output.join("\n");
 }
 
 function rewriteReportLinkAnchors(html) {
-  return String(html || "").replace(/<a href="yc-report:\/\/([^"]+)"([^>]*)>/g, (_all, encodedPath, attrs) => {
-    let decodedPath = String(encodedPath || "");
-    try {
-      decodedPath = decodeURIComponent(decodedPath);
-    } catch (_) {
-      // keep encoded fallback
+  return String(html || "").replace(/<a href="([^"]+)"([^>]*)>/g, (all, href, attrs) => {
+    const reportPath = decodeReportPathFromHref(href);
+    if (!reportPath) {
+      return all;
     }
-    return `<a href="#" data-chat-report-path="${escapeHtml(decodedPath)}"${attrs || ""}>`;
+    return `<a href="#" data-chat-report-path="${escapeHtml(reportPath)}"${attrs || ""}>`;
+  });
+}
+
+function rewriteReportPathCodeBlocks(html) {
+  return String(html || "").replace(/<pre><code>([\s\S]*?)<\/code><\/pre>/g, (all, rawCode) => {
+    const normalizedCode = String(rawCode || "")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&amp;/g, "&")
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, "\"")
+      .trim();
+    if (!normalizedCode) return all;
+    const singleLine = normalizedCode.split("\n").map((line) => line.trim()).filter(Boolean);
+    if (singleLine.length !== 1) return all;
+    const reportPath = normalizeReportPath(singleLine[0]);
+    if (!reportPath) return all;
+    return `<p><a href="#" class="chat-report-code-link" data-chat-report-path="${escapeHtml(reportPath)}">${escapeHtml(reportPath)}</a></p>`;
   });
 }
 
@@ -130,7 +224,17 @@ export function renderMarkdown(rawText) {
     const escaped = escapeHtml(source).replace(/\n/g, "<br />");
     return `<p>${escaped}</p>`;
   }
-  return rewriteReportLinkAnchors(renderer.render(source));
+  const rendered = renderer.render(source);
+  return rewriteReportLinkAnchors(rewriteReportPathCodeBlocks(rendered));
+}
+
+/**
+ * 归一化并校验报告路径（仅允许可预览的报告文件）。
+ * @param {string} raw 原始路径。
+ * @returns {string}
+ */
+export function normalizeReportPathForPreview(raw) {
+  return normalizeReportPath(raw);
 }
 
 /**

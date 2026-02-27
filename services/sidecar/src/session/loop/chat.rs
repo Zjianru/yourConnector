@@ -430,6 +430,12 @@ struct OpenClawHistoryAnchor {
     latest_timestamp: i64,
 }
 
+#[derive(Debug, Clone, Default)]
+struct OpenClawChatReply {
+    text: String,
+    report_paths: Vec<String>,
+}
+
 async fn resolve_openclaw_route(tool: &ToolRuntimePayload) -> OpenClawRoute {
     let mut command = Command::new("openclaw");
     apply_openclaw_profile(tool, &mut command);
@@ -444,16 +450,15 @@ async fn resolve_openclaw_route(tool: &ToolRuntimePayload) -> OpenClawRoute {
     {
         let stdout = String::from_utf8_lossy(&raw.stdout).to_string();
         if let Some(value) = extract_json_payload(&stdout) {
-            session_id = value
-                .pointer("/sessions/recent/0/sessionId")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            session_key = value
-                .pointer("/sessions/recent/0/key")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
+            if let Some((picked_session_id, picked_session_key, picked_agent_id)) =
+                select_openclaw_recent_session(&value)
+            {
+                session_id = picked_session_id;
+                session_key = picked_session_key;
+                if !picked_agent_id.is_empty() {
+                    agent_id = picked_agent_id;
+                }
+            }
             let candidate_agent = value
                 .pointer("/heartbeat/defaultAgentId")
                 .and_then(Value::as_str)
@@ -471,6 +476,70 @@ async fn resolve_openclaw_route(tool: &ToolRuntimePayload) -> OpenClawRoute {
         session_key,
         agent_id,
     }
+}
+
+fn select_openclaw_recent_session(status_json: &Value) -> Option<(String, String, String)> {
+    let recent = status_json
+        .pointer("/sessions/recent")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    for row in recent {
+        if is_openclaw_system_session(&row) {
+            continue;
+        }
+        let session_id = read_string_any(&row, &["sessionId", "sessionID"]).trim().to_string();
+        let session_key = read_string_any(&row, &["key"]).trim().to_string();
+        if session_id.is_empty() && session_key.is_empty() {
+            continue;
+        }
+        let agent_id = read_string_any(&row, &["agentId"]).trim().to_string();
+        return Some((session_id, session_key, agent_id));
+    }
+    None
+}
+
+fn is_openclaw_system_session(session_row: &Value) -> bool {
+    if session_row
+        .get("systemSent")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    let kind = read_string_any(session_row, &["kind"])
+        .trim()
+        .to_ascii_lowercase();
+    if kind.contains("system") || kind.contains("cron") || kind.contains("task") {
+        return true;
+    }
+
+    let key = read_string_any(session_row, &["key"])
+        .trim()
+        .to_ascii_lowercase();
+    if key.contains("session-cleanup") || key.starts_with("cron:") || key.starts_with("system:") {
+        return true;
+    }
+
+    let Some(flags) = session_row.get("flags").and_then(Value::as_array) else {
+        return false;
+    };
+    for flag in flags {
+        let normalized = flag
+            .as_str()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if normalized.contains("system")
+            || normalized.contains("cron")
+            || normalized.contains("task")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 async fn run_openclaw_agent_request(
@@ -573,14 +642,19 @@ async fn run_openclaw_slash_request(
                 "sessionKey": session_key,
                 "status": status,
                 "source": "gateway.chat.send",
+                "reportPaths": [],
             }),
         });
     }
 
-    if let Some(reply_text) =
+    if let Some(reply) =
         poll_openclaw_chat_reply_after(tool, session_key.as_str(), history_anchor, cancel_rx)
             .await?
     {
+        let OpenClawChatReply {
+            text: reply_text,
+            report_paths,
+        } = reply;
         return Ok(OpenClawAttemptResult {
             text: reply_text,
             meta: json!({
@@ -589,6 +663,7 @@ async fn run_openclaw_slash_request(
                 "sessionKey": session_key,
                 "status": status,
                 "source": "gateway.chat.send",
+                "reportPaths": report_paths,
             }),
         });
     }
@@ -602,6 +677,7 @@ async fn run_openclaw_slash_request(
             "sessionKey": session_key,
             "status": status,
             "source": "gateway.chat.send",
+            "reportPaths": [],
         }),
     })
 }
@@ -611,7 +687,7 @@ async fn poll_openclaw_chat_reply_after(
     session_key: &str,
     anchor: OpenClawHistoryAnchor,
     cancel_rx: &mut watch::Receiver<bool>,
-) -> Result<Option<String>, ChatExecError> {
+) -> Result<Option<OpenClawChatReply>, ChatExecError> {
     let started_at = Instant::now();
     loop {
         if cancelled(cancel_rx) {
@@ -620,8 +696,8 @@ async fn poll_openclaw_chat_reply_after(
         let history_payload = run_openclaw_chat_history(tool, session_key, cancel_rx)
             .await
             .map_err(map_openclaw_slash_gateway_error)?;
-        if let Some(reply_text) = extract_openclaw_chat_reply_after(&history_payload, anchor) {
-            return Ok(Some(reply_text));
+        if let Some(reply) = extract_openclaw_chat_reply_after(&history_payload, anchor) {
+            return Ok(Some(reply));
         }
         if started_at.elapsed() >= OPENCLAW_CHAT_HISTORY_SYNC_POLL_TIMEOUT {
             return Ok(None);
@@ -760,11 +836,14 @@ fn capture_openclaw_history_anchor(payload: &Value) -> OpenClawHistoryAnchor {
 fn extract_openclaw_chat_reply_after(
     payload: &Value,
     anchor: OpenClawHistoryAnchor,
-) -> Option<String> {
+) -> Option<OpenClawChatReply> {
     let rows = payload.get("messages").and_then(Value::as_array)?;
     let mut assistant_rows = Vec::new();
     let mut tool_rows = Vec::new();
     let mut system_rows = Vec::new();
+    let mut assistant_report_paths = Vec::new();
+    let mut tool_report_paths = Vec::new();
+    let mut system_report_paths = Vec::new();
 
     for row in rows {
         let timestamp = row
@@ -779,24 +858,37 @@ fn extract_openclaw_chat_reply_after(
         if text.is_empty() {
             continue;
         }
+        let report_paths = collect_markdown_report_paths(row);
         let role = row.get("role").and_then(Value::as_str).unwrap_or_default();
         if role == "assistant" {
             assistant_rows.push(text);
+            append_unique_paths(&mut assistant_report_paths, report_paths);
         } else if role == "toolResult" {
             tool_rows.push(text);
+            append_unique_paths(&mut tool_report_paths, report_paths);
         } else if role == "system" {
             system_rows.push(text);
+            append_unique_paths(&mut system_report_paths, report_paths);
         }
     }
 
     if !assistant_rows.is_empty() {
-        return Some(assistant_rows.join("\n"));
+        return Some(OpenClawChatReply {
+            text: assistant_rows.join("\n"),
+            report_paths: assistant_report_paths,
+        });
     }
     if !tool_rows.is_empty() {
-        return Some(tool_rows.join("\n"));
+        return Some(OpenClawChatReply {
+            text: tool_rows.join("\n"),
+            report_paths: tool_report_paths,
+        });
     }
     if !system_rows.is_empty() {
-        return Some(system_rows.join("\n"));
+        return Some(OpenClawChatReply {
+            text: system_rows.join("\n"),
+            report_paths: system_report_paths,
+        });
     }
     None
 }
@@ -823,6 +915,192 @@ fn extract_openclaw_chat_message_text(row: &Value) -> String {
         .map(str::trim)
         .unwrap_or_default()
         .to_string()
+}
+
+fn collect_markdown_report_paths(value: &Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_markdown_report_paths_recursive(value, None, &mut paths);
+    paths
+}
+
+fn collect_markdown_report_paths_recursive(
+    value: &Value,
+    context_key: Option<&str>,
+    output: &mut Vec<String>,
+) {
+    match value {
+        Value::String(text) => {
+            let Some(context) = context_key else {
+                return;
+            };
+            if !is_report_path_context_key(context) && !is_report_path_container_key(context) {
+                return;
+            }
+            collect_markdown_paths_from_text(text, output);
+        }
+        Value::Array(rows) => {
+            for row in rows {
+                collect_markdown_report_paths_recursive(row, context_key, output);
+            }
+        }
+        Value::Object(map) => {
+            let parent_is_container = context_key
+                .map(is_report_path_container_key)
+                .unwrap_or(false);
+            for (key, nested) in map {
+                let key_text = key.as_str();
+                if !parent_is_container
+                    && !is_report_path_context_key(key_text)
+                    && !is_report_path_container_key(key_text)
+                {
+                    continue;
+                }
+                collect_markdown_report_paths_recursive(nested, Some(key_text), output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_markdown_paths_from_text(raw: &str, output: &mut Vec<String>) {
+    let text = raw.trim();
+    if text.is_empty() {
+        return;
+    }
+    let chars = text.char_indices().collect::<Vec<(usize, char)>>();
+    if chars.is_empty() {
+        return;
+    }
+
+    let mut index = 0usize;
+    while index < chars.len() {
+        let (start_byte, ch) = chars[index];
+        let is_absolute = ch == '/';
+        let is_home_relative =
+            ch == '~' && chars.get(index + 1).map(|(_, next)| *next == '/').unwrap_or(false);
+        if !is_absolute && !is_home_relative {
+            index += 1;
+            continue;
+        }
+        if !has_path_boundary(text, start_byte) {
+            index += 1;
+            continue;
+        }
+
+        let mut end_index = if is_home_relative { index + 2 } else { index + 1 };
+        while end_index < chars.len() && !is_path_terminator(chars[end_index].1) {
+            end_index += 1;
+        }
+        let end_byte = if end_index < chars.len() {
+            chars[end_index].0
+        } else {
+            text.len()
+        };
+        let candidate = text[start_byte..end_byte]
+            .trim_end_matches(|char| matches!(char, '.' | ',' | ';' | ':' | '!' | '?'));
+        if is_markdown_report_path_candidate(candidate) {
+            push_unique_path(output, candidate);
+            index = end_index;
+            continue;
+        }
+        index += 1;
+    }
+}
+
+fn has_path_boundary(text: &str, start_byte: usize) -> bool {
+    if start_byte == 0 {
+        return true;
+    }
+    if text[..start_byte].ends_with("](") {
+        return false;
+    }
+    let prev = text[..start_byte].chars().next_back().unwrap_or(' ');
+    if prev == ':' {
+        return false;
+    }
+    prev.is_whitespace() || matches!(prev, '(' | '[' | '{' | '"' | '\'' | '<' | '>' | '|')
+}
+
+fn is_path_terminator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '`' | '<' | '>' | '[' | ']' | '(' | ')' | '"' | '\'' | '{' | '}'
+        )
+}
+
+fn is_markdown_report_path_candidate(raw: &str) -> bool {
+    let normalized = raw.trim();
+    if !(normalized.starts_with('/') || normalized.starts_with("~/")) {
+        return false;
+    }
+    if !normalized.to_ascii_lowercase().ends_with(".md") {
+        return false;
+    }
+    !is_sensitive_rule_markdown_path(normalized)
+}
+
+fn is_report_path_context_key(raw_key: &str) -> bool {
+    let normalized = normalize_context_key(raw_key);
+    normalized.contains("path")
+        || normalized == "file"
+        || normalized == "files"
+        || normalized == "uri"
+        || normalized == "uris"
+}
+
+fn is_report_path_container_key(raw_key: &str) -> bool {
+    let normalized = normalize_context_key(raw_key);
+    normalized.contains("artifact")
+        || normalized.contains("report")
+        || normalized.contains("output")
+        || normalized.contains("attachment")
+        || normalized == "files"
+}
+
+fn normalize_context_key(raw_key: &str) -> String {
+    raw_key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+fn is_sensitive_rule_markdown_path(raw: &str) -> bool {
+    let lowered = raw.trim().to_ascii_lowercase();
+    let file_name = lowered.rsplit('/').next().unwrap_or_default();
+    let sensitive = matches!(
+        file_name,
+        "agents.md"
+            | "tools.md"
+            | "identity.md"
+            | "user.md"
+            | "heartbeat.md"
+            | "bootstrap.md"
+            | "memory.md"
+            | "soul.md"
+    );
+    if !sensitive {
+        return false;
+    }
+    !(lowered.contains("/output/") || lowered.contains("/reports/") || lowered.contains("/report/"))
+}
+
+fn append_unique_paths(target: &mut Vec<String>, incoming: Vec<String>) {
+    for path in incoming {
+        push_unique_path(target, path.as_str());
+    }
+}
+
+fn push_unique_path(target: &mut Vec<String>, raw: &str) {
+    let normalized = raw.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    if target.iter().any(|existing| existing == normalized) {
+        return;
+    }
+    target.push(normalized.to_string());
 }
 
 fn openclaw_chat_status(payload: &Value) -> &str {
@@ -896,6 +1174,7 @@ async fn run_openclaw_once(
     })?;
     let extracted_text =
         extract_openclaw_text(&parsed).unwrap_or_else(|| compact_json_text(&parsed, 1200));
+    let report_paths = collect_markdown_report_paths(&parsed);
     let meta = json!({
         "sessionId": parsed
             .pointer("/result/meta/agentMeta/sessionId")
@@ -917,6 +1196,7 @@ async fn run_openclaw_once(
             .cloned()
             .unwrap_or_else(|| json!({})),
         "local": local_mode,
+        "reportPaths": report_paths,
     });
 
     Ok(OpenClawAttemptResult {
@@ -1386,9 +1666,10 @@ mod tests {
 
     use super::{
         ChatExecError, OpenClawAttemptResult, OpenClawHistoryAnchor, OpenClawRoute,
-        OpenClawRouteDecision, compact_json_text, decide_openclaw_route, extract_json_payload,
-        extract_openclaw_chat_reply_after, extract_openclaw_command_token, extract_openclaw_text,
-        is_openclaw_known_slash_command, parse_opencode_line, resolve_openclaw_session_key,
+        OpenClawRouteDecision, collect_markdown_report_paths, compact_json_text,
+        decide_openclaw_route, extract_json_payload, extract_openclaw_chat_reply_after,
+        extract_openclaw_command_token, extract_openclaw_text, is_openclaw_known_slash_command,
+        parse_opencode_line, resolve_openclaw_session_key, select_openclaw_recent_session,
         wait_child_with_cancel,
     };
 
@@ -1522,9 +1803,9 @@ mod tests {
         let anchor = OpenClawHistoryAnchor {
             latest_timestamp: 15,
         };
-        let text = extract_openclaw_chat_reply_after(&payload, anchor)
+        let reply = extract_openclaw_chat_reply_after(&payload, anchor)
             .expect("assistant reply should be extracted");
-        assert_eq!(text, "final answer");
+        assert_eq!(reply.text, "final answer");
     }
 
     #[test]
@@ -1545,13 +1826,81 @@ mod tests {
             latest_timestamp: 10,
         };
 
-        let tool_text = extract_openclaw_chat_reply_after(&tool_payload, anchor)
+        let tool_reply = extract_openclaw_chat_reply_after(&tool_payload, anchor)
             .expect("tool reply should be extracted");
-        assert_eq!(tool_text, "tool output");
+        assert_eq!(tool_reply.text, "tool output");
 
-        let system_text = extract_openclaw_chat_reply_after(&system_payload, anchor)
+        let system_reply = extract_openclaw_chat_reply_after(&system_payload, anchor)
             .expect("system reply should be extracted");
-        assert_eq!(system_text, "compacted 1\ncompacted 2");
+        assert_eq!(system_reply.text, "compacted 1\ncompacted 2");
+    }
+
+    #[test]
+    fn extract_openclaw_chat_reply_after_should_collect_report_paths() {
+        let payload = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "timestamp": 30,
+                    "content": [{"type": "text", "text": "已输出报告"}],
+                    "artifacts": [
+                        {"path":"/Users/codez/.openclaw/agents/main/workspace/output/a.md"},
+                        {"path":"~/reports/summary.md"}
+                    ]
+                }
+            ]
+        });
+        let anchor = OpenClawHistoryAnchor {
+            latest_timestamp: 10,
+        };
+        let reply = extract_openclaw_chat_reply_after(&payload, anchor)
+            .expect("reply should be extracted");
+        assert_eq!(reply.text, "已输出报告");
+        assert_eq!(
+            reply.report_paths,
+            vec![
+                "/Users/codez/.openclaw/agents/main/workspace/output/a.md",
+                "~/reports/summary.md"
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_markdown_report_paths_should_dedupe_and_filter_non_md() {
+        let payload = json!({
+            "reportPaths":[
+                "/tmp/a.md",
+                "/tmp/a.md",
+                "~/demo/report.MD"
+            ],
+            "artifacts":[
+                {"filePath":"report.txt"},
+                {"path":"~/demo/report.MD"}
+            ]
+        });
+        let mut paths = collect_markdown_report_paths(&payload);
+        paths.sort();
+        assert_eq!(paths, vec!["/tmp/a.md", "~/demo/report.MD"]);
+    }
+
+    #[test]
+    fn collect_markdown_report_paths_should_filter_sensitive_rule_docs() {
+        let payload = json!({
+            "reportPaths":[
+                "/Users/codez/develop/yourConnector/AGENTS.md",
+                "/Users/codez/.openclaw/agents/main/workspace/output/AGENTS.md",
+                "/Users/codez/develop/yourConnector/output/real-report.md"
+            ]
+        });
+        let mut paths = collect_markdown_report_paths(&payload);
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec![
+                "/Users/codez/.openclaw/agents/main/workspace/output/AGENTS.md",
+                "/Users/codez/develop/yourConnector/output/real-report.md"
+            ]
+        );
     }
 
     #[test]
@@ -1572,6 +1921,49 @@ mod tests {
             resolve_openclaw_session_key(&fallback_route),
             "agent:ops:main"
         );
+    }
+
+    #[test]
+    fn select_openclaw_recent_session_should_skip_system_rows() {
+        let status = json!({
+            "sessions": {
+                "recent": [
+                    {
+                        "sessionId": "cron_1",
+                        "key": "cron:session-cleanup",
+                        "agentId": "ops",
+                        "systemSent": true
+                    },
+                    {
+                        "sessionId": "user_1",
+                        "key": "agent:main:main",
+                        "agentId": "main",
+                        "systemSent": false
+                    }
+                ]
+            }
+        });
+        let picked = select_openclaw_recent_session(&status).expect("should pick user session");
+        assert_eq!(picked.0, "user_1");
+        assert_eq!(picked.1, "agent:main:main");
+        assert_eq!(picked.2, "main");
+    }
+
+    #[test]
+    fn select_openclaw_recent_session_should_return_none_when_only_system_rows() {
+        let status = json!({
+            "sessions": {
+                "recent": [
+                    {
+                        "sessionId": "cron_1",
+                        "key": "cron:session-cleanup",
+                        "agentId": "ops",
+                        "systemSent": true
+                    }
+                ]
+            }
+        });
+        assert!(select_openclaw_recent_session(&status).is_none());
     }
 
     #[cfg(unix)]

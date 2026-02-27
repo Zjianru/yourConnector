@@ -139,6 +139,47 @@ export function createToolDetailModal({
   }
 
   /**
+   * 解析时间输入为毫秒时间戳（支持秒/毫秒/ISO）。
+   * @param {unknown} raw 原始时间值。
+   * @returns {number}
+   */
+  function parseTimeMs(raw) {
+    if (raw == null || raw === "") {
+      return NaN;
+    }
+    const num = Number(raw);
+    if (Number.isFinite(num) && num > 0) {
+      return num > 1_000_000_000_000 ? num : num * 1000;
+    }
+    const parsed = Date.parse(String(raw));
+    return Number.isFinite(parsed) ? parsed : NaN;
+  }
+
+  /**
+   * 判断详情是否超过 expiresAt 失效时间。
+   * @param {Record<string, any>} detail 详情封装。
+   * @param {Record<string, any>} detailData 详情数据体。
+   * @returns {boolean}
+   */
+  function isDetailExpired(detail, detailData) {
+    const expiresMs = parseTimeMs(detail?.expiresAt || detailData?.expiresAt);
+    if (!Number.isFinite(expiresMs)) {
+      return false;
+    }
+    return Date.now() > expiresMs;
+  }
+
+  /**
+   * 选择 OpenClaw 时效文案使用的时间戳来源。
+   * @param {Record<string, any>} detail 详情封装。
+   * @param {Record<string, any>} detailData 详情数据体。
+   * @returns {unknown}
+   */
+  function openClawFreshnessTimestamp(detail, detailData) {
+    return detail?.collectedAt || detailData?.collectedAt || detailData?.collectingSince;
+  }
+
+  /**
    * 解析 OpenClaw 状态点（网关）。
    * @param {Record<string, any>} detailData 详情 data。
    * @returns {"online"|"offline"|"unknown"}
@@ -1216,11 +1257,23 @@ export function createToolDetailModal({
    */
   function renderOpenClawModal(input) {
     const { runtime, tool, metric, detail, detailData, displayName } = input;
-    const gatewayDot = openClawGatewayDot(detailData);
-    const dataDot = openClawDataDot(detailData, asBool(detail.stale));
+    const detailExpired = isDetailExpired(detail, detailData);
+    const detailStale = asBool(detail.stale) || detailExpired;
+    let gatewayDot = openClawGatewayDot(detailData);
+    let dataDot = openClawDataDot(detailData, detailStale);
+    const runtimeOnline = runtime?.connected && String(runtime?.sidecarStatus || "").trim().toUpperCase() === "ONLINE";
+    const toolOnline = asBool(metric.connected ?? tool.connected)
+      && String(metric.status ?? tool.status ?? "").trim().toLowerCase() !== "offline";
+    if (detailExpired && dataDot === "fresh") {
+      dataDot = "stale";
+    }
+    if (detailStale && runtimeOnline && toolOnline && gatewayDot !== "online") {
+      // 详情过期时优先显示当前运行态，避免“可聊天但网关离线”的误报。
+      gatewayDot = "online";
+    }
     const freshnessLabel = openClawFreshnessLabel(
       dataDot,
-      detail.collectedAt || detailData.collectingSince,
+      openClawFreshnessTimestamp(detail, detailData),
     );
     const summaryRows = buildOpenClawSummaryRows(detailData);
     const pages = buildOpenClawPages(detailData);
@@ -1245,7 +1298,7 @@ export function createToolDetailModal({
 
     ui.toggleDetailsBtn.style.display = "none";
     ui.detailRows.innerHTML = renderOpenClawPages(pages);
-    ui.detailTip.textContent = asBool(detail.stale)
+    ui.detailTip.textContent = detailStale
       ? "当前展示的是最近一次成功采集结果，数据状态为过期。"
       : "点击上方标签切换概览、Agents、Sessions、Usage、系统与服务。";
     ui.usagePanel.style.display = "none";
