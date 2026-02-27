@@ -1,5 +1,5 @@
 // 文件职责：
-// 1. 渲染运维/调试两页签状态。
+// 1. 渲染运维/聊天两页签状态。
 // 2. 将标签页 UI 切换逻辑从主流程中抽离。
 
 /**
@@ -10,14 +10,11 @@
 export function renderTabs(state, ui) {
   const onOps = state.activeTab === "ops";
   const onChat = state.activeTab === "chat";
-  const onDebug = state.activeTab === "debug";
   if (ui.topBar) {
     ui.topBar.classList.toggle("hidden", !onOps);
   }
   ui.opsView.classList.toggle("active", onOps);
   ui.chatView.classList.toggle("active", onChat);
-  ui.debugView.classList.toggle("active", onDebug);
   ui.tabOps.classList.toggle("active", onOps);
   ui.tabChat.classList.toggle("active", onChat);
-  ui.tabDebug.classList.toggle("active", onDebug);
 }

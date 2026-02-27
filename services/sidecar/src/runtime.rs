@@ -38,7 +38,9 @@ pub(crate) fn fallback_tools_or_empty(fallback_tool: bool) -> Vec<ToolRuntimePay
         connected: false,
         endpoint: String::new(),
         pid: None,
-        reason: Some("未发现 OpenCode/OpenClaw 进程，展示 fallback 工具".to_string()),
+        reason: Some(
+            "未发现 OpenCode/OpenClaw/Codex/Claude Code 进程，展示 fallback 工具".to_string(),
+        ),
         cpu_percent: Some(0.0),
         memory_mb: Some(0.0),
         source: Some("fallback".to_string()),

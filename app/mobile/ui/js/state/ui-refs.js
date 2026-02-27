@@ -14,11 +14,9 @@ export function createUiRefs() {
     topBar: document.getElementById("topBar"),
     opsView: document.getElementById("opsView"),
     chatView: document.getElementById("chatView"),
-    debugView: document.getElementById("debugView"),
     mainTabs: document.getElementById("mainTabs"),
     tabOps: document.getElementById("tabOps"),
     tabChat: document.getElementById("tabChat"),
-    tabDebug: document.getElementById("tabDebug"),
 
     // 顶部操作。
     connectBtnTop: document.getElementById("connectBtnTop"),
@@ -30,24 +28,9 @@ export function createUiRefs() {
     hostOverviewWrap: document.getElementById("hostOverviewWrap"),
     importPairLinkBtn: document.getElementById("importPairLinkBtn"),
     openManualPairBtn: document.getElementById("openManualPairBtn"),
-    openDebugFromSetupBtn: document.getElementById("openDebugFromSetupBtn"),
     hostBannerTrack: document.getElementById("hostBannerTrack"),
     hostBannerDots: document.getElementById("hostBannerDots"),
     toolsGroupedList: document.getElementById("toolsGroupedList"),
-
-    // 调试页。
-    debugStatus: document.getElementById("debugStatus"),
-    debugEvents: document.getElementById("debugEvents"),
-    debugHostSelect: document.getElementById("debugHostSelect"),
-    debugIdentity: document.getElementById("debugIdentity"),
-    connectBtnDebug: document.getElementById("connectBtnDebug"),
-    disconnectBtnDebug: document.getElementById("disconnectBtnDebug"),
-    rebindControllerBtn: document.getElementById("rebindControllerBtn"),
-    messageInput: document.getElementById("messageInput"),
-    sendBtn: document.getElementById("sendBtn"),
-    copyOpLogsBtn: document.getElementById("copyOpLogsBtn"),
-    clearLogsBtn: document.getElementById("clearLogsBtn"),
-    logBox: document.getElementById("logBox"),
 
     // 聊天页。
     chatListPage: document.getElementById("chatListPage"),
@@ -69,6 +52,11 @@ export function createUiRefs() {
     chatMessages: document.getElementById("chatMessages"),
     chatQueueSummary: document.getElementById("chatQueueSummary"),
     chatQueue: document.getElementById("chatQueue"),
+    chatComposerMediaTray: document.getElementById("chatComposerMediaTray"),
+    chatMediaInput: document.getElementById("chatMediaInput"),
+    chatAttachBtn: document.getElementById("chatAttachBtn"),
+    chatRecordBtn: document.getElementById("chatRecordBtn"),
+    chatRecordStatus: document.getElementById("chatRecordStatus"),
     chatInput: document.getElementById("chatInput"),
     chatSendBtn: document.getElementById("chatSendBtn"),
     chatStopBtn: document.getElementById("chatStopBtn"),
@@ -92,7 +80,6 @@ export function createUiRefs() {
     addToolModal: document.getElementById("addToolModal"),
     addToolModalClose: document.getElementById("addToolModalClose"),
     candidateList: document.getElementById("candidateList"),
-    goDebugFromAddTool: document.getElementById("goDebugFromAddTool"),
 
     // 配对流程。
     pairFlowModal: document.getElementById("pairFlowModal"),
@@ -133,7 +120,6 @@ export function createUiRefs() {
     hostManageList: document.getElementById("hostManageList"),
     pendingDeleteList: document.getElementById("pendingDeleteList"),
     hostManageAddBtn: document.getElementById("hostManageAddBtn"),
-    hostManageDebugBtn: document.getElementById("hostManageDebugBtn"),
 
     // 宿主机编辑。
     hostEditModal: document.getElementById("hostEditModal"),

@@ -16,7 +16,9 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 use yc_shared_protocol::ToolRuntimePayload;
 
-use crate::control::{TOOL_CHAT_CHUNK_EVENT, TOOL_CHAT_FINISHED_EVENT, TOOL_CHAT_STARTED_EVENT};
+use crate::control::{
+    ChatContentPart, TOOL_CHAT_CHUNK_EVENT, TOOL_CHAT_FINISHED_EVENT, TOOL_CHAT_STARTED_EVENT,
+};
 
 /// 聊天事件发送通道。
 pub(crate) type ChatEventSender = mpsc::UnboundedSender<ChatEventEnvelope>;
@@ -51,6 +53,7 @@ pub(crate) struct ChatRequestInput {
     pub(crate) request_id: String,
     pub(crate) queue_item_id: String,
     pub(crate) text: String,
+    pub(crate) content: Vec<ChatContentPart>,
 }
 
 /// 聊天取消参数。
@@ -248,20 +251,92 @@ async fn execute_chat_request(
         return Err(ChatExecError::Cancelled);
     }
 
+    let prompt_text = render_request_prompt(request);
+
     if is_opencode_tool(tool) {
-        return run_opencode_request(request, tool, trace_id, event_tx, cancel_rx).await;
+        return run_opencode_request(request, &prompt_text, tool, trace_id, event_tx, cancel_rx)
+            .await;
     }
     if is_openclaw_tool(tool) {
-        return run_openclaw_request(request, tool, trace_id, event_tx, cancel_rx).await;
+        return run_openclaw_request(request, &prompt_text, tool, trace_id, event_tx, cancel_rx)
+            .await;
+    }
+    if is_codex_tool(tool) {
+        return run_codex_request(request, &prompt_text, tool, cancel_rx).await;
+    }
+    if is_claude_code_tool(tool) {
+        return run_claude_code_request(request, &prompt_text, tool, cancel_rx).await;
     }
     Err(ChatExecError::Failed(
         "当前工具类型不支持聊天执行".to_string(),
     ))
 }
 
+fn render_request_prompt(request: &ChatRequestInput) -> String {
+    let mut text_blocks = Vec::new();
+    let mut media_blocks = Vec::new();
+
+    for part in &request.content {
+        let kind = part.kind.trim().to_ascii_lowercase();
+        if kind == "text" {
+            let value = part.text.trim();
+            if !value.is_empty() {
+                text_blocks.push(value.to_string());
+            }
+            continue;
+        }
+        if kind == "fileref" {
+            let path_hint = part.path_hint.trim();
+            let note = if !path_hint.is_empty() {
+                format!("file: {path_hint}")
+            } else if !part.text.trim().is_empty() {
+                format!("file: {}", part.text.trim())
+            } else {
+                "file reference".to_string()
+            };
+            media_blocks.push(note);
+            continue;
+        }
+        if kind == "image" || kind == "video" || kind == "audio" {
+            let label = if kind == "image" {
+                "image"
+            } else if kind == "video" {
+                "video"
+            } else {
+                "audio"
+            };
+            let hint = if !part.path_hint.trim().is_empty() {
+                part.path_hint.trim().to_string()
+            } else if !part.media_id.trim().is_empty() {
+                part.media_id.trim().to_string()
+            } else {
+                format!("inline-{label}")
+            };
+            media_blocks.push(format!("{label}: {hint}"));
+        }
+    }
+
+    if text_blocks.is_empty() && !request.text.trim().is_empty() {
+        text_blocks.push(request.text.trim().to_string());
+    }
+
+    if media_blocks.is_empty() {
+        return text_blocks.join("\n").trim().to_string();
+    }
+    if text_blocks.is_empty() {
+        return format!("Attached media:\n- {}", media_blocks.join("\n- "));
+    }
+    format!(
+        "{}\n\nAttached media:\n- {}",
+        text_blocks.join("\n"),
+        media_blocks.join("\n- ")
+    )
+}
+
 /// OpenCode: 使用 `opencode run --format json` 并按 text 事件流式回传。
 async fn run_opencode_request(
     request: &ChatRequestInput,
+    prompt_text: &str,
     tool: &ToolRuntimePayload,
     trace_id: &Option<String>,
     event_tx: &ChatEventSender,
@@ -270,7 +345,7 @@ async fn run_opencode_request(
     let mut command = Command::new("opencode");
     command
         .arg("run")
-        .arg(request.text.as_str())
+        .arg(prompt_text)
         .arg("--format")
         .arg("json")
         .arg("--continue")
@@ -368,9 +443,117 @@ async fn run_opencode_request(
     })
 }
 
+async fn run_codex_request(
+    _request: &ChatRequestInput,
+    prompt_text: &str,
+    tool: &ToolRuntimePayload,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<ChatExecutionResult, ChatExecError> {
+    let mut command = Command::new("codex");
+    command.arg("run").arg(prompt_text).arg("--json");
+    if let Some(profile) = tool
+        .source
+        .as_deref()
+        .and_then(|raw| raw.split("profile=").nth(1))
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    {
+        command.arg("--profile").arg(profile);
+    }
+    if let Some(workspace) = tool
+        .workspace_dir
+        .as_ref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        command.current_dir(workspace);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = command
+        .spawn()
+        .map_err(|err| ChatExecError::Failed(format!("启动 codex 失败: {err}")))?;
+    let output = collect_child_output_with_cancel(child, cancel_rx).await?;
+    if !output.success {
+        return Err(ChatExecError::Failed(format!(
+            "codex 执行失败: {}",
+            shorten_error(&output.stderr)
+        )));
+    }
+
+    let text = extract_json_payload(&output.stdout)
+        .and_then(|value| extract_generic_text(&value))
+        .or_else(|| {
+            let trimmed = output.stdout.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "Codex 已完成请求，但未返回可读输出。".to_string());
+
+    Ok(ChatExecutionResult {
+        text,
+        emitted_chunk: false,
+        meta: json!({ "provider": "codex" }),
+    })
+}
+
+async fn run_claude_code_request(
+    _request: &ChatRequestInput,
+    prompt_text: &str,
+    tool: &ToolRuntimePayload,
+    cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<ChatExecutionResult, ChatExecError> {
+    let mut command = Command::new("claude");
+    command
+        .arg("-p")
+        .arg(prompt_text)
+        .arg("--output-format")
+        .arg("json");
+    if let Some(workspace) = tool
+        .workspace_dir
+        .as_ref()
+        .filter(|raw| !raw.trim().is_empty())
+    {
+        command.current_dir(workspace);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = command
+        .spawn()
+        .map_err(|err| ChatExecError::Failed(format!("启动 claude 失败: {err}")))?;
+    let output = collect_child_output_with_cancel(child, cancel_rx).await?;
+    if !output.success {
+        return Err(ChatExecError::Failed(format!(
+            "claude 执行失败: {}",
+            shorten_error(&output.stderr)
+        )));
+    }
+
+    let text = extract_json_payload(&output.stdout)
+        .and_then(|value| extract_generic_text(&value))
+        .or_else(|| {
+            let trimmed = output.stdout.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(|| "Claude Code 已完成请求，但未返回可读输出。".to_string());
+
+    Ok(ChatExecutionResult {
+        text,
+        emitted_chunk: false,
+        meta: json!({ "provider": "claude-code" }),
+    })
+}
+
 /// OpenClaw: 已知 slash 命令走 gateway chat 通道，其余消息沿用 agent 通道。
 async fn run_openclaw_request(
     request: &ChatRequestInput,
+    prompt_text: &str,
     tool: &ToolRuntimePayload,
     trace_id: &Option<String>,
     event_tx: &ChatEventSender,
@@ -378,9 +561,9 @@ async fn run_openclaw_request(
 ) -> Result<ChatExecutionResult, ChatExecError> {
     let route = resolve_openclaw_route(tool).await;
     let result = if is_openclaw_known_slash_command(request.text.as_str()) {
-        run_openclaw_slash_request(request, tool, &route, cancel_rx).await?
+        run_openclaw_slash_request(request, prompt_text, tool, &route, cancel_rx).await?
     } else {
-        run_openclaw_agent_request(request, tool, &route, cancel_rx).await?
+        run_openclaw_agent_request(request, prompt_text, tool, &route, cancel_rx).await?
     };
 
     emit_chunk(
@@ -489,7 +672,9 @@ fn select_openclaw_recent_session(status_json: &Value) -> Option<(String, String
         if is_openclaw_system_session(&row) {
             continue;
         }
-        let session_id = read_string_any(&row, &["sessionId", "sessionID"]).trim().to_string();
+        let session_id = read_string_any(&row, &["sessionId", "sessionID"])
+            .trim()
+            .to_string();
         let session_key = read_string_any(&row, &["key"]).trim().to_string();
         if session_id.is_empty() && session_key.is_empty() {
             continue;
@@ -544,11 +729,13 @@ fn is_openclaw_system_session(session_row: &Value) -> bool {
 
 async fn run_openclaw_agent_request(
     request: &ChatRequestInput,
+    prompt_text: &str,
     tool: &ToolRuntimePayload,
     route: &OpenClawRoute,
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<OpenClawAttemptResult, ChatExecError> {
-    let channel_attempt = run_openclaw_once(request, tool, route, false, cancel_rx).await;
+    let channel_attempt =
+        run_openclaw_once(request, prompt_text, tool, route, false, cancel_rx).await;
     match decide_openclaw_route(&channel_attempt) {
         OpenClawRouteDecision::UseChannel => match channel_attempt {
             Ok(ok) => Ok(ok),
@@ -557,7 +744,7 @@ async fn run_openclaw_agent_request(
             )),
         },
         OpenClawRouteDecision::RetryLocal => {
-            run_openclaw_once(request, tool, route, true, cancel_rx).await
+            run_openclaw_once(request, prompt_text, tool, route, true, cancel_rx).await
         }
         OpenClawRouteDecision::Cancelled => Err(ChatExecError::Cancelled),
     }
@@ -565,6 +752,7 @@ async fn run_openclaw_agent_request(
 
 async fn run_openclaw_slash_request(
     request: &ChatRequestInput,
+    prompt_text: &str,
     tool: &ToolRuntimePayload,
     route: &OpenClawRoute,
     cancel_rx: &mut watch::Receiver<bool>,
@@ -586,7 +774,7 @@ async fn run_openclaw_slash_request(
     let mut send_payload = run_openclaw_chat_send(
         tool,
         session_key.as_str(),
-        request.text.as_str(),
+        prompt_text,
         run_id.as_str(),
         cancel_rx,
     )
@@ -607,7 +795,7 @@ async fn run_openclaw_slash_request(
         send_payload = run_openclaw_chat_send(
             tool,
             session_key.as_str(),
-            request.text.as_str(),
+            prompt_text,
             run_id.as_str(),
             cancel_rx,
         )
@@ -976,8 +1164,11 @@ fn collect_markdown_paths_from_text(raw: &str, output: &mut Vec<String>) {
     while index < chars.len() {
         let (start_byte, ch) = chars[index];
         let is_absolute = ch == '/';
-        let is_home_relative =
-            ch == '~' && chars.get(index + 1).map(|(_, next)| *next == '/').unwrap_or(false);
+        let is_home_relative = ch == '~'
+            && chars
+                .get(index + 1)
+                .map(|(_, next)| *next == '/')
+                .unwrap_or(false);
         if !is_absolute && !is_home_relative {
             index += 1;
             continue;
@@ -987,7 +1178,11 @@ fn collect_markdown_paths_from_text(raw: &str, output: &mut Vec<String>) {
             continue;
         }
 
-        let mut end_index = if is_home_relative { index + 2 } else { index + 1 };
+        let mut end_index = if is_home_relative {
+            index + 2
+        } else {
+            index + 1
+        };
         while end_index < chars.len() && !is_path_terminator(chars[end_index].1) {
             end_index += 1;
         }
@@ -1122,6 +1317,7 @@ fn map_openclaw_slash_gateway_error(err: ChatExecError) -> ChatExecError {
 
 async fn run_openclaw_once(
     request: &ChatRequestInput,
+    prompt_text: &str,
     tool: &ToolRuntimePayload,
     route: &OpenClawRoute,
     local_mode: bool,
@@ -1137,7 +1333,7 @@ async fn run_openclaw_once(
         .arg("agent")
         .arg("--json")
         .arg("-m")
-        .arg(request.text.as_str())
+        .arg(prompt_text)
         .arg("--timeout")
         .arg("600");
     if !route.session_id.trim().is_empty() {
@@ -1389,6 +1585,43 @@ fn is_openclaw_tool(tool: &ToolRuntimePayload) -> bool {
     let name = tool.name.to_lowercase();
     let vendor = tool.vendor.to_lowercase();
     tool_id.starts_with("openclaw_") || name.contains("openclaw") || vendor.contains("openclaw")
+}
+
+fn is_codex_tool(tool: &ToolRuntimePayload) -> bool {
+    let tool_id = tool.tool_id.to_lowercase();
+    let name = tool.name.to_lowercase();
+    let vendor = tool.vendor.to_lowercase();
+    tool_id.starts_with("codex_") || name.contains("codex") || vendor.contains("openai")
+}
+
+fn is_claude_code_tool(tool: &ToolRuntimePayload) -> bool {
+    let tool_id = tool.tool_id.to_lowercase();
+    let name = tool.name.to_lowercase();
+    let vendor = tool.vendor.to_lowercase();
+    tool_id.starts_with("claude_code_")
+        || name.contains("claude code")
+        || (name == "claude")
+        || vendor.contains("anthropic")
+}
+
+fn extract_generic_text(value: &Value) -> Option<String> {
+    for path in [
+        "/text",
+        "/output_text",
+        "/output",
+        "/message",
+        "/result/text",
+        "/result/output_text",
+        "/result/message",
+    ] {
+        if let Some(text) = value.pointer(path).and_then(Value::as_str) {
+            let normalized = text.trim();
+            if !normalized.is_empty() {
+                return Some(normalized.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn apply_openclaw_profile(tool: &ToolRuntimePayload, command: &mut Command) {
@@ -1853,8 +2086,8 @@ mod tests {
         let anchor = OpenClawHistoryAnchor {
             latest_timestamp: 10,
         };
-        let reply = extract_openclaw_chat_reply_after(&payload, anchor)
-            .expect("reply should be extracted");
+        let reply =
+            extract_openclaw_chat_reply_after(&payload, anchor).expect("reply should be extracted");
         assert_eq!(reply.text, "已输出报告");
         assert_eq!(
             reply.report_paths,

@@ -1,8 +1,8 @@
 <!--
   文件职责：
-  1. 定义移动端（Tauri WebView）调试与运维 UI 的结构、样式与交互。
+  1. 定义移动端（Tauri WebView）运维与聊天 UI 的结构、样式与交互。
   2. 维护与 relay 的 WebSocket 会话，并展示宿主机与工具快照。
-  3. 提供候选工具接入、工具详情查看和调试日志入口。
+  3. 提供候选工具接入、工具详情查看与聊天多媒体交互入口。
 -->
 <!doctype html>
 <html lang="zh-CN">
@@ -36,7 +36,6 @@
           <div class="host-setup-actions">
             <button id="importPairLinkBtn" class="btn btn-primary">导入配对链接</button>
             <button id="openManualPairBtn" class="btn btn-outline">手动填写配对信息</button>
-            <button id="openDebugFromSetupBtn" class="btn btn-outline">打开调试入口</button>
           </div>
         </article>
 
@@ -86,8 +85,21 @@
               hidden
             ></button>
             <div id="chatQueue" class="chat-queue"></div>
+            <div id="chatComposerMediaTray" class="chat-composer-media-tray"></div>
 
             <div class="chat-composer">
+              <div class="chat-composer-head">
+                <input
+                  id="chatMediaInput"
+                  type="file"
+                  accept="image/*,video/*,audio/*"
+                  multiple
+                  hidden
+                />
+                <button id="chatAttachBtn" class="btn btn-outline btn-sm" type="button">附件</button>
+                <button id="chatRecordBtn" class="btn btn-outline btn-sm" type="button">录音</button>
+                <span id="chatRecordStatus" class="chat-record-status"></span>
+              </div>
               <textarea id="chatInput" rows="1" placeholder="输入要发送给工具的消息"></textarea>
               <div class="chat-composer-actions">
                 <button id="chatSendBtn" class="btn btn-primary" type="button">发送</button>
@@ -128,49 +140,11 @@
           </article>
         </div>
       </section>
-
-      <section id="debugView" class="view">
-        <article class="glass-card status-card debug-panel">
-          <div id="debugStatus" class="debug-stats">Status: Disconnected</div>
-          <div id="debugEvents" class="debug-stats">Events IN: 0 · OUT: 0</div>
-
-          <div class="field">
-            <label for="debugHostSelect">调试宿主机</label>
-            <select id="debugHostSelect"></select>
-          </div>
-          <div id="debugIdentity" class="debug-stats"></div>
-
-          <div class="debug-actions">
-            <button id="connectBtnDebug" class="btn btn-primary">连接当前宿主机</button>
-            <button id="disconnectBtnDebug" class="btn btn-outline" disabled>断开当前宿主机</button>
-          </div>
-          <button id="rebindControllerBtn" class="btn btn-outline">
-            绑定当前设备为控制端
-          </button>
-
-          <div class="field">
-            <label for="messageInput">Test Message</label>
-            <input id="messageInput" type="text" />
-          </div>
-
-          <button id="sendBtn" class="btn btn-primary">Send Test Event</button>
-
-          <div class="field">
-            <label>Logs</label>
-            <div class="debug-actions" style="margin-bottom: 8px">
-              <button id="copyOpLogsBtn" class="btn btn-outline">复制结构化日志</button>
-              <button id="clearLogsBtn" class="btn btn-outline">清空日志</button>
-            </div>
-            <div id="logBox" class="log-box"></div>
-          </div>
-        </article>
-      </section>
     </div>
 
     <nav id="mainTabs" class="tabs">
       <button id="tabOps" class="tab-btn active">运维</button>
       <button id="tabChat" class="tab-btn">聊天</button>
-      <button id="tabDebug" class="tab-btn">调试入口</button>
     </nav>
 
     <div id="toolModal" class="modal">
@@ -223,12 +197,10 @@
           <div class="rows">
             <div class="row"><div class="k">OpenCode</div><div class="v">在宿主机终端执行 `opencode`，保持会话运行</div></div>
             <div class="row"><div class="k">OpenClaw</div><div class="v">按宿主机上的启动方式运行 openclaw，等待 sidecar 自动发现</div></div>
+            <div class="row"><div class="k">Codex</div><div class="v">在宿主机终端执行 `codex`，保持会话运行</div></div>
+            <div class="row"><div class="k">Claude Code</div><div class="v">在宿主机终端执行 `claude`，保持会话运行</div></div>
           </div>
         </section>
-
-        <button id="goDebugFromAddTool" class="btn btn-outline" style="width: 100%">
-          打开调试页查看连接参数
-        </button>
       </div>
     </div>
 
@@ -338,7 +310,6 @@
         </section>
         <div class="host-setup-actions" style="margin-top: 10px">
           <button id="hostManageAddBtn" class="btn btn-primary">添加宿主机</button>
-          <button id="hostManageDebugBtn" class="btn btn-outline">打开调试入口</button>
         </div>
       </div>
     </div>

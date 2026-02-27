@@ -33,6 +33,14 @@ export function createChatFlow({
   const persistTimers = {};
   let persistingIndex = false;
   let pendingIndexPersist = false;
+  const recordState = {
+    recording: false,
+    pending: false,
+    stream: null,
+    recorder: null,
+    chunks: [],
+    conversationKey: "",
+  };
 
   if (!state.chat || typeof state.chat !== "object") {
     state.chat = createChatStateSlice();
@@ -54,6 +62,15 @@ export function createChatFlow({
   }
   if (!state.chat.queuePanelExpandedByKey || typeof state.chat.queuePanelExpandedByKey !== "object") {
     state.chat.queuePanelExpandedByKey = {};
+  }
+  if (!state.chat.composerMediaByKey || typeof state.chat.composerMediaByKey !== "object") {
+    state.chat.composerMediaByKey = {};
+  }
+  if (typeof state.chat.recordingConversationKey !== "string") {
+    state.chat.recordingConversationKey = "";
+  }
+  if (typeof state.chat.recordingPending !== "boolean") {
+    state.chat.recordingPending = false;
   }
   if (!state.chat.messageSelectionModeByKey || typeof state.chat.messageSelectionModeByKey !== "object") {
     state.chat.messageSelectionModeByKey = {};
@@ -113,6 +130,404 @@ export function createChatFlow({
       bytesTotal: 0,
       ...overrides,
     };
+  }
+
+  function syncRecordState() {
+    state.chat.recordingConversationKey = String(recordState.conversationKey || "");
+    state.chat.recordingPending = Boolean(recordState.pending);
+  }
+
+  function inferMediaType(mime, fileName = "") {
+    const normalizedMime = String(mime || "").toLowerCase();
+    if (normalizedMime.startsWith("image/")) return "image";
+    if (normalizedMime.startsWith("video/")) return "video";
+    if (normalizedMime.startsWith("audio/")) return "audio";
+    const lowerName = String(fileName || "").toLowerCase();
+    if (/\.(png|jpg|jpeg|gif|webp|bmp|heic|heif|svg)$/.test(lowerName)) return "image";
+    if (/\.(mp4|mov|m4v|webm|mkv|avi)$/.test(lowerName)) return "video";
+    if (/\.(m4a|mp3|wav|ogg|webm|aac|flac)$/.test(lowerName)) return "audio";
+    return "";
+  }
+
+  function normalizeContentPart(rawPart) {
+    const part = asMap(rawPart);
+    const type = String(part.type || "").trim().toLowerCase();
+    if (!type) return null;
+
+    if (type === "text") {
+      const text = String(part.text || "").trim();
+      if (!text) return null;
+      return { type: "text", text };
+    }
+
+    if (type === "fileref") {
+      const pathHint = String(part.pathHint || "").trim();
+      const text = String(part.text || "").trim();
+      if (!pathHint && !text) return null;
+      const normalized = { type: "fileRef" };
+      if (pathHint) normalized.pathHint = pathHint;
+      if (text) normalized.text = text;
+      return normalized;
+    }
+
+    if (type !== "image" && type !== "video" && type !== "audio") {
+      return null;
+    }
+
+    const normalized = { type };
+    const mediaId = String(part.mediaId || "").trim();
+    const mime = String(part.mime || "").trim();
+    const size = Number(part.size || 0);
+    const durationMs = Number(part.durationMs || 0);
+    const pathHint = String(part.pathHint || "").trim();
+    const text = String(part.text || "").trim();
+    const dataBase64 = String(part.dataBase64 || "").trim();
+    const previewUrl = String(part.previewUrl || "").trim();
+    const fileName = String(part.fileName || "").trim();
+
+    if (mediaId) normalized.mediaId = mediaId;
+    if (mime) normalized.mime = mime;
+    if (Number.isFinite(size) && size > 0) normalized.size = Math.trunc(size);
+    if (Number.isFinite(durationMs) && durationMs > 0) normalized.durationMs = Math.trunc(durationMs);
+    if (pathHint) normalized.pathHint = pathHint;
+    if (text) normalized.text = text;
+    if (dataBase64) normalized.dataBase64 = dataBase64;
+    if (previewUrl) normalized.previewUrl = previewUrl;
+    if (fileName) normalized.fileName = fileName;
+    return normalized;
+  }
+
+  function normalizeContentParts(rawParts) {
+    if (!Array.isArray(rawParts)) return [];
+    const out = [];
+    rawParts.forEach((item) => {
+      const normalized = normalizeContentPart(item);
+      if (normalized) out.push(normalized);
+    });
+    return out;
+  }
+
+  function cloneContentParts(rawParts) {
+    return normalizeContentParts(rawParts).map((part) => ({ ...part }));
+  }
+
+  function contentSummaryText(rawParts) {
+    const parts = normalizeContentParts(rawParts);
+    if (!parts.length) return "";
+    const lines = [];
+    const mediaLines = [];
+    parts.forEach((part) => {
+      if (part.type === "text") {
+        lines.push(String(part.text || "").trim());
+        return;
+      }
+      if (part.type === "fileRef") {
+        const label = String(part.pathHint || part.text || "").trim();
+        mediaLines.push(label ? `文件：${label}` : "文件引用");
+        return;
+      }
+      const labelByType = part.type === "image"
+        ? "图片"
+        : (part.type === "video" ? "视频" : "语音");
+      const hint = String(part.pathHint || part.fileName || "").trim();
+      mediaLines.push(hint ? `${labelByType}：${hint}` : labelByType);
+    });
+    const text = lines.filter(Boolean).join("\n").trim();
+    if (!mediaLines.length) return text;
+    const mediaSummary = mediaLines.map((item) => `- ${item}`).join("\n");
+    if (!text) return `已发送附件：\n${mediaSummary}`;
+    return `${text}\n\n附件：\n${mediaSummary}`;
+  }
+
+  function stripTransientContentFields(rawParts) {
+    return normalizeContentParts(rawParts).map((part) => {
+      const next = { ...part };
+      delete next.dataBase64;
+      delete next.previewUrl;
+      delete next.fileName;
+      return next;
+    });
+  }
+
+  function composerMediaForKey(conversationKey) {
+    const key = String(conversationKey || "").trim();
+    if (!key) return [];
+    if (!Array.isArray(state.chat.composerMediaByKey[key])) {
+      state.chat.composerMediaByKey[key] = [];
+    }
+    return state.chat.composerMediaByKey[key];
+  }
+
+  function activeComposerMedia() {
+    const conv = activeConversation();
+    if (!conv) return [];
+    return composerMediaForKey(conv.key);
+  }
+
+  function clearComposerMediaByKey(conversationKey) {
+    const key = String(conversationKey || "").trim();
+    if (!key) return;
+    delete state.chat.composerMediaByKey[key];
+  }
+
+  async function readBlobAsBase64(blob) {
+    const buffer = await blob.arrayBuffer();
+    let binary = "";
+    const bytes = new Uint8Array(buffer);
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return window.btoa(binary);
+  }
+
+  async function readMediaDurationMs(blobUrl, mediaType) {
+    if (mediaType !== "audio" && mediaType !== "video") {
+      return 0;
+    }
+    return new Promise((resolve) => {
+      const node = document.createElement(mediaType);
+      let done = false;
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        resolve(0);
+      }, 4000);
+
+      node.preload = "metadata";
+      node.src = blobUrl;
+      node.onloadedmetadata = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        const duration = Number(node.duration || 0);
+        resolve(Number.isFinite(duration) && duration > 0 ? Math.trunc(duration * 1000) : 0);
+      };
+      node.onerror = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(0);
+      };
+    });
+  }
+
+  async function buildComposerMediaPartFromBlob({ blob, mime, fileName, pathHint }) {
+    const mediaType = inferMediaType(mime, fileName);
+    if (!mediaType) {
+      throw new Error("仅支持图片/视频/语音文件");
+    }
+    const previewUrl = URL.createObjectURL(blob);
+    const durationMs = await readMediaDurationMs(previewUrl, mediaType);
+    const dataBase64 = await readBlobAsBase64(blob);
+    return normalizeContentPart({
+      type: mediaType,
+      mediaId: createId("media"),
+      mime: String(mime || blob.type || "").trim(),
+      size: Number(blob.size || 0),
+      durationMs,
+      pathHint: String(pathHint || fileName || "").trim(),
+      fileName: String(fileName || "").trim(),
+      previewUrl,
+      dataBase64,
+    });
+  }
+
+  function stopRecordStreamTracks() {
+    if (!recordState.stream) return;
+    recordState.stream.getTracks().forEach((track) => {
+      try {
+        track.stop();
+      } catch (_) {
+        // ignore
+      }
+    });
+    recordState.stream = null;
+  }
+
+  function resetRecordState() {
+    recordState.recording = false;
+    recordState.pending = false;
+    recordState.recorder = null;
+    recordState.chunks = [];
+    recordState.conversationKey = "";
+    stopRecordStreamTracks();
+    syncRecordState();
+  }
+
+  function removeComposerMediaItem(partId) {
+    const conv = activeConversation();
+    if (!conv) return;
+    const key = conv.key;
+    const list = composerMediaForKey(key);
+    const normalizedId = String(partId || "").trim();
+    if (!normalizedId) return;
+    const next = list.filter((item) => String(item.mediaId || "") !== normalizedId);
+    state.chat.composerMediaByKey[key] = next;
+    render();
+  }
+
+  async function onComposerMediaPicked(inputElement) {
+    const conv = activeConversation();
+    const files = Array.from(inputElement?.files || []);
+    if (inputElement) {
+      inputElement.value = "";
+    }
+    if (!conv || files.length === 0) {
+      return;
+    }
+
+    const current = composerMediaForKey(conv.key);
+    const limit = 6;
+    if (current.length >= limit) {
+      conv.error = `附件上限 ${limit} 个`;
+      render();
+      return;
+    }
+
+    const maxBytes = 25 * 1024 * 1024;
+    const nextItems = [...current];
+    for (const file of files) {
+      if (nextItems.length >= limit) break;
+      const mime = String(file.type || "").trim();
+      const mediaType = inferMediaType(mime, file.name);
+      if (!mediaType) {
+        conv.error = "仅支持图片/视频/语音文件";
+        continue;
+      }
+      if (Number(file.size || 0) <= 0) {
+        conv.error = "附件大小为 0，无法发送";
+        continue;
+      }
+      if (Number(file.size || 0) > maxBytes) {
+        conv.error = "单个附件超过 25MB，请压缩后重试";
+        continue;
+      }
+      try {
+        const part = await buildComposerMediaPartFromBlob({
+          blob: file,
+          mime,
+          fileName: file.name,
+          pathHint: file.name,
+        });
+        if (part) nextItems.push(part);
+      } catch (error) {
+        conv.error = `附件处理失败：${error}`;
+      }
+    }
+    state.chat.composerMediaByKey[conv.key] = nextItems;
+    touchConversation(conv, { persist: false });
+    render();
+  }
+
+  async function startVoiceRecord() {
+    if (recordState.pending || recordState.recording) return;
+    const conv = activeConversation();
+    if (!conv) return;
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      conv.error = "当前环境不支持录音";
+      render();
+      return;
+    }
+    try {
+      recordState.pending = true;
+      syncRecordState();
+      render();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const preferredMime = window.MediaRecorder && typeof window.MediaRecorder.isTypeSupported === "function"
+        && window.MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "";
+      const recorder = preferredMime
+        ? new MediaRecorder(stream, { mimeType: preferredMime })
+        : new MediaRecorder(stream);
+      recordState.stream = stream;
+      recordState.recorder = recorder;
+      recordState.chunks = [];
+      recordState.conversationKey = conv.key;
+      recordState.recording = true;
+      recordState.pending = false;
+      syncRecordState();
+
+      recorder.ondataavailable = (event) => {
+        if (event.data && event.data.size > 0) {
+          recordState.chunks.push(event.data);
+        }
+      };
+      recorder.onstop = async () => {
+        const chunks = Array.isArray(recordState.chunks) ? [...recordState.chunks] : [];
+        const targetConversationKey = String(recordState.conversationKey || "");
+        const mime = String(recorder.mimeType || "audio/webm").trim();
+        resetRecordState();
+        if (!chunks.length || !targetConversationKey) {
+          render();
+          return;
+        }
+        const target = state.chat.conversationsByKey[targetConversationKey];
+        if (!target) {
+          render();
+          return;
+        }
+        try {
+          const blob = new Blob(chunks, { type: mime || "audio/webm" });
+          const part = await buildComposerMediaPartFromBlob({
+            blob,
+            mime: blob.type || mime,
+            fileName: `voice-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`,
+            pathHint: "语音消息",
+          });
+          if (part) {
+            const list = composerMediaForKey(targetConversationKey);
+            list.push(part);
+            state.chat.composerMediaByKey[targetConversationKey] = list;
+            target.error = "";
+          }
+        } catch (error) {
+          target.error = `录音处理失败：${error}`;
+        }
+        render();
+      };
+      recorder.start();
+      render();
+    } catch (error) {
+      resetRecordState();
+      conv.error = `无法开始录音：${error}`;
+      render();
+    }
+  }
+
+  function stopVoiceRecord() {
+    if (!recordState.recording || !recordState.recorder) {
+      return;
+    }
+    try {
+      recordState.recording = false;
+      recordState.pending = true;
+      syncRecordState();
+      recordState.recorder.stop();
+    } catch (_) {
+      resetRecordState();
+    }
+    render();
+  }
+
+  function toggleVoiceRecord() {
+    if (recordState.recording) {
+      stopVoiceRecord();
+      return;
+    }
+    void startVoiceRecord();
+  }
+
+  function stopVoiceRecordForConversation(conversationKey) {
+    const key = String(conversationKey || "").trim();
+    if (!key) return;
+    if (String(recordState.conversationKey || "") !== key) return;
+    if (recordState.recording) {
+      stopVoiceRecord();
+      return;
+    }
+    resetRecordState();
   }
 
   function isChatTool(tool) {
@@ -186,11 +601,24 @@ export function createChatFlow({
         queueItemId: String(conv.running.queueItemId || ""),
         requestId: String(conv.running.requestId || ""),
         text: String(conv.running.text || ""),
+        content: stripTransientContentFields(conv.running.content),
         createdAt: String(conv.running.startedAt || conv.updatedAt || new Date().toISOString()),
       }]
       : [];
     const queue = [...runningAsQueue, ...(Array.isArray(conv.queue) ? conv.queue : [])]
-      .filter((item) => item && item.queueItemId && item.requestId);
+      .filter((item) => item && item.queueItemId && item.requestId)
+      .map((item) => ({
+        ...item,
+        text: String(item.text || ""),
+        content: stripTransientContentFields(item.content),
+      }));
+    const messages = Array.isArray(conv.messages)
+      ? conv.messages.map((msg) => ({
+        ...msg,
+        text: String(msg.text || ""),
+        content: stripTransientContentFields(msg.content),
+      }))
+      : [];
     return {
       key: String(conv.key || ""),
       hostId: String(conv.hostId || ""),
@@ -201,7 +629,7 @@ export function createChatFlow({
       toolName: String(conv.toolName || ""),
       availability: String(conv.availability || "offline"),
       updatedAt: String(conv.updatedAt || ""),
-      messages: Array.isArray(conv.messages) ? conv.messages : [],
+      messages,
       queue,
       draft: String(conv.draft || ""),
       error: String(conv.error || ""),
@@ -223,8 +651,20 @@ export function createChatFlow({
       availability: String(conv.availability || "offline"),
       updatedAt: String(conv.updatedAt || new Date().toISOString()),
       online: false,
-      messages: Array.isArray(conv.messages) ? conv.messages : [],
-      queue: Array.isArray(conv.queue) ? conv.queue : [],
+      messages: Array.isArray(conv.messages)
+        ? conv.messages.map((msg) => ({
+          ...msg,
+          text: String(msg.text || ""),
+          content: stripTransientContentFields(msg.content),
+        }))
+        : [],
+      queue: Array.isArray(conv.queue)
+        ? conv.queue.map((item) => ({
+          ...item,
+          text: String(item.text || ""),
+          content: stripTransientContentFields(item.content),
+        }))
+        : [],
       running: null,
       draft: String(conv.draft || ""),
       error: String(conv.error || ""),
@@ -497,6 +937,7 @@ export function createChatFlow({
             queueItemId: conv.running.queueItemId,
             requestId: conv.running.requestId,
             text: String(conv.running.text || ""),
+            content: stripTransientContentFields(conv.running.content),
             createdAt: String(conv.running.startedAt || new Date().toISOString()),
           });
         }
@@ -530,6 +971,10 @@ export function createChatFlow({
   function openConversation(key) {
     const normalizedKey = String(key || "").trim();
     if (!normalizedKey || !state.chat.conversationsByKey[normalizedKey]) return;
+    const current = activeConversation();
+    if (current && current.key !== normalizedKey) {
+      stopVoiceRecordForConversation(current.key);
+    }
     state.chat.swipedConversationKey = "";
     state.chat.activeConversationKey = normalizedKey;
     state.chat.viewMode = "detail";
@@ -543,6 +988,7 @@ export function createChatFlow({
   function backToList() {
     const conv = activeConversation();
     if (conv) clearMessageSelection(conv.key);
+    if (conv) stopVoiceRecordForConversation(conv.key);
     state.chat.swipedConversationKey = "";
     state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     state.chat.viewMode = "list";
@@ -552,6 +998,7 @@ export function createChatFlow({
   function enterChatTab() {
     const conv = activeConversation();
     if (conv) clearMessageSelection(conv.key);
+    if (conv) stopVoiceRecordForConversation(conv.key);
     state.chat.swipedConversationKey = "";
     state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     state.chat.viewMode = "list";
@@ -567,6 +1014,8 @@ export function createChatFlow({
     }
     const removed = removeConversation(state.chat, normalizedKey);
     if (!removed) return false;
+    stopVoiceRecordForConversation(normalizedKey);
+    clearComposerMediaByKey(normalizedKey);
     if (String(state.chat.messageViewer.conversationKey || "") === normalizedKey) {
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     }
@@ -651,6 +1100,8 @@ export function createChatFlow({
     conv.running = null;
     conv.draft = "";
     conv.error = "";
+    stopVoiceRecordForConversation(normalizedKey);
+    clearComposerMediaByKey(normalizedKey);
     setQueuePanelExpanded(normalizedKey, false);
     clearMessageSelection(normalizedKey);
     if (state.chat.swipedConversationKey === normalizedKey) {
@@ -710,16 +1161,22 @@ export function createChatFlow({
       render();
       return;
     }
+    const outboundContent = normalizeContentParts(item.content);
+    const text = String(item.text || "").trim() || contentSummaryText(outboundContent);
+    const payload = {
+      toolId: runtimeToolId,
+      conversationKey: conv.key,
+      requestId: item.requestId,
+      queueItemId: item.queueItemId,
+      text,
+    };
+    if (outboundContent.length > 0) {
+      payload.content = outboundContent;
+    }
     const sent = sendSocketEvent(
       conv.hostId,
       "tool_chat_request",
-      {
-        toolId: runtimeToolId,
-        conversationKey: conv.key,
-        requestId: item.requestId,
-        queueItemId: item.queueItemId,
-        text: item.text,
-      },
+      payload,
       {
         action: "tool_chat_request",
         traceId: item.requestId.replace(/^req_/, "trc_"),
@@ -738,13 +1195,17 @@ export function createChatFlow({
     conv.running = {
       requestId: item.requestId,
       queueItemId: item.queueItemId,
-      text: item.text,
+      text,
+      content: stripTransientContentFields(outboundContent),
       startedAt: new Date().toISOString(),
     };
     conv.queue.shift();
     normalizeQueuePanelByConversation(conv);
     const userMsg = conv.messages.find((msg) => String(msg.queueItemId || "") === item.queueItemId);
-    if (userMsg) userMsg.status = "sending";
+    if (userMsg) {
+      userMsg.status = "sending";
+      userMsg.content = stripTransientContentFields(userMsg.content);
+    }
     conv.error = "";
     touchConversation(conv);
     render();
@@ -754,7 +1215,12 @@ export function createChatFlow({
     const conv = activeConversation();
     if (!conv) return;
     const text = String(conv.draft || "").trim();
-    if (!text) {
+    const content = [];
+    if (text) {
+      content.push({ type: "text", text });
+    }
+    cloneContentParts(activeComposerMedia()).forEach((part) => content.push(part));
+    if (content.length === 0) {
       maybeDispatchNext(conv.key);
       return;
     }
@@ -776,22 +1242,26 @@ export function createChatFlow({
 
     const queueItemId = createId("q");
     const requestId = createId("req");
+    const requestText = text || contentSummaryText(content);
     conv.queue.push({
       queueItemId,
       requestId,
-      text,
+      text: requestText,
+      content: cloneContentParts(content),
       createdAt: new Date().toISOString(),
     });
     conv.messages.push({
       id: createId("msg"),
       role: "user",
       text,
+      content: cloneContentParts(content),
       status: "queued",
       ts: new Date().toISOString(),
       queueItemId,
       requestId,
     });
     conv.draft = "";
+    clearComposerMediaByKey(conv.key);
     conv.error = "";
     touchConversation(conv);
     render();
@@ -1116,6 +1586,9 @@ export function createChatFlow({
         text: conv.running && conv.running.requestId === requestId
           ? conv.running.text
           : String((queued && queued.text) || ""),
+        content: conv.running && conv.running.requestId === requestId
+          ? stripTransientContentFields(conv.running.content)
+          : stripTransientContentFields(queued && queued.content),
         startedAt: new Date().toISOString(),
       };
       removeQueueItems(conv, { queueItemId, requestId });
@@ -1151,6 +1624,7 @@ export function createChatFlow({
         requestId,
         queueItemId,
         text: String((userMsg && userMsg.text) || ""),
+        content: stripTransientContentFields(userMsg && userMsg.content),
         startedAt: new Date().toISOString(),
       };
     }
@@ -1423,6 +1897,14 @@ export function createChatFlow({
     render();
   }
 
+  function onComposerMediaTrayClick(event) {
+    const removeBtn = event.target.closest("[data-chat-remove-media]");
+    if (!removeBtn) return;
+    const mediaId = String(removeBtn.getAttribute("data-chat-remove-media") || "").trim();
+    if (!mediaId) return;
+    removeComposerMediaItem(mediaId);
+  }
+
   function onDraftInput(value) {
     const conv = activeConversation();
     if (!conv) return;
@@ -1619,6 +2101,9 @@ export function createChatFlow({
       state.chat.viewMode = "list";
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
       state.chat.queuePanelExpandedByKey = {};
+      state.chat.composerMediaByKey = {};
+      state.chat.recordingConversationKey = "";
+      state.chat.recordingPending = false;
       state.chat.messageSelectionModeByKey = {};
       state.chat.selectedMessageIdsByKey = {};
       state.chat.swipedConversationKey = "";
@@ -1638,6 +2123,9 @@ export function createChatFlow({
       state.chat.viewMode = "list";
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
       state.chat.queuePanelExpandedByKey = {};
+      state.chat.composerMediaByKey = {};
+      state.chat.recordingConversationKey = "";
+      state.chat.recordingPending = false;
       state.chat.messageSelectionModeByKey = {};
       state.chat.selectedMessageIdsByKey = {};
       state.chat.swipedConversationKey = "";
@@ -1661,8 +2149,16 @@ export function createChatFlow({
     ui.chatConversationList.addEventListener("touchcancel", onChatListTouchEnd, { passive: true });
     ui.chatQueue.addEventListener("click", onQueueClick);
     ui.chatQueueSummary.addEventListener("click", onQueueSummaryClick);
+    ui.chatComposerMediaTray.addEventListener("click", onComposerMediaTrayClick);
     ui.chatMessages.addEventListener("click", onMessagesClick);
     ui.chatMessageFullBody.addEventListener("click", onMessageFullBodyClick);
+    ui.chatAttachBtn.addEventListener("click", () => {
+      if (ui.chatMediaInput) ui.chatMediaInput.click();
+    });
+    ui.chatMediaInput.addEventListener("change", () => {
+      void onComposerMediaPicked(ui.chatMediaInput);
+    });
+    ui.chatRecordBtn.addEventListener("click", toggleVoiceRecord);
     ui.chatInput.addEventListener("input", () => onDraftInput(ui.chatInput.value));
     ui.chatSendBtn.addEventListener("click", enqueueMessage);
     ui.chatStopBtn.addEventListener("click", stopRunningMessage);

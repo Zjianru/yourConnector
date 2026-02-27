@@ -45,6 +45,28 @@ pub(crate) const TOOL_REPORT_FETCH_STARTED_EVENT: &str = "tool_report_fetch_star
 pub(crate) const TOOL_REPORT_FETCH_CHUNK_EVENT: &str = "tool_report_fetch_chunk";
 /// sidecar 返回报告拉取结束事件。
 pub(crate) const TOOL_REPORT_FETCH_FINISHED_EVENT: &str = "tool_report_fetch_finished";
+/// 请求 sidecar 暂存聊天多媒体附件。
+pub(crate) const TOOL_MEDIA_STAGE_REQUEST_EVENT: &str = "tool_media_stage_request";
+/// sidecar 返回多媒体暂存进度。
+pub(crate) const TOOL_MEDIA_STAGE_PROGRESS_EVENT: &str = "tool_media_stage_progress";
+/// sidecar 返回多媒体暂存完成。
+pub(crate) const TOOL_MEDIA_STAGE_FINISHED_EVENT: &str = "tool_media_stage_finished";
+/// sidecar 返回多媒体暂存失败。
+pub(crate) const TOOL_MEDIA_STAGE_FAILED_EVENT: &str = "tool_media_stage_failed";
+/// 请求 sidecar 以指定目录启动工具进程。
+pub(crate) const TOOL_LAUNCH_REQUEST_EVENT: &str = "tool_launch_request";
+/// sidecar 返回启动流程开始。
+pub(crate) const TOOL_LAUNCH_STARTED_EVENT: &str = "tool_launch_started";
+/// sidecar 返回启动流程结束。
+pub(crate) const TOOL_LAUNCH_FINISHED_EVENT: &str = "tool_launch_finished";
+/// sidecar 返回启动流程失败。
+pub(crate) const TOOL_LAUNCH_FAILED_EVENT: &str = "tool_launch_failed";
+/// 请求 sidecar 执行账号切换。
+pub(crate) const TOOL_AUTH_SWITCH_REQUEST_EVENT: &str = "tool_auth_switch_request";
+/// sidecar 返回账号切换完成。
+pub(crate) const TOOL_AUTH_SWITCH_FINISHED_EVENT: &str = "tool_auth_switch_finished";
+/// sidecar 返回账号切换失败。
+pub(crate) const TOOL_AUTH_SWITCH_FAILED_EVENT: &str = "tool_auth_switch_failed";
 
 /// Relay 注入的可信来源客户端类型字段。
 const SOURCE_CLIENT_TYPE_FIELD: &str = "sourceClientType";
@@ -91,6 +113,7 @@ pub(crate) enum SidecarCommand {
         request_id: String,
         queue_item_id: String,
         text: String,
+        content: Vec<ChatContentPart>,
     },
     /// 取消工具聊天请求。
     ToolChatCancel {
@@ -106,6 +129,49 @@ pub(crate) enum SidecarCommand {
         request_id: String,
         file_path: String,
     },
+    /// 暂存聊天附件。
+    ToolMediaStageRequest {
+        tool_id: String,
+        conversation_key: String,
+        request_id: String,
+        media_id: String,
+        mime: String,
+        data_base64: String,
+        path_hint: String,
+    },
+    /// 按目录启动工具 CLI。
+    ToolLaunchRequest {
+        tool_name: String,
+        cwd: String,
+        request_id: String,
+    },
+    /// 切换工具账号/配置。
+    ToolAuthSwitchRequest {
+        tool_name: String,
+        profile: String,
+        request_id: String,
+    },
+}
+
+/// 聊天多段内容（兼容 text + media/fileRef）。
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ChatContentPart {
+    /// 段类型：text/image/video/audio/fileRef。
+    pub(crate) kind: String,
+    /// 媒体唯一标识（可选）。
+    pub(crate) media_id: String,
+    /// MIME 类型（可选）。
+    pub(crate) mime: String,
+    /// 大小（字节，可选）。
+    pub(crate) size: u64,
+    /// 时长（毫秒，可选）。
+    pub(crate) duration_ms: u64,
+    /// 文本内容（text/fileRef 可用）。
+    pub(crate) text: String,
+    /// 路径提示（可选）。
+    pub(crate) path_hint: String,
+    /// base64 正文（可选，media staging 场景）。
+    pub(crate) data_base64: String,
 }
 
 /// 工具进程控制动作枚举。
@@ -142,6 +208,97 @@ pub(crate) struct SidecarCommandEnvelope {
     pub(crate) source_client_type: String,
     /// 来源设备 ID。
     pub(crate) source_device_id: String,
+}
+
+fn parse_u64_field(value: Option<&Value>) -> u64 {
+    let Some(raw) = value else {
+        return 0;
+    };
+    if let Some(num) = raw.as_u64() {
+        return num;
+    }
+    if let Some(num) = raw.as_i64() {
+        return if num > 0 { num as u64 } else { 0 };
+    }
+    if let Some(text) = raw.as_str() {
+        return text.trim().parse::<u64>().unwrap_or_default();
+    }
+    0
+}
+
+fn parse_chat_content_parts(raw: Option<&Value>) -> Vec<ChatContentPart> {
+    const MAX_MEDIA_BASE64_LEN: usize = 40 * 1024 * 1024;
+    let Some(rows) = raw.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for row in rows {
+        let Some(obj) = row.as_object() else {
+            continue;
+        };
+        let kind = obj
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        if kind.is_empty() {
+            continue;
+        }
+        let text = obj
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let path_hint = obj
+            .get("pathHint")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let media_id = obj
+            .get("mediaId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let mime = obj
+            .get("mime")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let data_base64 = obj
+            .get("dataBase64")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        if !data_base64.is_empty() && data_base64.len() > MAX_MEDIA_BASE64_LEN {
+            continue;
+        }
+        let size = parse_u64_field(obj.get("size"));
+        let duration_ms = parse_u64_field(obj.get("durationMs"));
+
+        if kind == "text" && text.is_empty() {
+            continue;
+        }
+        if kind.eq_ignore_ascii_case("fileref") && path_hint.is_empty() && text.is_empty() {
+            continue;
+        }
+        out.push(ChatContentPart {
+            kind,
+            media_id,
+            mime,
+            size,
+            duration_ms,
+            text,
+            path_hint,
+            data_base64,
+        });
+    }
+    out
 }
 
 /// 从原始事件 JSON 解析 sidecar 控制命令。
@@ -294,8 +451,12 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 .get("text")
                 .and_then(Value::as_str)
                 .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)?;
+                .unwrap_or_default()
+                .to_string();
+            let content = parse_chat_content_parts(payload.get("content"));
+            if text.trim().is_empty() && content.is_empty() {
+                return None;
+            }
             let queue_item_id = payload
                 .get("queueItemId")
                 .and_then(Value::as_str)
@@ -310,6 +471,7 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 request_id,
                 queue_item_id,
                 text,
+                content,
             })
         }
         TOOL_CHAT_CANCEL_REQUEST_EVENT => {
@@ -379,6 +541,111 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 file_path,
             })
         }
+        TOOL_MEDIA_STAGE_REQUEST_EVENT => {
+            let tool_id = payload
+                .get("toolId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let conversation_key = payload
+                .get("conversationKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let media_id = payload
+                .get("mediaId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let mime = payload
+                .get("mime")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let data_base64 = payload
+                .get("dataBase64")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let path_hint = payload
+                .get("pathHint")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            Some(SidecarCommand::ToolMediaStageRequest {
+                tool_id,
+                conversation_key,
+                request_id,
+                media_id,
+                mime,
+                data_base64,
+                path_hint,
+            })
+        }
+        TOOL_LAUNCH_REQUEST_EVENT => {
+            let tool_name = payload
+                .get("toolName")
+                .or_else(|| payload.get("tool"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let cwd = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            Some(SidecarCommand::ToolLaunchRequest {
+                tool_name,
+                cwd,
+                request_id,
+            })
+        }
+        TOOL_AUTH_SWITCH_REQUEST_EVENT => {
+            let tool_name = payload
+                .get("toolName")
+                .or_else(|| payload.get("tool"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let profile = payload
+                .get("profile")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            let request_id = payload
+                .get("requestId")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)?;
+            Some(SidecarCommand::ToolAuthSwitchRequest {
+                tool_name,
+                profile,
+                request_id,
+            })
+        }
         _ => None,
     }?;
 
@@ -411,6 +678,11 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
         SidecarCommand::ToolChatRequest { tool_id, .. } => ("chat-request", tool_id.clone()),
         SidecarCommand::ToolChatCancel { tool_id, .. } => ("chat-cancel", tool_id.clone()),
         SidecarCommand::ToolReportFetchRequest { tool_id, .. } => ("report-fetch", tool_id.clone()),
+        SidecarCommand::ToolMediaStageRequest { tool_id, .. } => ("media-stage", tool_id.clone()),
+        SidecarCommand::ToolLaunchRequest { tool_name, .. } => ("launch", tool_name.clone()),
+        SidecarCommand::ToolAuthSwitchRequest { tool_name, .. } => {
+            ("auth-switch", tool_name.clone())
+        }
     }
 }
 
@@ -421,6 +693,9 @@ pub(crate) fn command_feedback_event(command: &SidecarCommand) -> &'static str {
         SidecarCommand::ToolChatRequest { .. } => TOOL_CHAT_FINISHED_EVENT,
         SidecarCommand::ToolChatCancel { .. } => TOOL_CHAT_FINISHED_EVENT,
         SidecarCommand::ToolReportFetchRequest { .. } => TOOL_REPORT_FETCH_FINISHED_EVENT,
+        SidecarCommand::ToolMediaStageRequest { .. } => TOOL_MEDIA_STAGE_FAILED_EVENT,
+        SidecarCommand::ToolLaunchRequest { .. } => TOOL_LAUNCH_FAILED_EVENT,
+        SidecarCommand::ToolAuthSwitchRequest { .. } => TOOL_AUTH_SWITCH_FAILED_EVENT,
         _ => TOOL_WHITELIST_UPDATED_EVENT,
     }
 }
@@ -550,12 +825,49 @@ mod tests {
                 request_id,
                 queue_item_id,
                 text,
+                content,
             } => {
                 assert_eq!(tool_id, "opencode_workspace_p1");
                 assert_eq!(conversation_key, "host_a::opencode_workspace_p1");
                 assert_eq!(request_id, "req_1");
                 assert_eq!(queue_item_id, "q_1");
                 assert_eq!(text, "hello");
+                assert!(content.is_empty());
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_chat_request_command_with_content_parts() {
+        let raw = r#"{
+            "type":"tool_chat_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{
+                "toolId":"openclaw_workspace_p1",
+                "conversationKey":"host_a::openclaw_workspace_p1",
+                "requestId":"req_2",
+                "queueItemId":"q_2",
+                "text":"",
+                "content":[
+                    {"type":"text","text":"请分析附件"},
+                    {"type":"image","mediaId":"media_1","mime":"image/png","size":1234,"pathHint":"cat.png","dataBase64":"abcd"}
+                ]
+            }
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ToolChatRequest { text, content, .. } => {
+                assert_eq!(text, "");
+                assert_eq!(content.len(), 2);
+                assert_eq!(content[0].kind, "text");
+                assert_eq!(content[0].text, "请分析附件");
+                assert_eq!(content[1].kind, "image");
+                assert_eq!(content[1].media_id, "media_1");
+                assert_eq!(content[1].mime, "image/png");
+                assert_eq!(content[1].size, 1234);
             }
             _ => panic!("unexpected command"),
         }

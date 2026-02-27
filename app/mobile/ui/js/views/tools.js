@@ -491,7 +491,7 @@ export function createToolsView(deps) {
               <i class="tool-dot ${gatewayClass}"></i>
               ${escapeHtml(gatewayLabel)}
             </span>
-            <span class="tool-dot-label">
+            <span class="tool-dot-label tool-dot-label-fixed">
               <i class="tool-dot ${dataClass}"></i>
               ${escapeHtml(dataLabel)}
             </span>

@@ -34,6 +34,9 @@ export function createChatStateSlice() {
     messageSelectionModeByKey: {},
     selectedMessageIdsByKey: {},
     swipedConversationKey: "",
+    composerMediaByKey: {},
+    recordingConversationKey: "",
+    recordingPending: false,
     reportViewer: {
       visible: false,
       conversationKey: "",

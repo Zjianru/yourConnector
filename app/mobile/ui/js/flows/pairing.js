@@ -97,7 +97,7 @@ export function createPairingFlow({
     }
   }
 
-  function bindPairFlowEvents({ onOpenDebugTab }) {
+  function bindPairFlowEvents() {
     ui.pairFlowClose.addEventListener("click", closePairFlow);
     ui.pairFlowModal.addEventListener("click", (event) => {
       if (event.target === ui.pairFlowModal) closePairFlow();
@@ -120,9 +120,6 @@ export function createPairingFlow({
     ui.pairScanGalleryBtn.addEventListener("click", () => ui.pairScanFileInput.click());
     ui.pairScanFileInput.addEventListener("change", scanner.onPairScanFileSelected);
 
-    if (typeof onOpenDebugTab === "function") {
-      ui.openDebugFromSetupBtn.addEventListener("click", onOpenDebugTab);
-    }
   }
 
   function bindFailureActionHandler() {

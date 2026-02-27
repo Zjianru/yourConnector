@@ -27,7 +27,10 @@ use self::{
 use crate::{
     ProcInfo, fallback_tools_or_empty,
     tooling::{
-        adapters::{OPENCLAW_SCHEMA_V1, OPENCODE_SCHEMA_V1, openclaw, opencode},
+        adapters::{
+            CLAUDE_CODE_SCHEMA_V1, CODEX_SCHEMA_V1, OPENCLAW_SCHEMA_V1, OPENCODE_SCHEMA_V1,
+            claude_code, codex, openclaw, opencode,
+        },
         bytes_to_mb,
     },
 };
@@ -77,6 +80,8 @@ impl ToolAdapterCore {
         let mut tools = Vec::new();
         tools.extend(opencode::discover(&context));
         tools.extend(openclaw::discover(&context));
+        tools.extend(codex::discover(&context));
+        tools.extend(claude_code::discover(&context));
 
         if tools.is_empty() {
             return fallback_tools_or_empty(self.fallback_tool);
@@ -128,7 +133,7 @@ impl ToolAdapterCore {
             return self.details_cache.snapshot_for_tool_order(&ordered_ids);
         }
 
-        let (opencode_tools, openclaw_tools, unknown_tools) =
+        let (opencode_tools, openclaw_tools, codex_tools, claude_tools, unknown_tools) =
             partition_tools_by_adapter(&collect_targets);
 
         let mut results = Vec::new();
@@ -145,6 +150,11 @@ impl ToolAdapterCore {
             )
             .await,
         );
+        results.extend(codex::collect_details(&codex_tools, &self.detail_options));
+        results.extend(claude_code::collect_details(
+            &claude_tools,
+            &self.detail_options,
+        ));
 
         for tool in unknown_tools {
             results.push(ToolDetailCollectResult::failed(
@@ -185,9 +195,13 @@ fn partition_tools_by_adapter(
     Vec<ToolRuntimePayload>,
     Vec<ToolRuntimePayload>,
     Vec<ToolRuntimePayload>,
+    Vec<ToolRuntimePayload>,
+    Vec<ToolRuntimePayload>,
 ) {
     let mut opencode_tools = Vec::new();
     let mut openclaw_tools = Vec::new();
+    let mut codex_tools = Vec::new();
+    let mut claude_tools = Vec::new();
     let mut unknown_tools = Vec::new();
 
     for tool in tools {
@@ -199,10 +213,24 @@ fn partition_tools_by_adapter(
             opencode_tools.push(tool.clone());
             continue;
         }
+        if codex::matches_tool(tool) {
+            codex_tools.push(tool.clone());
+            continue;
+        }
+        if claude_code::matches_tool(tool) {
+            claude_tools.push(tool.clone());
+            continue;
+        }
         unknown_tools.push(tool.clone());
     }
 
-    (opencode_tools, openclaw_tools, unknown_tools)
+    (
+        opencode_tools,
+        openclaw_tools,
+        codex_tools,
+        claude_tools,
+        unknown_tools,
+    )
 }
 
 /// 把采集结果合并到缓存：成功写新值，失败标记 stale 并保留旧 data。
@@ -274,6 +302,12 @@ fn schema_for_tool(tool: &ToolRuntimePayload) -> &'static str {
     }
     if opencode::matches_tool(tool) {
         return OPENCODE_SCHEMA_V1;
+    }
+    if codex::matches_tool(tool) {
+        return CODEX_SCHEMA_V1;
+    }
+    if claude_code::matches_tool(tool) {
+        return CLAUDE_CODE_SCHEMA_V1;
     }
     "unknown.v1"
 }

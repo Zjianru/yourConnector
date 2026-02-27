@@ -216,6 +216,48 @@ export function createConnectionEvents({
         if (typeof onToolReportFetchFinished === "function") {
           onToolReportFetchFinished(hostId, payload, { traceId, eventId, eventType: type });
         }
+        return;
+      }
+
+      if (
+        type === "tool_media_stage_progress"
+        || type === "tool_media_stage_finished"
+        || type === "tool_media_stage_failed"
+      ) {
+        const mediaId = String(payload.mediaId || "").trim();
+        const reason = String(payload.reason || "").trim();
+        addLog(
+          `[media_stage] ${type} ${mediaId || "--"} ${reason || ""}`.trim(),
+          {
+            scope: "chat_media",
+            action: type,
+            outcome: type.endsWith("failed") ? "failed" : "received",
+            traceId,
+            eventId,
+            eventType: type,
+            hostId,
+            toolId: String(payload.toolId || ""),
+            detail: reason,
+          },
+        );
+        return;
+      }
+
+      if (type === "tool_launch_failed" || type === "tool_auth_switch_failed") {
+        const reason = String(payload.reason || "").trim() || "操作失败";
+        openHostNoticeModal("操作失败", reason);
+        addLog(`[tool_action_failed] ${type}: ${reason}`, {
+          level: "warn",
+          scope: "tool_action",
+          action: type,
+          outcome: "failed",
+          traceId,
+          eventId,
+          eventType: type,
+          hostId,
+          detail: reason,
+        });
+        return;
       }
     } catch (_) {
       // ignore invalid payload

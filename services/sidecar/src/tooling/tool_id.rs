@@ -46,6 +46,28 @@ pub(crate) fn build_openclaw_tool_id(workspace: &str, cmd: &str, fallback_pid: i
     format!("openclaw_{instance}")
 }
 
+/// 依据“工作区 + 实例”生成 codex 工具 ID。
+pub(crate) fn build_codex_tool_id(workspace: &str, fallback_pid: i32) -> String {
+    let instance = normalize_tool_instance_suffix(fallback_pid);
+    let normalized = normalize_path(workspace);
+    if normalized.trim().is_empty() {
+        return format!("codex_{instance}");
+    }
+    let hex = format!("{:016x}", fnv1a64(normalized.as_bytes()));
+    format!("codex_{}_{instance}", &hex[..12])
+}
+
+/// 依据“工作区 + 实例”生成 claude-code 工具 ID。
+pub(crate) fn build_claude_code_tool_id(workspace: &str, fallback_pid: i32) -> String {
+    let instance = normalize_tool_instance_suffix(fallback_pid);
+    let normalized = normalize_path(workspace);
+    if normalized.trim().is_empty() {
+        return format!("claude_code_{instance}");
+    }
+    let hex = format!("{:016x}", fnv1a64(normalized.as_bytes()));
+    format!("claude_code_{}_{instance}", &hex[..12])
+}
+
 /// FNV-1a 64 位哈希，用于稳定生成 toolId。
 fn fnv1a64(bytes: &[u8]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -71,7 +93,7 @@ fn normalize_tool_instance_suffix(pid: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::build_openclaw_tool_id;
+    use super::{build_claude_code_tool_id, build_codex_tool_id, build_openclaw_tool_id};
 
     #[test]
     fn openclaw_gateway_id_should_be_stable_across_pid_changes() {
@@ -89,5 +111,21 @@ mod tests {
         let b = build_openclaw_tool_id("/workspace/a", cmd, 2002);
         assert_ne!(a, b);
         assert!(a.ends_with("_p1001"));
+    }
+
+    #[test]
+    fn codex_id_should_use_workspace_and_instance() {
+        let a = build_codex_tool_id("/workspace/a", 1001);
+        let b = build_codex_tool_id("/workspace/a", 2002);
+        assert_ne!(a, b);
+        assert!(a.starts_with("codex_"));
+    }
+
+    #[test]
+    fn claude_code_id_should_use_workspace_and_instance() {
+        let a = build_claude_code_tool_id("/workspace/a", 1001);
+        let b = build_claude_code_tool_id("/workspace/b", 1001);
+        assert_ne!(a, b);
+        assert!(a.starts_with("claude_code_"));
     }
 }

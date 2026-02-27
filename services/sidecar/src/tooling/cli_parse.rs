@@ -149,6 +149,35 @@ pub(crate) fn is_openclaw_candidate_command(cmd_lower: &str) -> bool {
     true
 }
 
+/// 判断是否是可接入的 codex 命令。
+pub(crate) fn is_codex_candidate_command(cmd_lower: &str) -> bool {
+    if !contains_command_word(cmd_lower, "codex") {
+        return false;
+    }
+    if cmd_lower.contains("--help")
+        || cmd_lower.contains("--version")
+        || cmd_lower.contains(" codex completion")
+        || cmd_lower.contains(" codex doctor")
+    {
+        return false;
+    }
+    true
+}
+
+/// 判断是否是可接入的 claude code 命令（claude）。
+pub(crate) fn is_claude_code_candidate_command(cmd_lower: &str) -> bool {
+    if !contains_command_word(cmd_lower, "claude") {
+        return false;
+    }
+    if cmd_lower.contains("--help")
+        || cmd_lower.contains("--version")
+        || cmd_lower.contains(" claude completion")
+    {
+        return false;
+    }
+    true
+}
+
 /// 统一探测主机地址：0.0.0.0/:: 对外展示为本机可访问地址。
 pub(crate) fn normalize_probe_host(host: &str) -> String {
     match host.trim() {
@@ -244,7 +273,10 @@ pub(crate) fn detect_openclaw_mode(cmd: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{evaluate_openclaw_connection, is_openclaw_candidate_command};
+    use super::{
+        evaluate_openclaw_connection, is_claude_code_candidate_command, is_codex_candidate_command,
+        is_openclaw_candidate_command,
+    };
 
     #[test]
     fn evaluate_openclaw_connection_rejects_serve_mode() {
@@ -273,5 +305,15 @@ mod tests {
     #[test]
     fn openclaw_candidate_rejects_help_command() {
         assert!(!is_openclaw_candidate_command("openclaw --help"));
+    }
+
+    #[test]
+    fn codex_candidate_accepts_runtime_command() {
+        assert!(is_codex_candidate_command("codex run \"hello\""));
+    }
+
+    #[test]
+    fn claude_candidate_accepts_runtime_command() {
+        assert!(is_claude_code_candidate_command("claude -p \"hello\""));
     }
 }

@@ -208,7 +208,6 @@ export function createPairingRunner({
 
       recomputeSelections();
       state.selectedHostId = hostId;
-      state.debugHostId = hostId;
 
       const runtime = ensureRuntime(hostId);
       runtime.accessToken = String(exchangeData.accessToken || "");

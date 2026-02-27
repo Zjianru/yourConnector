@@ -141,7 +141,6 @@ export function createHostState() {
     const hosts = visibleHosts();
     if (hosts.length === 0) {
       state.selectedHostId = "";
-      state.debugHostId = "";
       state.bannerActiveIndex = 0;
       return;
     }
@@ -149,11 +148,6 @@ export function createHostState() {
     const hasSelected = hosts.some((host) => host.hostId === state.selectedHostId);
     if (!hasSelected) {
       state.selectedHostId = hosts[0].hostId;
-    }
-
-    const hasDebug = hosts.some((host) => host.hostId === state.debugHostId);
-    if (!hasDebug) {
-      state.debugHostId = state.selectedHostId;
     }
 
     // Banner 索引必须落在现有宿主机区间内，避免删除后越界。
@@ -180,7 +174,6 @@ export function createHostState() {
       toolAliases: state.toolAliases,
       toolVisibility: state.toolVisibility,
       operationLogs: state.operationLogs.slice(0, 500),
-      message: state.message,
     };
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
@@ -225,7 +218,6 @@ export function createHostState() {
         toolAliases: {},
         toolVisibility: {},
         operationLogs: [],
-        message: String(legacy.message || "tool_ping"),
       };
     } catch (_) {
       return null;
@@ -252,7 +244,6 @@ export function createHostState() {
 
     state.deviceId = String(parsed.deviceId || "").trim();
     state.selectedHostId = String(parsed.selectedHostId || "").trim();
-    state.message = String(parsed.message || state.message);
 
     const hosts = Array.isArray(parsed.hosts) ? parsed.hosts : [];
     state.hosts = hosts

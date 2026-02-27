@@ -103,12 +103,6 @@ export function createHostManageFlow({
                 <button class="btn btn-outline btn-sm" data-manage-delete="${escapeHtml(host.hostId)}">
                   删除
                 </button>
-                <button
-                  class="btn btn-outline btn-sm"
-                  data-manage-open-debug="${escapeHtml(host.hostId)}"
-                >
-                  调试此宿主机
-                </button>
               </div>
             </article>
           `;
@@ -259,7 +253,7 @@ export function createHostManageFlow({
     );
   }
 
-  function onHostManageListClick(event, setDebugHostAndOpenTab) {
+  function onHostManageListClick(event) {
     const connectBtn = event.target.closest("[data-manage-connect]");
     if (connectBtn) {
       const hostId = String(connectBtn.getAttribute("data-manage-connect") || "");
@@ -292,12 +286,6 @@ export function createHostManageFlow({
       return void deleteFlow.deleteHostWithCompensation(
         String(deleteBtn.getAttribute("data-manage-delete") || ""),
       );
-    }
-    const debugBtn = event.target.closest("[data-manage-open-debug]");
-    if (debugBtn && typeof setDebugHostAndOpenTab === "function") {
-      setDebugHostAndOpenTab(String(debugBtn.getAttribute("data-manage-open-debug") || ""));
-      closeHostManageModal();
-      render();
     }
   }
 

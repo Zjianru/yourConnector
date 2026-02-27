@@ -102,22 +102,6 @@ export function createConnectionFlow({
     requestToolsRefresh: sendOps.requestToolsRefresh,
   });
 
-  /**
-   * 发送调试消息。
-   * @param {string} debugHostId 调试宿主机。
-   * @param {string} message 调试消息文本。
-   */
-  function sendTestEvent(debugHostId, message) {
-    if (!debugHostId) {
-      addLog("发送失败：请先选择调试宿主机");
-      return;
-    }
-    sendOps.sendSocketEvent(debugHostId, "chat_message", { text: message }, {
-      action: "send_test_event",
-    });
-    render();
-  }
-
   return {
     setHooks,
     connectAllHosts: socketOps.connectAllHosts,
@@ -129,7 +113,6 @@ export function createConnectionFlow({
     requestToolsRefresh: sendOps.requestToolsRefresh,
     requestToolDetailsRefresh: sendOps.requestToolDetailsRefresh,
     requestControllerRebind: sendOps.requestControllerRebind,
-    sendTestEvent,
     isAnyHostConnected: socketOps.isAnyHostConnected,
     hasConnectableHost: socketOps.hasConnectableHost,
   };

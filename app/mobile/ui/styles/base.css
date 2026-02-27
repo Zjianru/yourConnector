@@ -413,7 +413,8 @@
       .tool-openclaw-dots {
         margin-top: 8px;
         display: flex;
-        flex-wrap: wrap;
+        flex-wrap: nowrap;
+        justify-content: space-between;
         gap: 6px 10px;
       }
 
@@ -424,6 +425,12 @@
         color: rgba(255, 239, 229, 0.94);
         font-size: 11px;
         font-weight: 650;
+      }
+
+      .tool-dot-label-fixed {
+        min-width: 144px;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
       }
 
       .tool-dot {
@@ -558,19 +565,6 @@
         font-size: 13px;
       }
 
-      .debug-panel {
-        display: grid;
-        gap: 8px;
-      }
-
-      .debug-stats {
-        color: var(--text-sub);
-        font-size: 13px;
-        line-height: 1.45;
-        overflow-wrap: anywhere;
-        word-break: break-word;
-      }
-
       .field {
         display: grid;
         gap: 4px;
@@ -614,31 +608,6 @@
         outline: none;
       }
 
-      .debug-actions {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-      }
-
-      .log-box {
-        min-height: 240px;
-        max-height: 320px;
-        overflow: auto;
-        border-radius: 14px;
-        border: 1px solid var(--line-soft);
-        background: rgba(2, 10, 20, 0.76);
-        padding: 8px;
-        font-family: "SF Mono", "Menlo", "Consolas", monospace;
-        font-size: 11px;
-        line-height: 1.45;
-      }
-
-      .log-item {
-        color: #c7ddf5;
-        padding: 4px 2px;
-        border-bottom: 1px solid rgba(179, 217, 255, 0.08);
-      }
-
       .tabs {
         position: fixed;
         left: 50%;
@@ -651,7 +620,7 @@
         backdrop-filter: blur(16px);
         box-shadow: 0 10px 30px rgba(0, 6, 20, 0.42);
         display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
+        grid-template-columns: 1fr 1fr;
         padding: 6px;
         z-index: 60;
       }
@@ -884,10 +853,21 @@
         border: 0;
         background: transparent;
         padding: 6px 0 calc(env(safe-area-inset-bottom, 0px) + 2px);
+        display: grid;
+        gap: 6px;
+        z-index: 58;
+      }
+
+      .app.chat-detail-layout #chatDetailPage .chat-composer-main {
         display: flex;
         align-items: flex-end;
         gap: 6px;
-        z-index: 58;
+      }
+
+      .app.chat-detail-layout #chatDetailPage .chat-composer-head {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
       }
 
       .app.chat-detail-layout #chatDetailPage .chat-composer textarea {
@@ -1080,6 +1060,63 @@
         font-size: 13px;
         line-height: 1.55;
         word-break: break-word;
+      }
+
+      .chat-content-block + .chat-content-block {
+        margin-top: 8px;
+      }
+
+      .chat-media-block {
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 10px;
+        background: rgba(2, 10, 20, 0.52);
+        padding: 6px;
+      }
+
+      .chat-media-image {
+        width: 100%;
+        max-height: 240px;
+        object-fit: cover;
+        border-radius: 8px;
+        display: block;
+      }
+
+      .chat-media-video {
+        width: 100%;
+        max-height: 260px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.45);
+      }
+
+      .chat-media-audio {
+        width: 100%;
+      }
+
+      .chat-media-meta,
+      .chat-media-caption {
+        margin-top: 4px;
+        color: rgba(210, 233, 255, 0.82);
+        font-size: 11px;
+        line-height: 1.4;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+      }
+
+      .chat-media-duration {
+        color: rgba(185, 217, 246, 0.8);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .chat-media-fallback {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        font-size: 11px;
       }
 
       .chat-message-body::after {
@@ -1394,6 +1431,74 @@
         padding-top: 10px;
         display: grid;
         gap: 8px;
+      }
+
+      .chat-composer-main {
+        display: flex;
+        align-items: flex-end;
+        gap: 8px;
+      }
+
+      .chat-composer-head {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .chat-composer-main textarea {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .chat-composer-extra {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex: none;
+      }
+
+      .chat-composer-extra .btn {
+        flex: none;
+      }
+
+      .chat-composer-media-tray {
+        display: flex;
+        align-items: stretch;
+        gap: 8px;
+        overflow-x: auto;
+        padding-bottom: 2px;
+      }
+
+      .chat-composer-media-item {
+        min-width: 144px;
+        max-width: 176px;
+        border: 1px solid var(--line-soft);
+        border-radius: 10px;
+        background: rgba(2, 10, 20, 0.64);
+        padding: 6px;
+        display: grid;
+        gap: 5px;
+      }
+
+      .chat-media-remove-btn {
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.09);
+        color: var(--text-sub);
+        font-size: 11px;
+        line-height: 1;
+        padding: 5px 8px;
+      }
+
+      .chat-record-status {
+        min-width: 56px;
+        color: var(--text-sub);
+        font-size: 11px;
+      }
+
+      .chat-composer-media-tray .chat-media-video,
+      .chat-composer-media-tray .chat-media-image {
+        max-height: 92px;
       }
 
       .chat-composer textarea {

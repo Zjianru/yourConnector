@@ -140,10 +140,187 @@ export function createChatView({ state, ui }) {
       .replace(/\\n/g, "\n");
   }
 
+  function normalizeMessageContent(rawParts) {
+    if (!Array.isArray(rawParts)) return [];
+    const out = [];
+    rawParts.forEach((raw) => {
+      if (!raw || typeof raw !== "object") return;
+      const type = String(raw.type || "").trim();
+      if (!type) return;
+      out.push({
+        type,
+        text: String(raw.text || ""),
+        mediaId: String(raw.mediaId || ""),
+        mime: String(raw.mime || ""),
+        size: Number(raw.size || 0),
+        durationMs: Number(raw.durationMs || 0),
+        pathHint: String(raw.pathHint || ""),
+        previewUrl: String(raw.previewUrl || ""),
+        fileName: String(raw.fileName || ""),
+      });
+    });
+    return out;
+  }
+
+  function contentHasNonText(parts) {
+    return parts.some((part) => part.type !== "text");
+  }
+
+  function contentSummary(parts) {
+    const labels = [];
+    parts.forEach((part) => {
+      if (part.type === "text") return;
+      if (part.type === "image") labels.push("图片");
+      else if (part.type === "video") labels.push("视频");
+      else if (part.type === "audio") labels.push("语音");
+      else labels.push("文件");
+    });
+    return labels.join(" ");
+  }
+
+  function formatDurationMs(durationMs) {
+    const sec = Math.max(0, Math.round(Number(durationMs || 0) / 1000));
+    if (sec <= 0) return "";
+    const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+    const ss = String(sec % 60).padStart(2, "0");
+    return `${mm}:${ss}`;
+  }
+
+  function mediaPreviewUrl(part) {
+    const preview = String(part.previewUrl || "").trim();
+    if (preview) return preview;
+    return "";
+  }
+
+  function renderMessageRichContent(msg) {
+    const parts = normalizeMessageContent(msg?.content);
+    if (!parts.length) {
+      return {
+        html: renderBubbleMarkdown(msg?.text || ""),
+        textOnly: normalizeMessageText(msg?.text || ""),
+        hasMedia: false,
+      };
+    }
+
+    const blocks = [];
+    const textBlocks = [];
+    parts.forEach((part) => {
+      if (part.type === "text") {
+        const text = String(part.text || "");
+        if (!text.trim()) return;
+        textBlocks.push(text);
+        blocks.push(`<div class="chat-content-block">${renderBubbleMarkdown(text)}</div>`);
+        return;
+      }
+      const hint = escapeHtml(String(part.pathHint || part.fileName || ""));
+      const duration = formatDurationMs(part.durationMs);
+      const durationHtml = duration ? `<span class="chat-media-duration">${escapeHtml(duration)}</span>` : "";
+      const preview = mediaPreviewUrl(part);
+      if (part.type === "image" && preview) {
+        blocks.push(`
+          <div class="chat-content-block chat-media-block">
+            <img src="${escapeHtml(preview)}" alt="image" class="chat-media-image" />
+            ${hint ? `<div class="chat-media-caption">${hint}</div>` : ""}
+          </div>
+        `);
+        return;
+      }
+      if (part.type === "video" && preview) {
+        blocks.push(`
+          <div class="chat-content-block chat-media-block">
+            <video src="${escapeHtml(preview)}" class="chat-media-video" controls playsinline></video>
+            <div class="chat-media-meta">${hint}${durationHtml}</div>
+          </div>
+        `);
+        return;
+      }
+      if (part.type === "audio" && preview) {
+        blocks.push(`
+          <div class="chat-content-block chat-media-block">
+            <audio src="${escapeHtml(preview)}" class="chat-media-audio" controls></audio>
+            <div class="chat-media-meta">${hint}${durationHtml}</div>
+          </div>
+        `);
+        return;
+      }
+      const fallbackLabel = part.type === "image"
+        ? "图片"
+        : (part.type === "video" ? "视频" : (part.type === "audio" ? "语音" : "文件"));
+      blocks.push(`
+        <div class="chat-content-block">
+          <span class="chat-media-fallback">${escapeHtml(fallbackLabel)}${hint ? ` · ${hint}` : ""}</span>
+        </div>
+      `);
+    });
+
+    const textOnly = textBlocks.length > 0
+      ? textBlocks.join("\n")
+      : contentSummary(parts);
+    return {
+      html: blocks.join(""),
+      textOnly,
+      hasMedia: contentHasNonText(parts),
+    };
+  }
+
+  function renderComposerMediaTray(parts) {
+    if (!Array.isArray(parts) || parts.length === 0) {
+      return "";
+    }
+    return parts
+      .map((part) => {
+        const mediaId = String(part.mediaId || "");
+        const hint = escapeHtml(String(part.pathHint || part.fileName || ""));
+        const duration = formatDurationMs(part.durationMs);
+        const durationHtml = duration ? `<span class="chat-media-duration">${escapeHtml(duration)}</span>` : "";
+        const preview = mediaPreviewUrl(part);
+        const removeBtn = mediaId
+          ? `<button type="button" class="chat-media-remove-btn" data-chat-remove-media="${escapeHtml(mediaId)}">移除</button>`
+          : "";
+        if (part.type === "image" && preview) {
+          return `
+            <div class="chat-composer-media-item">
+              <img src="${escapeHtml(preview)}" alt="image" class="chat-media-image" />
+              <div class="chat-media-meta">${hint}</div>
+              ${removeBtn}
+            </div>
+          `;
+        }
+        if (part.type === "video" && preview) {
+          return `
+            <div class="chat-composer-media-item">
+              <video src="${escapeHtml(preview)}" class="chat-media-video" muted playsinline></video>
+              <div class="chat-media-meta">${hint}${durationHtml}</div>
+              ${removeBtn}
+            </div>
+          `;
+        }
+        if (part.type === "audio" && preview) {
+          return `
+            <div class="chat-composer-media-item">
+              <audio src="${escapeHtml(preview)}" class="chat-media-audio" controls></audio>
+              <div class="chat-media-meta">${hint}${durationHtml}</div>
+              ${removeBtn}
+            </div>
+          `;
+        }
+        const fallback = part.type === "video" ? "视频" : (part.type === "audio" ? "语音" : "图片");
+        return `
+          <div class="chat-composer-media-item">
+            <span class="chat-media-fallback">${escapeHtml(fallback)}${hint ? ` · ${hint}` : ""}</span>
+            ${removeBtn}
+          </div>
+        `;
+      })
+      .join("");
+  }
+
   function shouldUseCollapsedPreview(msg, selectionMode) {
     if (selectionMode) return false;
     if (!msg || msg.role === "user") return false;
-    const normalized = normalizeMessageText(msg.text || "");
+    const rich = renderMessageRichContent(msg);
+    if (rich.hasMedia) return false;
+    const normalized = normalizeMessageText(rich.textOnly || "");
     if (!normalized) return false;
     const lines = normalized.split("\n").length;
     return lines > 5 || normalized.length > 260;
@@ -197,12 +374,14 @@ export function createChatView({ state, ui }) {
     toggleMainTabs(!onDetailPage);
 
     if (!conversations.length) {
-      ui.chatConversationList.innerHTML = '<div class="empty">暂无会话。先在运维页接入 OpenClaw/OpenCode 后即可开始聊天。</div>';
+      ui.chatConversationList.innerHTML = '<div class="empty">暂无会话。先在运维页接入 OpenClaw/OpenCode/Codex/Claude Code 后即可开始聊天。</div>';
     } else {
       ui.chatConversationList.innerHTML = conversations
         .map((conv) => {
           const latest = conv.messages.length > 0 ? conv.messages[conv.messages.length - 1] : null;
-          const preview = latest ? String(latest.text || "").slice(0, 48) : "暂无消息";
+          const preview = latest
+            ? String(renderMessageRichContent(latest).textOnly || "").slice(0, 48) || "暂无消息"
+            : "暂无消息";
           const isActive = conv.key === activeKey;
           const isSwiped = String(chatState.swipedConversationKey || "") === String(conv.key || "");
           const status = conversationStatus(conv);
@@ -245,8 +424,13 @@ export function createChatView({ state, ui }) {
       ui.chatMessages.innerHTML = '<div class="empty">请选择左侧会话。</div>';
       ui.chatQueueSummary.hidden = true;
       ui.chatQueue.innerHTML = "";
+      ui.chatComposerMediaTray.innerHTML = "";
       ui.chatInput.value = "";
       ui.chatInput.disabled = true;
+      ui.chatAttachBtn.disabled = true;
+      ui.chatRecordBtn.disabled = true;
+      ui.chatRecordBtn.textContent = "录音";
+      ui.chatRecordStatus.textContent = "";
       ui.chatSendBtn.disabled = true;
       ui.chatStopBtn.classList.add("hidden");
       ui.chatSelectBtn.textContent = "选择";
@@ -284,13 +468,14 @@ export function createChatView({ state, ui }) {
         : 1;
       const scalePercent = Math.round(scale * 100);
       const reportLinks = renderReportPathLinks(extractMessageReportPaths(target));
+      const rich = renderMessageRichContent(target);
       ui.chatMessageTitle.textContent = `${roleLabel(target.role)} · 完整消息`;
       ui.chatMessageMeta.textContent = `${active.hostName || active.hostId} / ${active.toolName || active.toolId} · ${formatTime(target.ts)}`;
       ui.chatMessageZoomLabel.textContent = `${scalePercent}%`;
       ui.chatMessageZoomOutBtn.disabled = scale <= 0.8 + 0.001;
       ui.chatMessageZoomInBtn.disabled = scale >= 1.4 - 0.001;
       ui.chatMessageFullBody.style.fontSize = `${scalePercent}%`;
-      ui.chatMessageFullBody.innerHTML = `${renderMarkdown(target.text || "")}${reportLinks}`;
+      ui.chatMessageFullBody.innerHTML = `${rich.html || renderMarkdown(target.text || "")}${reportLinks}`;
       return;
     }
 
@@ -322,6 +507,7 @@ export function createChatView({ state, ui }) {
           const selectable = status !== "streaming" && status !== "sending";
           const selected = selectionMode && messageId && selectedMessageMap[messageId];
           const collapsed = shouldUseCollapsedPreview(msg, selectionMode);
+          const rich = renderMessageRichContent(msg);
           const selectClass = selectionMode
             ? `select-mode ${selectable ? "selectable" : "disabled-select"} ${selected ? "selected" : ""}`
             : "";
@@ -329,7 +515,7 @@ export function createChatView({ state, ui }) {
             ? `<div class="chat-message-status-row"><span class="chat-message-status">${escapeHtml(msg.status)}</span></div>`
             : "";
           const timeText = formatTime(msg.ts);
-          const messageBodyHtml = renderBubbleMarkdown(msg.text || "");
+          const messageBodyHtml = rich.html || renderBubbleMarkdown(msg.text || "");
           const messageReportLinks = renderReportPathLinks(extractMessageReportPaths(msg));
           return `
           <div
@@ -381,7 +567,7 @@ export function createChatView({ state, ui }) {
       ui.chatQueue.innerHTML = queueExpanded
         ? pendingQueue.map((item) => `
           <div class="chat-queue-item">
-            <div class="chat-queue-text">${escapeHtml(String(item.text || "").slice(0, 120))}</div>
+            <div class="chat-queue-text">${escapeHtml((String(item.text || "").trim() || contentSummary(normalizeMessageContent(item.content))).slice(0, 120))}</div>
             <button
               type="button"
               class="tool-quick-btn stop"
@@ -396,10 +582,24 @@ export function createChatView({ state, ui }) {
       ui.chatQueue.innerHTML = "";
     }
 
+    const composerMedia = normalizeMessageContent(chatState.composerMediaByKey[active.key]);
+    ui.chatComposerMediaTray.innerHTML = renderComposerMediaTray(composerMedia);
     ui.chatInput.disabled = isInvalid;
     ui.chatInput.value = String(active.draft || "");
+    ui.chatAttachBtn.disabled = isInvalid;
+    const recordingForActive = String(chatState.recordingConversationKey || "") === String(active.key || "");
+    ui.chatRecordBtn.disabled = isInvalid || (Boolean(chatState.recordingPending) && !recordingForActive);
+    ui.chatRecordBtn.textContent = recordingForActive ? "停止" : "录音";
+    if (chatState.recordingPending) {
+      ui.chatRecordStatus.textContent = "录音处理中...";
+    } else if (recordingForActive) {
+      ui.chatRecordStatus.textContent = "录音中...";
+    } else {
+      ui.chatRecordStatus.textContent = "";
+    }
+    const hasDraftPayload = Boolean(String(active.draft || "").trim()) || composerMedia.length > 0;
     ui.chatSendBtn.disabled = isInvalid || !active.online
-      || (!String(active.draft || "").trim() && !(active.queue.length > 0 && !active.running));
+      || (!hasDraftPayload && !(active.queue.length > 0 && !active.running));
     const showStop = Boolean(active.running);
     ui.chatStopBtn.classList.toggle("hidden", !showStop);
     ui.chatStopBtn.disabled = !showStop;

@@ -105,8 +105,6 @@ export const state = {
   operationLogs: [],
   eventIn: 0,
   eventOut: 0,
-  message: "tool_ping",
-  debugHostId: "",
 
   // 弹窗与临时操作状态。
   detailHostId: "",

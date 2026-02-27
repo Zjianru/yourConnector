@@ -21,9 +21,10 @@ use config::Config;
 
 pub(crate) use runtime::{ProcInfo, fallback_tools_or_empty};
 pub(crate) use tooling::{
-    build_openclaw_tool_id, build_opencode_tool_id, bytes_to_gb, bytes_to_mb,
-    collect_opencode_session_state, detect_openclaw_mode, detect_opencode_mode,
-    evaluate_openclaw_connection, evaluate_opencode_connection, first_non_empty,
+    build_claude_code_tool_id, build_codex_tool_id, build_openclaw_tool_id, build_opencode_tool_id,
+    bytes_to_gb, bytes_to_mb, collect_opencode_session_state, detect_openclaw_mode,
+    detect_opencode_mode, evaluate_openclaw_connection, evaluate_opencode_connection,
+    first_non_empty, is_claude_code_candidate_command, is_codex_candidate_command,
     is_openclaw_candidate_command, is_opencode_candidate_command, is_opencode_wrapper_command,
     normalize_path, normalize_probe_host, option_non_empty, parse_cli_flag_value,
     parse_serve_address, pick_runtime_pid, round2,

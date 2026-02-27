@@ -21,7 +21,8 @@ use crate::{
     config::Config,
     control::{
         CONTROLLER_BIND_UPDATED_EVENT, SidecarCommand, SidecarCommandEnvelope,
-        TOOL_CHAT_FINISHED_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT,
+        TOOL_AUTH_SWITCH_FAILED_EVENT, TOOL_CHAT_FINISHED_EVENT, TOOL_LAUNCH_FAILED_EVENT,
+        TOOL_MEDIA_STAGE_FAILED_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT,
         TOOL_REPORT_FETCH_FINISHED_EVENT, TOOL_WHITELIST_UPDATED_EVENT, ToolProcessAction,
         command_feedback_event, command_feedback_parts,
     },
@@ -487,6 +488,7 @@ pub(crate) async fn handle_sidecar_command(
             request_id,
             queue_item_id,
             text,
+            content,
         } => {
             let tool = discovered_tools
                 .iter()
@@ -521,6 +523,7 @@ pub(crate) async fn handle_sidecar_command(
                     request_id: request_id.clone(),
                     queue_item_id: queue_item_id.clone(),
                     text,
+                    content,
                 },
                 target_tool,
                 trace_id.clone(),
@@ -656,6 +659,72 @@ pub(crate) async fn handle_sidecar_command(
                     SidecarCommandOutcome::default()
                 }
             }
+        }
+        SidecarCommand::ToolMediaStageRequest {
+            tool_id,
+            conversation_key,
+            request_id,
+            media_id,
+            ..
+        } => {
+            send_event(
+                ws_writer,
+                &cfg.system_id,
+                seq,
+                TOOL_MEDIA_STAGE_FAILED_EVENT,
+                trace_id.as_deref(),
+                json!({
+                    "toolId": tool_id,
+                    "conversationKey": conversation_key,
+                    "requestId": request_id,
+                    "mediaId": media_id,
+                    "reason": "当前版本未启用独立 media stage 请求，请改用 tool_chat_request.content[]。",
+                }),
+            )
+            .await?;
+            SidecarCommandOutcome::default()
+        }
+        SidecarCommand::ToolLaunchRequest {
+            tool_name,
+            cwd,
+            request_id,
+        } => {
+            send_event(
+                ws_writer,
+                &cfg.system_id,
+                seq,
+                TOOL_LAUNCH_FAILED_EVENT,
+                trace_id.as_deref(),
+                json!({
+                    "toolName": tool_name,
+                    "cwd": cwd,
+                    "requestId": request_id,
+                    "reason": "当前版本未启用目录启动编排。",
+                }),
+            )
+            .await?;
+            SidecarCommandOutcome::default()
+        }
+        SidecarCommand::ToolAuthSwitchRequest {
+            tool_name,
+            profile,
+            request_id,
+        } => {
+            send_event(
+                ws_writer,
+                &cfg.system_id,
+                seq,
+                TOOL_AUTH_SWITCH_FAILED_EVENT,
+                trace_id.as_deref(),
+                json!({
+                    "toolName": tool_name,
+                    "profile": profile,
+                    "requestId": request_id,
+                    "reason": "当前版本未启用账号切换编排。",
+                }),
+            )
+            .await?;
+            SidecarCommandOutcome::default()
         }
         SidecarCommand::RebindController { .. } => SidecarCommandOutcome::default(),
     };

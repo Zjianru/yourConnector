@@ -7,9 +7,7 @@ import { RAW_PAYLOAD_DEBUG, DELETE_RETRY_INTERVAL_MS, state, ui } from "./state/
 import { tauriInvoke } from "./services/tauri.js";
 import { formatWireLog as formatWireLogRaw, addLog as pushLog } from "./utils/log.js";
 import { escapeHtml } from "./utils/dom.js";
-import { maskSecret } from "./utils/format.js";
 import { renderTabs as renderTabsView } from "./views/tabs.js";
-import { renderDebugPanel as renderDebugPanelView } from "./views/debug.js";
 import { createChatView } from "./views/chat.js";
 import { renderBanner as renderBannerView, renderHostStage as renderHostStageView } from "./views/banner.js";
 import { renderTopActions as renderTopActionsView, syncBannerActiveIndex, extractBannerHostId } from "./views/ops.js";
@@ -263,7 +261,6 @@ hostManageFlowRef = createHostManageFlow({
 
 addToolModal.setHandlers({
   connectCandidateTool: toolManageFlow.connectCandidateTool,
-  openDebug: () => switchTab("debug"),
 });
 connectionFlow.setHooks({
   openHostNoticeModal: openHostNoticeModalGuard,
@@ -350,7 +347,6 @@ function render() {
     renderBannerView(ui, hostState.visibleHosts(), state.bannerActiveIndex, runtimeState.hostStatusLabel, escapeHtml);
     toolsView.renderToolsByHost(hostState.visibleHosts());
     chatView.renderChat();
-    renderDebugPanelView(state, ui, hostState.visibleHosts, hostState.hostById, runtimeState.ensureRuntime, maskSecret, escapeHtml);
     toolDetailModal.renderToolModal();
     addToolModal.renderAddToolModal();
     hostManageFlowRef.renderHostManageModal();
@@ -364,67 +360,12 @@ function render() {
 function bindEvents() {
   ui.tabOps.addEventListener("click", guardUiHandler("tab_ops", () => switchTab("ops")));
   ui.tabChat.addEventListener("click", guardUiHandler("tab_chat", () => switchTab("chat")));
-  ui.tabDebug.addEventListener("click", guardUiHandler("tab_debug", () => switchTab("debug")));
   ui.connectBtnTop.addEventListener("click", guardUiHandler("connect_all_hosts", () => connectionFlow.connectAllHosts()));
   ui.disconnectBtnTop.addEventListener("click", guardUiHandler("disconnect_all_hosts", () => connectionFlow.disconnectAllHosts()));
   ui.replaceHostBtnTop.addEventListener("click", guardUiHandler("open_host_manage", openHostManageModalGuard));
 
   ui.importPairLinkBtn.addEventListener("click", guardUiHandler("pair_flow_import", () => openPairFlowGuard("import", "")));
   ui.openManualPairBtn.addEventListener("click", guardUiHandler("pair_flow_manual", () => openPairFlowGuard("manual", "")));
-
-  ui.connectBtnDebug.addEventListener("click", guardUiHandler(
-    "connect_debug_host",
-    () => connectionFlow.connectHost(state.debugHostId, { manual: true, resetRetry: true }),
-  ));
-  ui.disconnectBtnDebug.addEventListener("click", guardUiHandler(
-    "disconnect_debug_host",
-    () => connectionFlow.disconnectHost(state.debugHostId, { triggerReconnect: false }),
-  ));
-  ui.rebindControllerBtn.addEventListener("click", guardUiHandler(
-    "rebind_controller",
-    () => connectionFlow.requestControllerRebind(state.debugHostId),
-  ));
-  ui.debugHostSelect.addEventListener("change", guardUiHandler("change_debug_host", () => {
-    state.debugHostId = String(ui.debugHostSelect.value || "");
-    render();
-  }));
-
-  ui.messageInput.addEventListener("input", guardUiHandler("update_message", () => {
-    state.message = ui.messageInput.value;
-    hostState.persistConfig();
-    render();
-  }));
-  ui.sendBtn.addEventListener("click", guardUiHandler("send_test_event", () => {
-    connectionFlow.sendTestEvent(state.debugHostId, state.message);
-  }));
-  ui.copyOpLogsBtn.addEventListener("click", guardUiHandler("copy_operation_logs", async () => {
-    const content = JSON.stringify(state.operationLogs, null, 2);
-    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-      await navigator.clipboard.writeText(content);
-      addLog(`已复制结构化日志（${state.operationLogs.length} 条）`, {
-        scope: "debug",
-        action: "copy_operation_logs",
-        outcome: "success",
-      });
-      return;
-    }
-    addLog("复制失败：当前环境不支持 clipboard 接口", {
-      level: "warn",
-      scope: "debug",
-      action: "copy_operation_logs",
-      outcome: "failed",
-    });
-  }));
-  ui.clearLogsBtn.addEventListener("click", guardUiHandler("clear_logs", () => {
-    state.logs = [];
-    state.operationLogs = [];
-    addLog("已清空调试日志", {
-      scope: "debug",
-      action: "clear_logs",
-      outcome: "success",
-    });
-    render();
-  }));
 
   ui.toolsGroupedList.addEventListener("click", guardUiHandler("tools_group_click", toolManageFlow.onToolsGroupedClick));
   ui.toolsGroupedList.addEventListener("scroll", toolsView.onToolSwipeScrollCapture, true);
@@ -438,10 +379,7 @@ function bindEvents() {
     openHostMetricsModalGuard(hostId);
   }));
 
-  pairingFlow.bindPairFlowEvents({ onOpenDebugTab: guardUiHandler("pair_open_debug_tab", () => {
-    closeModalStack("none");
-    switchTab("debug");
-  }) });
+  pairingFlow.bindPairFlowEvents();
   pairFailureModal.bindPairFailureModalEvents({ onPrimaryAction: pairingFlow.bindFailureActionHandler() });
   noticeModal.bindHostNoticeModalEvents({ onEditHost: (hostId) => {
     closeModalStack("hostEdit");
@@ -459,18 +397,11 @@ function bindEvents() {
     hostManageFlowRef.closeHostManageModal();
     openPairFlowGuard("import", "");
   }));
-  ui.hostManageDebugBtn.addEventListener("click", guardUiHandler("host_manage_open_debug", () => {
-    hostManageFlowRef.closeHostManageModal();
-    switchTab("debug");
-  }));
   ui.hostManageList.addEventListener(
     "click",
     guardUiHandler(
       "host_manage_list_click",
-      (event) => hostManageFlowRef.onHostManageListClick(event, (hostId) => {
-        state.debugHostId = hostId;
-        state.activeTab = "debug";
-      }),
+      (event) => hostManageFlowRef.onHostManageListClick(event),
     ),
   );
   ui.pendingDeleteList.addEventListener("click", guardUiHandler("pending_delete_list_click", hostManageFlowRef.onPendingDeleteListClick));
@@ -507,7 +438,6 @@ function init() {
   });
   pairingFlow.bindPairingLinkBridge();
   pairingFlow.tryApplyLaunchPairingLink();
-  ui.messageInput.value = state.message;
   void chatFlow.hydrateChatState();
 
   bindEvents();

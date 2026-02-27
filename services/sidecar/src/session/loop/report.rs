@@ -345,7 +345,9 @@ fn validate_report_path(
     })
 }
 
-fn resolve_report_allowed_roots(tool: &ToolRuntimePayload) -> Result<Vec<PathBuf>, ReportExecError> {
+fn resolve_report_allowed_roots(
+    tool: &ToolRuntimePayload,
+) -> Result<Vec<PathBuf>, ReportExecError> {
     let mut candidates = Vec::<PathBuf>::new();
     if let Some(workspace) = tool
         .workspace_dir
@@ -667,7 +669,10 @@ mod tests {
             .join(".openclaw")
             .join("agents")
             .join(marker);
-        let file_path = agent_root.join("workspace").join("output").join("report.md");
+        let file_path = agent_root
+            .join("workspace")
+            .join("output")
+            .join("report.md");
         std::fs::create_dir_all(
             file_path
                 .parent()

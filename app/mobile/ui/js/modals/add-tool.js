@@ -20,7 +20,6 @@ export function createAddToolModal({
   queueDispatcher,
 }) {
   let onConnectCandidateTool = null;
-  let onOpenDebug = null;
 
   /**
    * 生成候选工具的工作目录文案，帮助用户区分同类多实例。
@@ -147,7 +146,7 @@ export function createAddToolModal({
     if (runtime.candidateTools.length === 0) {
       ui.candidateList.innerHTML = runtime.tools.length > 0
         ? '<div class="empty">当前没有候选工具。已发现的工具可能已接入（候选列表仅展示未接入工具）。</div>'
-        : '<div class="empty">当前没有候选工具。请确认宿主机已运行 opencode/openclaw，并等待一次快照刷新。</div>';
+        : '<div class="empty">当前没有候选工具。请确认宿主机已运行 opencode/openclaw/codex/claude，并等待一次快照刷新。</div>';
       return;
     }
 
@@ -213,17 +212,10 @@ export function createAddToolModal({
       }
     });
     ui.candidateList.addEventListener("click", onCandidateListClick);
-    ui.goDebugFromAddTool.addEventListener("click", () => {
-      closeAddToolModal();
-      if (typeof onOpenDebug === "function") {
-        onOpenDebug();
-      }
-    });
   }
 
-  function setHandlers({ connectCandidateTool, openDebug }) {
+  function setHandlers({ connectCandidateTool }) {
     onConnectCandidateTool = connectCandidateTool || null;
-    onOpenDebug = openDebug || null;
   }
 
   return {
