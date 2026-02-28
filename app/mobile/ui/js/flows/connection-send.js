@@ -188,10 +188,37 @@ export function createConnectionSendOps({
     }
   }
 
+  /**
+   * 请求 sidecar 在指定目录启动工具 CLI。
+   * @param {string} hostId 宿主机标识。
+   * @param {object} input 启动参数。
+   * @returns {{ok:boolean, requestId:string}}
+   */
+  function requestToolLaunch(hostId, input = {}) {
+    const toolName = String(input.toolName || input.tool || "").trim();
+    const cwd = String(input.cwd || "").trim();
+    const conversationKey = String(input.conversationKey || "").trim();
+    const requestId = String(input.requestId || "").trim() || createEventId().replace(/^evt_/, "lch_");
+    if (!toolName || !cwd) {
+      return { ok: false, requestId };
+    }
+    const ok = sendSocketEvent(hostId, "tool_launch_request", {
+      toolName,
+      cwd,
+      requestId,
+      conversationKey,
+    }, {
+      action: "tool_launch_request",
+      traceId: requestId.replace(/^lch_/, "trc_"),
+    });
+    return { ok, requestId };
+  }
+
   return {
     sendSocketEvent,
     requestToolsRefresh,
     requestToolDetailsRefresh,
     requestControllerRebind,
+    requestToolLaunch,
   };
 }

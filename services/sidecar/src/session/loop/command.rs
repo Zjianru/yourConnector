@@ -1,10 +1,13 @@
 //! Sidecar 控制命令处理。
 
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose};
+use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::stream::SplitSink;
 use serde_json::json;
 use std::{
-    path::PathBuf,
+    env, fs,
+    path::{Path, PathBuf},
     process::Stdio,
     time::{Duration, Instant},
 };
@@ -21,14 +24,15 @@ use crate::{
     config::Config,
     control::{
         CONTROLLER_BIND_UPDATED_EVENT, SidecarCommand, SidecarCommandEnvelope,
-        TOOL_AUTH_SWITCH_FAILED_EVENT, TOOL_CHAT_FINISHED_EVENT, TOOL_LAUNCH_FAILED_EVENT,
-        TOOL_MEDIA_STAGE_FAILED_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT,
+        TOOL_CHAT_FINISHED_EVENT, TOOL_LAUNCH_FAILED_EVENT, TOOL_LAUNCH_FINISHED_EVENT,
+        TOOL_LAUNCH_STARTED_EVENT, TOOL_MEDIA_STAGE_FAILED_EVENT, TOOL_MEDIA_STAGE_FINISHED_EVENT,
+        TOOL_MEDIA_STAGE_PROGRESS_EVENT, TOOL_PROCESS_CONTROL_UPDATED_EVENT,
         TOOL_REPORT_FETCH_FINISHED_EVENT, TOOL_WHITELIST_UPDATED_EVENT, ToolProcessAction,
         command_feedback_event, command_feedback_parts,
     },
     session::{snapshots::is_fallback_tool, transport::send_event},
     stores::{ControllerDevicesStore, ToolWhitelistStore},
-    tooling::adapters::{openclaw, opencode},
+    tooling::adapters::{claude_code, codex, openclaw, opencode},
 };
 
 use super::chat::{
@@ -126,6 +130,79 @@ struct LaunchSpec {
     /// 启动工作目录（可选）。
     cwd: Option<PathBuf>,
 }
+
+/// 临时附件落盘结果。
+#[derive(Debug, Clone)]
+struct StagedMedia {
+    staged_media_id: String,
+    mime: String,
+    path_hint: String,
+    relative_path: String,
+    staged_path: String,
+    expires_at: String,
+    size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct StageError {
+    code: &'static str,
+    reason: String,
+}
+
+impl StageError {
+    fn new(code: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// 启动请求上下文。
+#[derive(Debug, Clone)]
+struct LaunchContext {
+    tool_name: String,
+    cwd: String,
+    request_id: String,
+    conversation_key: String,
+}
+
+/// 启动目标类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchTool {
+    OpenClaw,
+    OpenCode,
+    Codex,
+    ClaudeCode,
+}
+
+/// 预处理后的启动参数。
+#[derive(Debug, Clone)]
+struct PreparedLaunch {
+    tool: LaunchTool,
+    cwd: PathBuf,
+}
+
+/// 附件 base64 最大长度（约 32MB 原始数据）。
+const MEDIA_STAGE_MAX_BYTES: usize = 32 * 1024 * 1024;
+/// 附件暂存目录名（工作区内）。
+const MEDIA_STAGE_INBOX_DIR: &str = ".yc/inbox";
+/// 附件暂存目录环境变量。
+const MEDIA_STAGE_DIR_ENV: &str = "YC_MEDIA_STAGE_DIR";
+/// 附件暂存文件生存时间（秒）。
+const MEDIA_STAGE_TTL_SEC: u64 = 24 * 3600;
+/// 启动目录白名单环境变量（PATH 语义）。
+const LAUNCH_ALLOWED_ROOTS_ENV: &str = "YC_LAUNCH_ALLOWED_ROOTS";
+/// 媒体错误码：不支持的 MIME。
+const MEDIA_UNSUPPORTED_MIME: &str = "MEDIA_UNSUPPORTED_MIME";
+/// 媒体错误码：超出体积限制。
+const MEDIA_TOO_LARGE: &str = "MEDIA_TOO_LARGE";
+/// 媒体错误码：base64 解码失败或内容为空。
+const MEDIA_DECODE_FAILED: &str = "MEDIA_DECODE_FAILED";
+/// 媒体错误码：无法定位目标工具。
+const MEDIA_STAGE_NOT_FOUND: &str = "MEDIA_STAGE_NOT_FOUND";
+/// 媒体错误码：路径越界或无可用工作区。
+const MEDIA_PATH_FORBIDDEN: &str = "MEDIA_PATH_FORBIDDEN";
 
 /// 处理一条 sidecar 控制命令，并返回后续刷新意图。
 pub(crate) async fn handle_sidecar_command(
@@ -665,66 +742,172 @@ pub(crate) async fn handle_sidecar_command(
             conversation_key,
             request_id,
             media_id,
-            ..
+            mime,
+            data_base64,
+            path_hint,
         } => {
             send_event(
                 ws_writer,
                 &cfg.system_id,
                 seq,
-                TOOL_MEDIA_STAGE_FAILED_EVENT,
+                TOOL_MEDIA_STAGE_PROGRESS_EVENT,
                 trace_id.as_deref(),
                 json!({
                     "toolId": tool_id,
                     "conversationKey": conversation_key,
                     "requestId": request_id,
                     "mediaId": media_id,
-                    "reason": "当前版本未启用独立 media stage 请求，请改用 tool_chat_request.content[]。",
+                    "progress": 0,
                 }),
             )
             .await?;
+            let workspace_dir = discovered_tools
+                .iter()
+                .find(|item| item.tool_id == tool_id)
+                .and_then(|item| item.workspace_dir.clone());
+            match stage_media_attachment(
+                &tool_id,
+                &conversation_key,
+                &request_id,
+                &media_id,
+                &mime,
+                &data_base64,
+                &path_hint,
+                workspace_dir.as_deref(),
+            ) {
+                Ok(staged) => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_MEDIA_STAGE_FINISHED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolId": tool_id,
+                            "conversationKey": conversation_key,
+                            "requestId": request_id,
+                            "mediaId": media_id,
+                            "stagedMediaId": staged.staged_media_id,
+                            "mime": staged.mime,
+                            "size": staged.size,
+                            "pathHint": staged.path_hint,
+                            "relativePath": staged.relative_path,
+                            "stagedPath": staged.staged_path,
+                            "expiresAt": staged.expires_at,
+                            "progress": 100,
+                        }),
+                    )
+                    .await?;
+                }
+                Err(err) => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_MEDIA_STAGE_FAILED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolId": tool_id,
+                            "conversationKey": conversation_key,
+                            "requestId": request_id,
+                            "mediaId": media_id,
+                            "code": err.code,
+                            "reason": err.reason,
+                        }),
+                    )
+                    .await?;
+                }
+            }
             SidecarCommandOutcome::default()
         }
         SidecarCommand::ToolLaunchRequest {
             tool_name,
             cwd,
             request_id,
+            conversation_key,
         } => {
-            send_event(
-                ws_writer,
-                &cfg.system_id,
-                seq,
-                TOOL_LAUNCH_FAILED_EVENT,
-                trace_id.as_deref(),
-                json!({
-                    "toolName": tool_name,
-                    "cwd": cwd,
-                    "requestId": request_id,
-                    "reason": "当前版本未启用目录启动编排。",
-                }),
-            )
-            .await?;
-            SidecarCommandOutcome::default()
-        }
-        SidecarCommand::ToolAuthSwitchRequest {
-            tool_name,
-            profile,
-            request_id,
-        } => {
-            send_event(
-                ws_writer,
-                &cfg.system_id,
-                seq,
-                TOOL_AUTH_SWITCH_FAILED_EVENT,
-                trace_id.as_deref(),
-                json!({
-                    "toolName": tool_name,
-                    "profile": profile,
-                    "requestId": request_id,
-                    "reason": "当前版本未启用账号切换编排。",
-                }),
-            )
-            .await?;
-            SidecarCommandOutcome::default()
+            let launch_context = LaunchContext {
+                tool_name: tool_name.clone(),
+                cwd: cwd.clone(),
+                request_id: request_id.clone(),
+                conversation_key: conversation_key.clone(),
+            };
+            match prepare_launch_request(&launch_context, discovered_tools) {
+                Ok(prepared) => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_LAUNCH_STARTED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolName": launch_context.tool_name,
+                            "cwd": launch_context.cwd,
+                            "requestId": launch_context.request_id,
+                            "conversationKey": launch_context.conversation_key,
+                        }),
+                    )
+                    .await?;
+                    match spawn_launch_target(&prepared).await {
+                        Ok(pid) => {
+                            send_event(
+                                ws_writer,
+                                &cfg.system_id,
+                                seq,
+                                TOOL_LAUNCH_FINISHED_EVENT,
+                                trace_id.as_deref(),
+                                json!({
+                                    "toolName": launch_context.tool_name,
+                                    "cwd": launch_context.cwd,
+                                    "requestId": launch_context.request_id,
+                                    "conversationKey": launch_context.conversation_key,
+                                    "pid": pid,
+                                    "status": "started",
+                                    "reason": "工具进程已启动。",
+                                }),
+                            )
+                            .await?;
+                            SidecarCommandOutcome::snapshots_and_details()
+                        }
+                        Err(reason) => {
+                            send_event(
+                                ws_writer,
+                                &cfg.system_id,
+                                seq,
+                                TOOL_LAUNCH_FAILED_EVENT,
+                                trace_id.as_deref(),
+                                json!({
+                                    "toolName": launch_context.tool_name,
+                                    "cwd": launch_context.cwd,
+                                    "requestId": launch_context.request_id,
+                                    "conversationKey": launch_context.conversation_key,
+                                    "reason": reason,
+                                }),
+                            )
+                            .await?;
+                            SidecarCommandOutcome::default()
+                        }
+                    }
+                }
+                Err(reason) => {
+                    send_event(
+                        ws_writer,
+                        &cfg.system_id,
+                        seq,
+                        TOOL_LAUNCH_FAILED_EVENT,
+                        trace_id.as_deref(),
+                        json!({
+                            "toolName": launch_context.tool_name,
+                            "cwd": launch_context.cwd,
+                            "requestId": launch_context.request_id,
+                            "conversationKey": launch_context.conversation_key,
+                            "reason": reason,
+                        }),
+                    )
+                    .await?;
+                    SidecarCommandOutcome::default()
+                }
+            }
         }
         SidecarCommand::RebindController { .. } => SidecarCommandOutcome::default(),
     };
@@ -900,4 +1083,324 @@ fn is_pid_running(pid: i32) -> bool {
     let mut sys = System::new_all();
     sys.refresh_processes(ProcessesToUpdate::All, true);
     sys.process(Pid::from_u32(pid_u32)).is_some()
+}
+
+fn stage_media_attachment(
+    tool_id: &str,
+    conversation_key: &str,
+    request_id: &str,
+    media_id: &str,
+    mime: &str,
+    data_base64: &str,
+    path_hint: &str,
+    workspace_dir: Option<&str>,
+) -> std::result::Result<StagedMedia, StageError> {
+    let provided_mime = mime.trim().to_ascii_lowercase();
+    let raw_payload = data_base64.trim();
+    if raw_payload.is_empty() {
+        return Err(StageError::new(
+            MEDIA_DECODE_FAILED,
+            "缺少附件内容，无法暂存。",
+        ));
+    }
+
+    let (inline_mime, base64_payload) = parse_base64_payload(raw_payload);
+    let effective_mime = if !provided_mime.is_empty() {
+        provided_mime
+    } else {
+        inline_mime
+    };
+    if !effective_mime.starts_with("image/")
+        && !effective_mime.starts_with("video/")
+        && !effective_mime.starts_with("audio/")
+    {
+        return Err(StageError::new(
+            MEDIA_UNSUPPORTED_MIME,
+            "仅支持 image/video/audio MIME 类型。",
+        ));
+    }
+
+    let bytes = general_purpose::STANDARD
+        .decode(base64_payload.as_bytes())
+        .map_err(|err| {
+            StageError::new(MEDIA_DECODE_FAILED, format!("附件 base64 解码失败: {err}"))
+        })?;
+    if bytes.is_empty() {
+        return Err(StageError::new(
+            MEDIA_DECODE_FAILED,
+            "附件内容为空，无法暂存。",
+        ));
+    }
+    if bytes.len() > MEDIA_STAGE_MAX_BYTES {
+        return Err(StageError::new(
+            MEDIA_TOO_LARGE,
+            format!(
+                "附件超过大小限制（{} MB）。",
+                MEDIA_STAGE_MAX_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+
+    let stage_root = resolve_media_stage_root(workspace_dir).map_err(|reason| {
+        StageError::new(MEDIA_STAGE_NOT_FOUND, format!("{tool_id} 暂存目录不可用: {reason}"))
+    })?;
+    cleanup_media_stage_dir(&stage_root);
+    let conv_segment = sanitize_path_segment(conversation_key);
+    let req_segment = sanitize_path_segment(request_id);
+    let dir = stage_root.join(&conv_segment).join(&req_segment);
+    fs::create_dir_all(&dir).map_err(|err| {
+        StageError::new(MEDIA_PATH_FORBIDDEN, format!("创建暂存目录失败: {err}"))
+    })?;
+    let ext = mime_extension(&effective_mime);
+    let file_name = format!("{}.{}", sanitize_path_segment(media_id), ext);
+    let file_path = dir.join(file_name);
+    fs::write(&file_path, &bytes).map_err(|err| {
+        StageError::new(MEDIA_PATH_FORBIDDEN, format!("写入附件暂存文件失败: {err}"))
+    })?;
+    let relative_path = format!(
+        "{}/{}/{}",
+        conv_segment,
+        req_segment,
+        file_path
+            .file_name()
+            .and_then(|item| item.to_str())
+            .unwrap_or_default()
+    );
+    let expires_at = (Utc::now() + ChronoDuration::seconds(MEDIA_STAGE_TTL_SEC as i64))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    Ok(StagedMedia {
+        staged_media_id: relative_path.clone(),
+        mime: effective_mime,
+        path_hint: path_hint.trim().to_string(),
+        relative_path,
+        staged_path: file_path.to_string_lossy().to_string(),
+        expires_at,
+        size: bytes.len(),
+    })
+}
+
+fn parse_base64_payload(raw: &str) -> (String, String) {
+    if !raw.starts_with("data:") {
+        return (String::new(), raw.trim().to_string());
+    }
+    let marker = ";base64,";
+    if let Some(index) = raw.find(marker) {
+        let mime = raw[5..index].trim().to_ascii_lowercase();
+        let payload = raw[(index + marker.len())..].trim().to_string();
+        return (mime, payload);
+    }
+    (String::new(), raw.trim().to_string())
+}
+
+fn resolve_media_stage_root(workspace_dir: Option<&str>) -> std::result::Result<PathBuf, String> {
+    if let Some(raw) = env::var_os(MEDIA_STAGE_DIR_ENV) {
+        let candidate = PathBuf::from(raw);
+        if !candidate.as_os_str().is_empty() {
+            return Ok(candidate);
+        }
+    }
+    let Some(workspace) = workspace_dir.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err("工具缺少工作目录。".to_string());
+    };
+    let canonical =
+        fs::canonicalize(workspace).map_err(|err| format!("工作目录不可访问或不存在: {err}"))?;
+    if !canonical.is_dir() {
+        return Err("工作目录不是目录。".to_string());
+    }
+    Ok(canonical.join(MEDIA_STAGE_INBOX_DIR))
+}
+
+fn cleanup_media_stage_dir(root: &Path) {
+    if !root.exists() {
+        return;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    let now = std::time::SystemTime::now();
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path.clone());
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let Ok(elapsed) = now.duration_since(modified) else {
+                continue;
+            };
+            if elapsed.as_secs() > MEDIA_STAGE_TTL_SEC {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn sanitize_path_segment(raw: &str) -> String {
+    let mut output = String::new();
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    if output.is_empty() {
+        "unknown".to_string()
+    } else {
+        output
+    }
+}
+
+fn mime_extension(mime: &str) -> String {
+    let sub = mime
+        .split('/')
+        .nth(1)
+        .unwrap_or("bin")
+        .split(';')
+        .next()
+        .unwrap_or("bin")
+        .trim()
+        .to_ascii_lowercase();
+    let sanitized = sanitize_path_segment(sub.as_str());
+    if sanitized.is_empty() {
+        "bin".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn prepare_launch_request(
+    request: &LaunchContext,
+    discovered_tools: &[ToolRuntimePayload],
+) -> std::result::Result<PreparedLaunch, String> {
+    let Some(tool) = parse_launch_tool(request.tool_name.as_str()) else {
+        return Err("不支持的工具类型，仅支持 OpenClaw/OpenCode/Codex/Claude Code。".to_string());
+    };
+    let cwd = canonicalize_launch_cwd(request.cwd.as_str())?;
+    let allowed_roots = resolve_launch_allowed_roots(discovered_tools, tool);
+    if !allowed_roots.iter().any(|root| cwd.starts_with(root)) {
+        return Err("目标目录不在授权范围内，请切换到工作区目录后重试。".to_string());
+    }
+    Ok(PreparedLaunch { tool, cwd })
+}
+
+fn parse_launch_tool(raw: &str) -> Option<LaunchTool> {
+    let normalized = raw.trim().to_ascii_lowercase().replace([' ', '_'], "-");
+    if normalized.contains("openclaw") || normalized == "claw" {
+        return Some(LaunchTool::OpenClaw);
+    }
+    if normalized.contains("opencode") || normalized == "open-code" {
+        return Some(LaunchTool::OpenCode);
+    }
+    if normalized.contains("codex") {
+        return Some(LaunchTool::Codex);
+    }
+    if normalized.contains("claude") {
+        return Some(LaunchTool::ClaudeCode);
+    }
+    None
+}
+
+fn canonicalize_launch_cwd(raw: &str) -> std::result::Result<PathBuf, String> {
+    let cwd = expand_tilde(raw);
+    if cwd.trim().is_empty() {
+        return Err("缺少目标目录，无法启动工具。".to_string());
+    }
+    let path = PathBuf::from(cwd.trim());
+    if !path.is_absolute() {
+        return Err("仅支持绝对路径目录启动。".to_string());
+    }
+    let canonical =
+        fs::canonicalize(&path).map_err(|err| format!("目录不可访问或不存在: {err}"))?;
+    if !canonical.is_dir() {
+        return Err("目标路径不是目录。".to_string());
+    }
+    Ok(canonical)
+}
+
+fn expand_tilde(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(suffix) = trimmed.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return format!("{}/{}", home.trim_end_matches('/'), suffix);
+    }
+    trimmed.to_string()
+}
+
+fn resolve_launch_allowed_roots(
+    discovered_tools: &[ToolRuntimePayload],
+    target: LaunchTool,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::<PathBuf>::new();
+    for tool in discovered_tools {
+        if !tool_matches_launch_target(tool, target) {
+            continue;
+        }
+        let Some(workspace) = tool.workspace_dir.as_deref() else {
+            continue;
+        };
+        let normalized = workspace.trim();
+        if normalized.is_empty() {
+            continue;
+        }
+        if let Ok(path) = fs::canonicalize(normalized) {
+            roots.push(path);
+        }
+    }
+    if let Some(raw) = env::var_os(LAUNCH_ALLOWED_ROOTS_ENV) {
+        for value in env::split_paths(&raw) {
+            if let Ok(path) = fs::canonicalize(&value) {
+                roots.push(path);
+            }
+        }
+    }
+    if let Ok(home) = env::var("HOME")
+        && !home.trim().is_empty()
+        && let Ok(path) = fs::canonicalize(home)
+    {
+        roots.push(path);
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn tool_matches_launch_target(tool: &ToolRuntimePayload, target: LaunchTool) -> bool {
+    match target {
+        LaunchTool::OpenClaw => openclaw::matches_tool(tool),
+        LaunchTool::OpenCode => opencode::matches_tool(tool),
+        LaunchTool::Codex => codex::matches_tool(tool),
+        LaunchTool::ClaudeCode => claude_code::matches_tool(tool),
+    }
+}
+
+async fn spawn_launch_target(
+    prepared: &PreparedLaunch,
+) -> std::result::Result<Option<i32>, String> {
+    let program = match prepared.tool {
+        LaunchTool::OpenClaw => "openclaw",
+        LaunchTool::OpenCode => "opencode",
+        LaunchTool::Codex => "codex",
+        LaunchTool::ClaudeCode => "claude",
+    };
+    let mut command = Command::new(program);
+    command
+        .current_dir(&prepared.cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command
+        .spawn()
+        .map_err(|err| format!("启动 {} 失败: {err}", program))?;
+    Ok(child.id().and_then(|pid| i32::try_from(pid).ok()))
 }

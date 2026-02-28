@@ -198,6 +198,7 @@ const chatFlow = createChatFlow({
   resolveRuntimeToolId: runtimeState.resolveRuntimeToolId,
   resolveToolDisplayName: runtimeState.resolveToolDisplayName,
   sendSocketEvent: connectionFlow.sendSocketEvent,
+  requestToolLaunch: connectionFlow.requestToolLaunch,
   addLog,
   tauriInvoke,
   render,
@@ -266,12 +267,18 @@ connectionFlow.setHooks({
   openHostNoticeModal: openHostNoticeModalGuard,
   renderAddToolModal: addToolModal.renderAddToolModal,
   connectCandidateTool: toolManageFlow.connectCandidateTool,
+  onToolMediaStageProgress: chatFlow.onToolMediaStageProgress,
+  onToolMediaStageFinished: chatFlow.onToolMediaStageFinished,
+  onToolMediaStageFailed: chatFlow.onToolMediaStageFailed,
   onToolChatStarted: chatFlow.onToolChatStarted,
   onToolChatChunk: chatFlow.onToolChatChunk,
   onToolChatFinished: chatFlow.onToolChatFinished,
   onToolReportFetchStarted: chatFlow.onToolReportFetchStarted,
   onToolReportFetchChunk: chatFlow.onToolReportFetchChunk,
   onToolReportFetchFinished: chatFlow.onToolReportFetchFinished,
+  onToolLaunchStarted: chatFlow.onToolLaunchStarted,
+  onToolLaunchFinished: chatFlow.onToolLaunchFinished,
+  onToolLaunchFailed: chatFlow.onToolLaunchFailed,
 });
 
 /**

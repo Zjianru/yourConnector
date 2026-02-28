@@ -24,13 +24,20 @@ export function createConnectionEvents({
   connectCandidateTool,
   openHostNoticeModal,
   requestToolsRefresh,
+  requestToolDetailsRefresh,
   renderAddToolModal,
+  onToolMediaStageProgress,
+  onToolMediaStageFinished,
+  onToolMediaStageFailed,
   onToolChatStarted,
   onToolChatChunk,
   onToolChatFinished,
   onToolReportFetchStarted,
   onToolReportFetchChunk,
   onToolReportFetchFinished,
+  onToolLaunchStarted,
+  onToolLaunchFinished,
+  onToolLaunchFailed,
   addLog,
   queueDispatcher,
 }) {
@@ -219,15 +226,48 @@ export function createConnectionEvents({
         return;
       }
 
+      if (type === "tool_launch_started") {
+        if (typeof onToolLaunchStarted === "function") {
+          onToolLaunchStarted(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_launch_finished") {
+        if (typeof onToolLaunchFinished === "function") {
+          onToolLaunchFinished(hostId, payload, { traceId, eventId, eventType: type });
+        }
+        return;
+      }
+
+      if (type === "tool_launch_failed") {
+        const handled = typeof onToolLaunchFailed === "function"
+          ? onToolLaunchFailed(hostId, payload, { traceId, eventId, eventType: type }) === true
+          : false;
+        if (!handled) {
+          const reason = String(payload.reason || "").trim() || "操作失败";
+          openHostNoticeModal("操作失败", reason);
+        }
+        return;
+      }
+
       if (
         type === "tool_media_stage_progress"
         || type === "tool_media_stage_finished"
         || type === "tool_media_stage_failed"
       ) {
+        if (type === "tool_media_stage_progress" && typeof onToolMediaStageProgress === "function") {
+          onToolMediaStageProgress(hostId, payload, { traceId, eventId, eventType: type });
+        } else if (type === "tool_media_stage_finished" && typeof onToolMediaStageFinished === "function") {
+          onToolMediaStageFinished(hostId, payload, { traceId, eventId, eventType: type });
+        } else if (type === "tool_media_stage_failed" && typeof onToolMediaStageFailed === "function") {
+          onToolMediaStageFailed(hostId, payload, { traceId, eventId, eventType: type });
+        }
         const mediaId = String(payload.mediaId || "").trim();
+        const code = String(payload.code || "").trim();
         const reason = String(payload.reason || "").trim();
         addLog(
-          `[media_stage] ${type} ${mediaId || "--"} ${reason || ""}`.trim(),
+          `[media_stage] ${type} ${mediaId || "--"} ${code || ""} ${reason || ""}`.trim(),
           {
             scope: "chat_media",
             action: type,
@@ -237,28 +277,12 @@ export function createConnectionEvents({
             eventType: type,
             hostId,
             toolId: String(payload.toolId || ""),
-            detail: reason,
+            detail: [code, reason].filter(Boolean).join(" "),
           },
         );
         return;
       }
 
-      if (type === "tool_launch_failed" || type === "tool_auth_switch_failed") {
-        const reason = String(payload.reason || "").trim() || "操作失败";
-        openHostNoticeModal("操作失败", reason);
-        addLog(`[tool_action_failed] ${type}: ${reason}`, {
-          level: "warn",
-          scope: "tool_action",
-          action: type,
-          outcome: "failed",
-          traceId,
-          eventId,
-          eventType: type,
-          hostId,
-          detail: reason,
-        });
-        return;
-      }
     } catch (_) {
       // ignore invalid payload
     }

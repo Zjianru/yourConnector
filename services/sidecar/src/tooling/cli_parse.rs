@@ -111,6 +111,17 @@ fn contains_command_word(cmd_lower: &str, word: &str) -> bool {
         || cmd_lower.contains(&format!("/{word} "))
 }
 
+/// 判断 token 是否是目标命令本体（支持 /path/codex 形态）。
+fn token_matches_command(token: &str, word: &str) -> bool {
+    let trimmed = token.trim_matches(|ch| ch == '"' || ch == '\'');
+    if trimmed == word {
+        return true;
+    }
+    let unix_name = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let windows_name = unix_name.rsplit('\\').next().unwrap_or(unix_name);
+    windows_name == word
+}
+
 /// 判断是否是可接入的 opencode 运行命令。
 pub(crate) fn is_opencode_candidate_command(cmd_lower: &str) -> bool {
     if !contains_command_word(cmd_lower, "opencode") {
@@ -154,6 +165,26 @@ pub(crate) fn is_codex_candidate_command(cmd_lower: &str) -> bool {
     if !contains_command_word(cmd_lower, "codex") {
         return false;
     }
+    // 排除 Codex 桌面端 / VSCode 插件内嵌进程：
+    // 这些通常以 `codex app-server` 运行，并非用户可接管的 CLI 会话。
+    let tokens = cmd_lower.split_whitespace().collect::<Vec<&str>>();
+    for (idx, token) in tokens.iter().enumerate() {
+        if !token_matches_command(token, "codex") {
+            continue;
+        }
+        let next = tokens
+            .get(idx + 1)
+            .map(|value| value.trim_matches(|ch| ch == '"' || ch == '\''))
+            .unwrap_or_default();
+        if next == "app-server" {
+            return false;
+        }
+    }
+    if cmd_lower.contains("/applications/codex.app/")
+        || cmd_lower.contains("/.vscode/extensions/openai.chatgpt-")
+    {
+        return false;
+    }
     if cmd_lower.contains("--help")
         || cmd_lower.contains("--version")
         || cmd_lower.contains(" codex completion")
@@ -167,6 +198,23 @@ pub(crate) fn is_codex_candidate_command(cmd_lower: &str) -> bool {
 /// 判断是否是可接入的 claude code 命令（claude）。
 pub(crate) fn is_claude_code_candidate_command(cmd_lower: &str) -> bool {
     if !contains_command_word(cmd_lower, "claude") {
+        return false;
+    }
+    // 排除桌面端内嵌/应用进程，只接入 Claude Code CLI。
+    let tokens = cmd_lower.split_whitespace().collect::<Vec<&str>>();
+    for (idx, token) in tokens.iter().enumerate() {
+        if !token_matches_command(token, "claude") {
+            continue;
+        }
+        let next = tokens
+            .get(idx + 1)
+            .map(|value| value.trim_matches(|ch| ch == '"' || ch == '\''))
+            .unwrap_or_default();
+        if next == "app-server" {
+            return false;
+        }
+    }
+    if cmd_lower.contains("/applications/claude.app/") || cmd_lower.contains("claude helper") {
         return false;
     }
     if cmd_lower.contains("--help")
@@ -313,7 +361,30 @@ mod tests {
     }
 
     #[test]
+    fn codex_candidate_rejects_app_server_subcommand() {
+        assert!(!is_codex_candidate_command("codex app-server --analytics-default-enabled"));
+        assert!(!is_codex_candidate_command(
+            "/applications/codex.app/contents/resources/codex app-server --analytics-default-enabled"
+        ));
+    }
+
+    #[test]
+    fn codex_candidate_rejects_vscode_embedded_codex() {
+        assert!(!is_codex_candidate_command(
+            "/users/codez/.vscode/extensions/openai.chatgpt-0.4.78-darwin-arm64/bin/macos-aarch64/codex app-server"
+        ));
+    }
+
+    #[test]
     fn claude_candidate_accepts_runtime_command() {
         assert!(is_claude_code_candidate_command("claude -p \"hello\""));
+    }
+
+    #[test]
+    fn claude_candidate_rejects_app_server_or_desktop_process() {
+        assert!(!is_claude_code_candidate_command("claude app-server"));
+        assert!(!is_claude_code_candidate_command(
+            "/applications/claude.app/contents/macos/claude"
+        ));
     }
 }

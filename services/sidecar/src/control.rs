@@ -61,12 +61,6 @@ pub(crate) const TOOL_LAUNCH_STARTED_EVENT: &str = "tool_launch_started";
 pub(crate) const TOOL_LAUNCH_FINISHED_EVENT: &str = "tool_launch_finished";
 /// sidecar 返回启动流程失败。
 pub(crate) const TOOL_LAUNCH_FAILED_EVENT: &str = "tool_launch_failed";
-/// 请求 sidecar 执行账号切换。
-pub(crate) const TOOL_AUTH_SWITCH_REQUEST_EVENT: &str = "tool_auth_switch_request";
-/// sidecar 返回账号切换完成。
-pub(crate) const TOOL_AUTH_SWITCH_FINISHED_EVENT: &str = "tool_auth_switch_finished";
-/// sidecar 返回账号切换失败。
-pub(crate) const TOOL_AUTH_SWITCH_FAILED_EVENT: &str = "tool_auth_switch_failed";
 
 /// Relay 注入的可信来源客户端类型字段。
 const SOURCE_CLIENT_TYPE_FIELD: &str = "sourceClientType";
@@ -144,12 +138,7 @@ pub(crate) enum SidecarCommand {
         tool_name: String,
         cwd: String,
         request_id: String,
-    },
-    /// 切换工具账号/配置。
-    ToolAuthSwitchRequest {
-        tool_name: String,
-        profile: String,
-        request_id: String,
+        conversation_key: String,
     },
 }
 
@@ -172,6 +161,12 @@ pub(crate) struct ChatContentPart {
     pub(crate) path_hint: String,
     /// base64 正文（可选，media staging 场景）。
     pub(crate) data_base64: String,
+    /// 暂存附件引用 ID（可选，优先于 data_base64）。
+    pub(crate) staged_media_id: String,
+    /// 暂存阶段失败错误码（可选）。
+    pub(crate) stage_error_code: String,
+    /// 暂存阶段失败原因（可选）。
+    pub(crate) stage_error_reason: String,
 }
 
 /// 工具进程控制动作枚举。
@@ -275,6 +270,24 @@ fn parse_chat_content_parts(raw: Option<&Value>) -> Vec<ChatContentPart> {
             .map(str::trim)
             .unwrap_or_default()
             .to_string();
+        let staged_media_id = obj
+            .get("stagedMediaId")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let stage_error_code = obj
+            .get("stageErrorCode")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let stage_error_reason = obj
+            .get("stageErrorReason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
         if !data_base64.is_empty() && data_base64.len() > MAX_MEDIA_BASE64_LEN {
             continue;
         }
@@ -296,6 +309,9 @@ fn parse_chat_content_parts(raw: Option<&Value>) -> Vec<ChatContentPart> {
             text,
             path_hint,
             data_base64,
+            staged_media_id,
+            stage_error_code,
+            stage_error_reason,
         });
     }
     out
@@ -614,36 +630,17 @@ pub(crate) fn parse_sidecar_command(raw: &str) -> Option<SidecarCommandEnvelope>
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(ToString::to_string)?;
+            let conversation_key = payload
+                .get("conversationKey")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
             Some(SidecarCommand::ToolLaunchRequest {
                 tool_name,
                 cwd,
                 request_id,
-            })
-        }
-        TOOL_AUTH_SWITCH_REQUEST_EVENT => {
-            let tool_name = payload
-                .get("toolName")
-                .or_else(|| payload.get("tool"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)?;
-            let profile = payload
-                .get("profile")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)?;
-            let request_id = payload
-                .get("requestId")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string)?;
-            Some(SidecarCommand::ToolAuthSwitchRequest {
-                tool_name,
-                profile,
-                request_id,
+                conversation_key,
             })
         }
         _ => None,
@@ -680,9 +677,6 @@ pub(crate) fn command_feedback_parts(command: &SidecarCommand) -> (&'static str,
         SidecarCommand::ToolReportFetchRequest { tool_id, .. } => ("report-fetch", tool_id.clone()),
         SidecarCommand::ToolMediaStageRequest { tool_id, .. } => ("media-stage", tool_id.clone()),
         SidecarCommand::ToolLaunchRequest { tool_name, .. } => ("launch", tool_name.clone()),
-        SidecarCommand::ToolAuthSwitchRequest { tool_name, .. } => {
-            ("auth-switch", tool_name.clone())
-        }
     }
 }
 
@@ -695,7 +689,6 @@ pub(crate) fn command_feedback_event(command: &SidecarCommand) -> &'static str {
         SidecarCommand::ToolReportFetchRequest { .. } => TOOL_REPORT_FETCH_FINISHED_EVENT,
         SidecarCommand::ToolMediaStageRequest { .. } => TOOL_MEDIA_STAGE_FAILED_EVENT,
         SidecarCommand::ToolLaunchRequest { .. } => TOOL_LAUNCH_FAILED_EVENT,
-        SidecarCommand::ToolAuthSwitchRequest { .. } => TOOL_AUTH_SWITCH_FAILED_EVENT,
         _ => TOOL_WHITELIST_UPDATED_EVENT,
     }
 }
@@ -852,7 +845,7 @@ mod tests {
                 "text":"",
                 "content":[
                     {"type":"text","text":"请分析附件"},
-                    {"type":"image","mediaId":"media_1","mime":"image/png","size":1234,"pathHint":"cat.png","dataBase64":"abcd"}
+                    {"type":"image","mediaId":"media_1","mime":"image/png","size":1234,"pathHint":"cat.png","stagedMediaId":"host_a__openclaw/req_2/media_1.png"}
                 ]
             }
         }"#;
@@ -868,6 +861,10 @@ mod tests {
                 assert_eq!(content[1].media_id, "media_1");
                 assert_eq!(content[1].mime, "image/png");
                 assert_eq!(content[1].size, 1234);
+                assert_eq!(
+                    content[1].staged_media_id,
+                    "host_a__openclaw/req_2/media_1.png"
+                );
             }
             _ => panic!("unexpected command"),
         }
@@ -929,6 +926,37 @@ mod tests {
                 assert_eq!(conversation_key, "host_a::opencode_workspace_p1");
                 assert_eq!(request_id, "rpt_1");
                 assert_eq!(file_path, "/Users/codez/report.md");
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn parse_tool_launch_request_with_conversation_key() {
+        let raw = r#"{
+            "type":"tool_launch_request",
+            "sourceClientType":"app",
+            "sourceDeviceId":"ios_source",
+            "payload":{
+                "toolName":"codex",
+                "cwd":"/Users/codez/workspace/demo",
+                "requestId":"lch_1",
+                "conversationKey":"host_a::codex_workspace_p1"
+            }
+        }"#;
+
+        let env = parse_sidecar_command(raw).expect("command should parse");
+        match env.command {
+            SidecarCommand::ToolLaunchRequest {
+                tool_name,
+                cwd,
+                request_id,
+                conversation_key,
+            } => {
+                assert_eq!(tool_name, "codex");
+                assert_eq!(cwd, "/Users/codez/workspace/demo");
+                assert_eq!(request_id, "lch_1");
+                assert_eq!(conversation_key, "host_a::codex_workspace_p1");
             }
             _ => panic!("unexpected command"),
         }

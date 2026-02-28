@@ -85,25 +85,57 @@
               hidden
             ></button>
             <div id="chatQueue" class="chat-queue"></div>
-            <div id="chatComposerMediaTray" class="chat-composer-media-tray"></div>
 
             <div class="chat-composer">
-              <div class="chat-composer-head">
+              <div id="chatComposerMediaTray" class="chat-composer-media-tray"></div>
+              <div class="chat-composer-input-row">
+                <textarea id="chatInput" rows="1" placeholder="输入要发送给工具的消息"></textarea>
+                <button id="chatSendBtn" class="chat-send-btn" type="button">发送</button>
+              </div>
+              <div class="chat-composer-toolbar">
                 <input
                   id="chatMediaInput"
                   type="file"
-                  accept="image/*,video/*,audio/*"
+                  accept="image/*,video/*"
                   multiple
                   hidden
                 />
-                <button id="chatAttachBtn" class="btn btn-outline btn-sm" type="button">附件</button>
-                <button id="chatRecordBtn" class="btn btn-outline btn-sm" type="button">录音</button>
+                <input
+                  id="chatFileInput"
+                  type="file"
+                  accept=".pdf,.txt,.md,.json,.csv,.zip,.tar,.gz,.log,.yaml,.yml,.toml,.xml,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.js,.ts,.tsx,.jsx,.py,.rs,.go,.java,.kt,.swift,.c,.cpp,.h,.hpp,.sh"
+                  multiple
+                  hidden
+                />
+                <div class="chat-attach-group">
+                  <button
+                    id="chatAttachBtn"
+                    class="chat-tool-btn chat-tool-btn-plus"
+                    type="button"
+                    aria-haspopup="true"
+                    aria-expanded="false"
+                    aria-controls="chatAttachMenu"
+                  >+</button>
+                  <div id="chatAttachMenu" class="chat-attach-menu hidden" role="menu">
+                    <button
+                      id="chatAttachMediaBtn"
+                      class="chat-attach-menu-btn"
+                      type="button"
+                      role="menuitem"
+                      data-chat-attach-action="media"
+                    >照片/视频</button>
+                    <button
+                      id="chatAttachFileBtn"
+                      class="chat-attach-menu-btn"
+                      type="button"
+                      role="menuitem"
+                      data-chat-attach-action="file"
+                    >文件</button>
+                  </div>
+                </div>
+                <button id="chatRecordBtn" class="chat-tool-btn" type="button">录音</button>
                 <span id="chatRecordStatus" class="chat-record-status"></span>
-              </div>
-              <textarea id="chatInput" rows="1" placeholder="输入要发送给工具的消息"></textarea>
-              <div class="chat-composer-actions">
-                <button id="chatSendBtn" class="btn btn-primary" type="button">发送</button>
-                <button id="chatStopBtn" class="btn btn-outline" type="button">停止生成</button>
+                <button id="chatStopBtn" class="chat-tool-btn danger hidden" type="button">停止生成</button>
               </div>
             </div>
           </article>

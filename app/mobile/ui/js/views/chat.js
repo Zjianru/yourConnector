@@ -4,6 +4,7 @@
 
 import { escapeHtml } from "../utils/dom.js";
 import { renderMarkdown, normalizeReportPathForPreview } from "../utils/markdown.js";
+import { parseLaunchProposalsFromText } from "../utils/launch-proposal.js";
 
 /**
  * 创建聊天视图渲染器。
@@ -128,6 +129,33 @@ export function createChatView({ state, ui }) {
     `;
   }
 
+  function renderLaunchProposalCards(text, messageId) {
+    const proposals = parseLaunchProposalsFromText(text);
+    if (!Array.isArray(proposals) || proposals.length === 0) {
+      return "";
+    }
+    return `
+      <div class="chat-launch-list">
+        ${proposals.map((proposal) => `
+          <div class="chat-launch-card">
+            <div class="chat-launch-title">目录启动提案</div>
+            <div class="chat-launch-meta">${escapeHtml(`${proposal.toolName} @ ${proposal.cwd}`)}</div>
+            <button
+              type="button"
+              class="chat-launch-quote-btn"
+              data-chat-launch-quote="1"
+              data-chat-launch-tool="${escapeHtml(proposal.toolName)}"
+              data-chat-launch-cwd="${escapeHtml(proposal.cwd)}"
+              data-chat-launch-message-id="${escapeHtml(String(messageId || ""))}"
+            >
+              引用启动
+            </button>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
   function initials(text) {
     const normalized = String(text || "").trim();
     if (!normalized) return "AI";
@@ -151,10 +179,15 @@ export function createChatView({ state, ui }) {
         type,
         text: String(raw.text || ""),
         mediaId: String(raw.mediaId || ""),
+        stagedMediaId: String(raw.stagedMediaId || ""),
         mime: String(raw.mime || ""),
         size: Number(raw.size || 0),
         durationMs: Number(raw.durationMs || 0),
         pathHint: String(raw.pathHint || ""),
+        stageStatus: String(raw.stageStatus || ""),
+        stageProgress: Number(raw.stageProgress || 0),
+        stageErrorCode: String(raw.stageErrorCode || ""),
+        stageErrorReason: String(raw.stageErrorReason || ""),
         previewUrl: String(raw.previewUrl || ""),
         fileName: String(raw.fileName || ""),
       });
@@ -176,6 +209,36 @@ export function createChatView({ state, ui }) {
       else labels.push("文件");
     });
     return labels.join(" ");
+  }
+
+  function queueStageSummary(parts) {
+    if (!Array.isArray(parts) || parts.length === 0) return "";
+    const media = parts.filter((part) => (
+      part.type === "image" || part.type === "video" || part.type === "audio"
+    ));
+    if (media.length === 0) return "";
+    const failed = media.filter((part) => String(part.stageStatus || "").toLowerCase() === "failed");
+    if (failed.length > 0) {
+      const reason = String(failed[0].stageErrorReason || failed[0].stageErrorCode || "附件暂存失败").trim();
+      return `附件失败 ${failed.length}/${media.length}：${reason}`;
+    }
+    const staging = media.filter((part) => String(part.stageStatus || "").toLowerCase() === "staging");
+    if (staging.length > 0) {
+      const progress = staging
+        .map((part) => Math.max(0, Math.min(100, Math.trunc(Number(part.stageProgress || 0)))))
+        .reduce((acc, item) => acc + item, 0);
+      const avg = Math.max(0, Math.min(100, Math.trunc(progress / staging.length)));
+      return `附件暂存中 ${avg}%`;
+    }
+    const fallback = media.filter((part) => String(part.stageStatus || "").toLowerCase() === "fallback_inline");
+    if (fallback.length > 0) {
+      return `附件兼容发送 ${fallback.length}/${media.length}`;
+    }
+    const staged = media.filter((part) => String(part.stagedMediaId || "").trim());
+    if (staged.length > 0) {
+      return `附件就绪 ${staged.length}/${media.length}`;
+    }
+    return "";
   }
 
   function formatDurationMs(durationMs) {
@@ -243,6 +306,15 @@ export function createChatView({ state, ui }) {
         `);
         return;
       }
+      if (part.type === "fileRef") {
+        const fileText = escapeHtml(String(part.pathHint || part.fileName || part.text || "文件"));
+        blocks.push(`
+          <div class="chat-content-block">
+            <span class="chat-media-fallback">文件 · ${fileText}</span>
+          </div>
+        `);
+        return;
+      }
       const fallbackLabel = part.type === "image"
         ? "图片"
         : (part.type === "video" ? "视频" : (part.type === "audio" ? "语音" : "文件"));
@@ -279,36 +351,56 @@ export function createChatView({ state, ui }) {
           : "";
         if (part.type === "image" && preview) {
           return `
-            <div class="chat-composer-media-item">
+            <div class="chat-composer-media-item image">
               <img src="${escapeHtml(preview)}" alt="image" class="chat-media-image" />
-              <div class="chat-media-meta">${hint}</div>
-              ${removeBtn}
+              <div class="chat-media-footer">
+                <div class="chat-media-meta">${hint}</div>
+                <div class="chat-media-actions">${removeBtn}</div>
+              </div>
             </div>
           `;
         }
         if (part.type === "video" && preview) {
           return `
-            <div class="chat-composer-media-item">
+            <div class="chat-composer-media-item video">
               <video src="${escapeHtml(preview)}" class="chat-media-video" muted playsinline></video>
-              <div class="chat-media-meta">${hint}${durationHtml}</div>
-              ${removeBtn}
+              <div class="chat-media-footer">
+                <div class="chat-media-meta">${hint}${durationHtml}</div>
+                <div class="chat-media-actions">${removeBtn}</div>
+              </div>
             </div>
           `;
         }
         if (part.type === "audio" && preview) {
           return `
-            <div class="chat-composer-media-item">
-              <audio src="${escapeHtml(preview)}" class="chat-media-audio" controls></audio>
-              <div class="chat-media-meta">${hint}${durationHtml}</div>
-              ${removeBtn}
+            <div class="chat-composer-media-item audio">
+              <audio
+                src="${escapeHtml(preview)}"
+                class="chat-media-audio"
+                controls
+                data-chat-audio-id="${escapeHtml(mediaId)}"
+              ></audio>
+              <div class="chat-media-footer">
+                <div class="chat-media-meta">${hint}${durationHtml}</div>
+                <div class="chat-media-actions">
+                  <button type="button" class="chat-media-preview-btn" data-chat-preview-audio="${escapeHtml(mediaId)}">试听</button>
+                  ${removeBtn}
+                </div>
+              </div>
             </div>
           `;
         }
-        const fallback = part.type === "video" ? "视频" : (part.type === "audio" ? "语音" : "图片");
+        const fallback = part.type === "video"
+          ? "视频"
+          : (part.type === "audio"
+            ? "语音"
+            : (part.type === "fileRef" ? "文件" : "图片"));
         return `
-          <div class="chat-composer-media-item">
-            <span class="chat-media-fallback">${escapeHtml(fallback)}${hint ? ` · ${hint}` : ""}</span>
-            ${removeBtn}
+          <div class="chat-composer-media-item file">
+            <div class="chat-media-footer">
+              <span class="chat-media-fallback">${escapeHtml(fallback)}${hint ? ` · ${hint}` : ""}</span>
+              <div class="chat-media-actions">${removeBtn}</div>
+            </div>
           </div>
         `;
       })
@@ -428,6 +520,10 @@ export function createChatView({ state, ui }) {
       ui.chatInput.value = "";
       ui.chatInput.disabled = true;
       ui.chatAttachBtn.disabled = true;
+      ui.chatAttachBtn.setAttribute("aria-expanded", "false");
+      ui.chatAttachMenu?.classList.add("hidden");
+      if (ui.chatAttachMediaBtn) ui.chatAttachMediaBtn.disabled = true;
+      if (ui.chatAttachFileBtn) ui.chatAttachFileBtn.disabled = true;
       ui.chatRecordBtn.disabled = true;
       ui.chatRecordBtn.textContent = "录音";
       ui.chatRecordStatus.textContent = "";
@@ -517,6 +613,10 @@ export function createChatView({ state, ui }) {
           const timeText = formatTime(msg.ts);
           const messageBodyHtml = rich.html || renderBubbleMarkdown(msg.text || "");
           const messageReportLinks = renderReportPathLinks(extractMessageReportPaths(msg));
+          const launchCards = renderLaunchProposalCards(
+            rich.textOnly || String(msg.text || ""),
+            messageId,
+          );
           return `
           <div
             class="chat-message ${escapeHtml(msg.role || "assistant")} ${escapeHtml(msg.status || "")} ${selectClass}"
@@ -527,6 +627,7 @@ export function createChatView({ state, ui }) {
               <div class="chat-message-body markdown-body">
                 ${messageBodyHtml}
                 ${messageReportLinks}
+                ${launchCards}
                 ${collapsed ? "" : `<span class="chat-message-time-inline">${timeText}</span>`}
               </div>
               ${collapsed ? '<div class="chat-message-body-fade"></div>' : ""}
@@ -565,16 +666,23 @@ export function createChatView({ state, ui }) {
         ? `收起待发送队列（${queueCount}）`
         : `待发送 ${queueCount} 条`;
       ui.chatQueue.innerHTML = queueExpanded
-        ? pendingQueue.map((item) => `
+        ? pendingQueue.map((item) => {
+          const content = normalizeMessageContent(item.content);
+          const stageText = queueStageSummary(content);
+          return `
           <div class="chat-queue-item">
-            <div class="chat-queue-text">${escapeHtml((String(item.text || "").trim() || contentSummary(normalizeMessageContent(item.content))).slice(0, 120))}</div>
+            <div class="chat-queue-text-wrap">
+              <div class="chat-queue-text">${escapeHtml((String(item.text || "").trim() || contentSummary(content)).slice(0, 120))}</div>
+              ${stageText ? `<div class="chat-queue-stage">${escapeHtml(stageText)}</div>` : ""}
+            </div>
             <button
               type="button"
               class="tool-quick-btn stop"
               data-chat-queue-delete="${escapeHtml(item.queueItemId)}"
             >删除</button>
           </div>
-        `).join("")
+        `;
+        }).join("")
         : "";
     } else {
       ui.chatQueueSummary.hidden = true;
@@ -587,13 +695,18 @@ export function createChatView({ state, ui }) {
     ui.chatInput.disabled = isInvalid;
     ui.chatInput.value = String(active.draft || "");
     ui.chatAttachBtn.disabled = isInvalid;
+    if (ui.chatAttachMediaBtn) ui.chatAttachMediaBtn.disabled = isInvalid;
+    if (ui.chatAttachFileBtn) ui.chatAttachFileBtn.disabled = isInvalid;
+    const attachmentMenuOpen = !isInvalid && Boolean(chatState.attachmentMenuOpen);
+    ui.chatAttachBtn.setAttribute("aria-expanded", attachmentMenuOpen ? "true" : "false");
+    ui.chatAttachMenu?.classList.toggle("hidden", !attachmentMenuOpen);
     const recordingForActive = String(chatState.recordingConversationKey || "") === String(active.key || "");
     ui.chatRecordBtn.disabled = isInvalid || (Boolean(chatState.recordingPending) && !recordingForActive);
-    ui.chatRecordBtn.textContent = recordingForActive ? "停止" : "录音";
+    ui.chatRecordBtn.textContent = recordingForActive ? "结束录音" : "录音";
     if (chatState.recordingPending) {
-      ui.chatRecordStatus.textContent = "录音处理中...";
+      ui.chatRecordStatus.textContent = "正在生成语音预览...";
     } else if (recordingForActive) {
-      ui.chatRecordStatus.textContent = "录音中...";
+      ui.chatRecordStatus.textContent = "录音中，点击“结束录音”后可试听";
     } else {
       ui.chatRecordStatus.textContent = "";
     }

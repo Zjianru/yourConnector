@@ -126,22 +126,101 @@ export function createToolsView(deps) {
   }
 
   /**
-   * 构建 OpenCode 卡片次要说明。
-   * @param {object} input 输入字段。
+   * 路径切分为目录段，兼容 Windows/Unix 分隔符。
+   * @param {string} rawPath 原始路径。
+   * @returns {string[]}
+   */
+  function workspaceSegments(rawPath) {
+    const normalized = String(rawPath || "").trim().replace(/\\/g, "/");
+    if (!normalized) return [];
+    return normalized.split("/").filter((seg) => seg.trim().length > 0);
+  }
+
+  /**
+   * 将绝对路径压缩为尾部若干段，保留可读性。
+   * @param {string} rawPath 原始路径。
+   * @param {number} depth 保留段数。
    * @returns {string}
    */
-  function buildOpenCodeCardNote(input) {
-    const endpoint = String(input.endpoint || "").trim();
-    const reason = String(input.reason || "").trim();
-    const model = String(input.model || "").trim();
-    const agentMode = String(input.agentMode || "").trim();
-    const workspaceDir = String(input.workspaceDir || "").trim();
-    if (workspaceDir) return `工作目录：${workspaceDir}`;
-    if (endpoint) return endpoint;
-    if (reason && !/等待会话|补充模式和模型信息/.test(reason)) return reason;
-    if (model) return `当前模型：${model}`;
-    if (agentMode) return `会话模式：${agentMode}`;
-    return "";
+  function compactWorkspacePath(rawPath, depth = 2) {
+    const normalized = String(rawPath || "").trim().replace(/\\/g, "/");
+    if (!normalized) return "";
+    const segs = workspaceSegments(normalized);
+    if (segs.length === 0) return normalized;
+    if (segs.length <= depth) return normalized;
+
+    const tail = segs.slice(-depth).join("/");
+    const driveMatch = normalized.match(/^[a-z]:\//i);
+    if (driveMatch) {
+      return `${driveMatch[0]}.../${tail}`;
+    }
+    if (normalized.startsWith("/")) {
+      return `/.../${tail}`;
+    }
+    return `.../${tail}`;
+  }
+
+  /**
+   * 为同一宿主机内的工具生成“尽量短且可区分”的工作目录展示文案。
+   * @param {string} hostId 宿主机标识。
+   * @param {Array<Record<string, any>>} tools 工具列表。
+   * @returns {Map<string,string>} toolId -> 展示路径。
+   */
+  function buildWorkspaceDisplayMap(hostId, tools) {
+    const rows = (Array.isArray(tools) ? tools : [])
+      .map((tool) => {
+        const toolId = String(tool?.toolId || "").trim();
+        if (!toolId) return null;
+        const metric = metricForTool(hostId, toolId);
+        const fullPath = String(metric?.workspaceDir ?? tool?.workspaceDir ?? "").trim();
+        return { toolId, fullPath };
+      })
+      .filter(Boolean);
+
+    const depthByToolId = new Map();
+    const segCountByToolId = new Map();
+    rows.forEach((row) => {
+      const segCount = workspaceSegments(row.fullPath).length;
+      segCountByToolId.set(row.toolId, segCount);
+      depthByToolId.set(row.toolId, Math.min(2, Math.max(1, segCount)));
+    });
+
+    for (let round = 0; round < 6; round += 1) {
+      const groupByDisplay = new Map();
+      rows.forEach((row) => {
+        if (!row.fullPath) return;
+        const depth = Number(depthByToolId.get(row.toolId) || 2);
+        const display = compactWorkspacePath(row.fullPath, depth);
+        const list = groupByDisplay.get(display) || [];
+        list.push(row);
+        groupByDisplay.set(display, list);
+      });
+
+      let changed = false;
+      for (const group of groupByDisplay.values()) {
+        if (!Array.isArray(group) || group.length < 2) continue;
+        const uniqueFull = new Set(group.map((item) => item.fullPath));
+        if (uniqueFull.size <= 1) continue;
+        group.forEach((item) => {
+          const currentDepth = Number(depthByToolId.get(item.toolId) || 2);
+          const maxDepth = Number(segCountByToolId.get(item.toolId) || currentDepth);
+          if (currentDepth < maxDepth) {
+            depthByToolId.set(item.toolId, currentDepth + 1);
+            changed = true;
+          }
+        });
+      }
+
+      if (!changed) break;
+    }
+
+    const output = new Map();
+    rows.forEach((row) => {
+      if (!row.fullPath) return;
+      const depth = Number(depthByToolId.get(row.toolId) || 2);
+      output.set(row.toolId, compactWorkspacePath(row.fullPath, depth));
+    });
+    return output;
   }
 
   /**
@@ -351,65 +430,19 @@ export function createToolsView(deps) {
    * @returns {string}
    */
   function renderOpenCodeCard(hostId, tool, metric) {
-    const toolId = String(tool.toolId || "");
-    const swipeKey = `${hostId}::${toolId}`;
-    const displayName = resolveToolDisplayName(hostId, tool);
-    const mode = String(metric.mode ?? tool.mode ?? "TUI");
     const invalidPidChanged = Boolean(tool.invalidPidChanged)
       || String(tool.status || "").trim().toLowerCase() === "invalid";
-    const statusLabel = invalidPidChanged
-      ? "未连接"
-      : String(metric.status ?? tool.status ?? "UNKNOWN");
-    const note = buildOpenCodeCardNote({
-      endpoint: String(metric.endpoint ?? tool.endpoint ?? ""),
+    const normalizedMetric = {
+      ...asMap(metric),
+      status: invalidPidChanged
+        ? "未连接"
+        : String(metric.status ?? tool.status ?? "UNKNOWN"),
+      connected: invalidPidChanged ? false : asBool(metric.connected ?? tool.connected),
       reason: invalidPidChanged
         ? "检测到进程 PID 变化，请删除卡片后重新接入新进程。"
         : String(metric.reason ?? tool.reason ?? ""),
-      model: String(metric.model ?? tool.model ?? ""),
-      agentMode: String(metric.agentMode ?? tool.agentMode ?? ""),
-      workspaceDir: String(metric.workspaceDir ?? tool.workspaceDir ?? ""),
-    });
-    const connected = invalidPidChanged ? false : asBool(metric.connected ?? tool.connected);
-    return `
-      <div class="tool-swipe" data-tool-swipe-key="${escapeHtml(swipeKey)}">
-        <article
-          class="tool-card tool-opencode"
-          data-host-id="${escapeHtml(hostId)}"
-          data-tool-id="${escapeHtml(toolId)}"
-        >
-          <div class="tool-head">
-            <div class="tool-logo">OC</div>
-            <div class="tool-name">${escapeHtml(displayName)}</div>
-            <span class="chip">${escapeHtml(mode.toUpperCase())}</span>
-            <div class="tool-quick-actions">
-              <button
-                type="button"
-                class="tool-quick-btn stop"
-                data-tool-process-stop="${escapeHtml(`${hostId}::${toolId}`)}"
-              >
-                停止
-              </button>
-            </div>
-          </div>
-          <div class="chip-wrap">
-            <span class="chip">${escapeHtml(statusLabel)}</span>
-            <span class="chip">${connected ? "已接入" : "未接入"}</span>
-          </div>
-          ${note ? `<p class="tool-note">${escapeHtml(note)}</p>` : ""}
-          <div class="tool-metrics">
-            <div class="tool-metric">
-              <div class="name">CPU</div>
-              <div class="value">${escapeHtml(fmt2(metric.cpuPercent))}%</div>
-            </div>
-            <div class="tool-metric">
-              <div class="name">Memory</div>
-              <div class="value">${escapeHtml(fmt2(metric.memoryMb))} MB</div>
-            </div>
-          </div>
-        </article>
-        ${renderToolSwipeActions(hostId, toolId)}
-      </div>
-    `;
+    };
+    return renderGenericCard(hostId, tool, normalizedMetric);
   }
 
   /**
@@ -541,6 +574,29 @@ export function createToolsView(deps) {
     const toolId = String(tool.toolId || "");
     const swipeKey = `${hostId}::${toolId}`;
     const displayName = resolveToolDisplayName(hostId, tool);
+    const invalidPidChanged = Boolean(tool.invalidPidChanged)
+      || String(tool.status || "").trim().toLowerCase() === "invalid";
+    const connected = invalidPidChanged ? false : asBool(metric.connected ?? tool.connected);
+    const statusLabel = invalidPidChanged
+      ? "未连接"
+      : String(metric.status ?? tool.status ?? "UNKNOWN");
+    const modeLabel = String(metric.mode ?? tool.mode ?? "").trim().toUpperCase();
+    const categoryLabel = localizedCategory(tool.category);
+    const pidValue = Number(metric.pid ?? tool.pid ?? 0);
+    const subtitleParts = [categoryLabel];
+    if (modeLabel) subtitleParts.push(modeLabel);
+    subtitleParts.push(statusLabel);
+    subtitleParts.push(connected ? "已接入" : "未接入");
+    if (Number.isFinite(pidValue) && pidValue > 0) {
+      subtitleParts.push(`PID ${Math.trunc(pidValue)}`);
+    }
+
+    const workspaceDir = String(metric.workspaceDir ?? tool.workspaceDir ?? "").trim();
+    const compactWorkspace = String(metric.workspaceDisplay || "").trim();
+    const workspaceHint = String(metric.reason ?? tool.reason ?? "").trim();
+    const workspaceDisplay = compactWorkspace || workspaceDir || (workspaceHint ? `（${workspaceHint}）` : "--");
+    const workspaceTitle = workspaceDir || workspaceHint || "未上报工作目录";
+
     return `
       <div class="tool-swipe" data-tool-swipe-key="${escapeHtml(swipeKey)}">
         <article
@@ -549,10 +605,14 @@ export function createToolsView(deps) {
           data-tool-id="${escapeHtml(toolId)}"
         >
           <div class="bar"></div>
-          <div>
+          <div class="tool-generic-main">
             <div class="title">${escapeHtml(displayName)}</div>
             <div class="sub">
-              ${escapeHtml(localizedCategory(tool.category))} · ${escapeHtml(String(tool.status || "-"))}
+              ${escapeHtml(subtitleParts.join(" · "))}
+            </div>
+            <div class="tool-workspace">
+              <span class="k">工作目录</span>
+              <span class="v" title="${escapeHtml(workspaceTitle)}">${escapeHtml(workspaceDisplay)}</span>
             </div>
           </div>
           <div class="right">
@@ -575,10 +635,15 @@ export function createToolsView(deps) {
     if (!runtime || runtime.tools.length === 0) {
       return '<div class="empty">该宿主机暂无已接入工具。</div>';
     }
+    const workspaceDisplayByToolId = buildWorkspaceDisplayMap(hostId, runtime.tools);
     return runtime.tools
       .map((tool) => {
         const toolId = String(tool.toolId || "");
-        const metric = metricForTool(hostId, toolId);
+        const metricRaw = metricForTool(hostId, toolId);
+        const metric = {
+          ...metricRaw,
+          workspaceDisplay: workspaceDisplayByToolId.get(toolId) || "",
+        };
         if (isOpenClawTool(tool)) {
           return renderOpenClawCard(hostId, tool, metric);
         }

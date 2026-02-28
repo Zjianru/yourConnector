@@ -4,6 +4,7 @@
 
 import { asMap, asListOfMap } from "../utils/type.js";
 import { resolveReportPathFromTarget, normalizeReportPathForPreview } from "../utils/markdown.js";
+import { buildLaunchConfirmDraft, parseLaunchConfirmFromText } from "../utils/launch-proposal.js";
 import {
   CHAT_QUEUE_LIMIT,
   chatConversationKey,
@@ -26,6 +27,7 @@ export function createChatFlow({
   resolveRuntimeToolId,
   resolveToolDisplayName,
   sendSocketEvent,
+  requestToolLaunch,
   addLog,
   tauriInvoke,
   render,
@@ -41,6 +43,11 @@ export function createChatFlow({
     chunks: [],
     conversationKey: "",
   };
+  const pendingMediaStageByKey = {};
+  const dispatchingByConversationKey = {};
+  const MEDIA_STAGE_TIMEOUT_MS = 30_000;
+  const MEDIA_INPUT_ACCEPT = "image/*,video/*";
+  const FILE_INPUT_ACCEPT = ".pdf,.txt,.md,.json,.csv,.zip,.tar,.gz,.log,.yaml,.yml,.toml,.xml,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.js,.ts,.tsx,.jsx,.py,.rs,.go,.java,.kt,.swift,.c,.cpp,.h,.hpp,.sh";
 
   if (!state.chat || typeof state.chat !== "object") {
     state.chat = createChatStateSlice();
@@ -65,6 +72,9 @@ export function createChatFlow({
   }
   if (!state.chat.composerMediaByKey || typeof state.chat.composerMediaByKey !== "object") {
     state.chat.composerMediaByKey = {};
+  }
+  if (typeof state.chat.attachmentMenuOpen !== "boolean") {
+    state.chat.attachmentMenuOpen = false;
   }
   if (typeof state.chat.recordingConversationKey !== "string") {
     state.chat.recordingConversationKey = "";
@@ -99,8 +109,13 @@ export function createChatFlow({
   if (!state.chat.reportTransfersByRequestId || typeof state.chat.reportTransfersByRequestId !== "object") {
     state.chat.reportTransfersByRequestId = {};
   }
+  if (!state.chat.launchRequestsById || typeof state.chat.launchRequestsById !== "object") {
+    state.chat.launchRequestsById = {};
+  }
 
   let suppressOpenUntil = 0;
+  let documentPointerListenerBound = false;
+  let uiRefs = null;
   const swipeState = {
     key: "",
     startX: 0,
@@ -137,6 +152,139 @@ export function createChatFlow({
     state.chat.recordingPending = Boolean(recordState.pending);
   }
 
+  function isMediaPartType(type) {
+    const normalized = String(type || "").trim().toLowerCase();
+    return normalized === "image" || normalized === "video" || normalized === "audio";
+  }
+
+  function mediaStageKey(hostId, conversationKey, requestId, mediaId) {
+    return [
+      String(hostId || "").trim(),
+      String(conversationKey || "").trim(),
+      String(requestId || "").trim(),
+      String(mediaId || "").trim(),
+    ].join("::");
+  }
+
+  function registerMediaStagePromise(hostId, conversationKey, requestId, mediaId) {
+    const key = mediaStageKey(hostId, conversationKey, requestId, mediaId);
+    if (!key || key.endsWith("::")) return null;
+    if (pendingMediaStageByKey[key]) {
+      clearTimeout(pendingMediaStageByKey[key].timer);
+      delete pendingMediaStageByKey[key];
+    }
+    return new Promise((resolve, reject) => {
+      const timer = window.setTimeout(() => {
+        delete pendingMediaStageByKey[key];
+        reject({
+          ok: false,
+          code: "MEDIA_STAGE_TIMEOUT",
+          reason: "附件暂存超时，请重试",
+          mediaId: String(mediaId || ""),
+        });
+      }, MEDIA_STAGE_TIMEOUT_MS);
+      pendingMediaStageByKey[key] = {
+        resolve,
+        reject,
+        timer,
+      };
+    });
+  }
+
+  function settleMediaStagePromise(hostId, payload, result) {
+    const data = asMap(payload);
+    const key = mediaStageKey(hostId, data.conversationKey, data.requestId, data.mediaId);
+    const pending = pendingMediaStageByKey[key];
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    delete pendingMediaStageByKey[key];
+    if (result && result.ok) pending.resolve(result);
+    else pending.reject(result || { ok: false, code: "MEDIA_STAGE_NOT_FOUND", reason: "附件暂存失败" });
+    return true;
+  }
+
+  function rejectMediaStagePromise(hostId, conversationKey, requestId, mediaId, error) {
+    const key = mediaStageKey(hostId, conversationKey, requestId, mediaId);
+    const pending = pendingMediaStageByKey[key];
+    if (!pending) return false;
+    clearTimeout(pending.timer);
+    delete pendingMediaStageByKey[key];
+    pending.reject(error || {
+      ok: false,
+      code: "MEDIA_STAGE_NOT_FOUND",
+      reason: "附件暂存失败",
+      mediaId: String(mediaId || ""),
+    });
+    return true;
+  }
+
+  function clearPendingMediaStageByConversation(conversationKey) {
+    const token = `::${String(conversationKey || "").trim()}::`;
+    if (!token || token === "::::") return;
+    Object.keys(pendingMediaStageByKey).forEach((key) => {
+      if (!key.includes(token)) return;
+      const pending = pendingMediaStageByKey[key];
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      delete pendingMediaStageByKey[key];
+      pending.reject({
+        ok: false,
+        code: "MEDIA_STAGE_NOT_FOUND",
+        reason: "会话已清理，已取消附件暂存",
+      });
+    });
+  }
+
+  function updateContentPartStageState(parts, mediaId, patch = {}) {
+    const normalizedMediaId = String(mediaId || "").trim();
+    if (!normalizedMediaId || !Array.isArray(parts)) return false;
+    let changed = false;
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = asMap(parts[i]);
+      if (!isMediaPartType(part.type)) continue;
+      if (String(part.mediaId || "").trim() !== normalizedMediaId) continue;
+      parts[i] = normalizeContentPart({ ...part, ...patch }) || part;
+      changed = true;
+    }
+    return changed;
+  }
+
+  function syncStageStateToConversation(conv, requestId, mediaId, patch = {}) {
+    if (!conv) return false;
+    const normalizedRequestId = String(requestId || "").trim();
+    if (!normalizedRequestId) return false;
+    let changed = false;
+    if (Array.isArray(conv.queue)) {
+      conv.queue.forEach((item) => {
+        if (String(item.requestId || "") !== normalizedRequestId) return;
+        const parts = normalizeContentParts(item.content);
+        if (updateContentPartStageState(parts, mediaId, patch)) {
+          item.content = parts;
+          changed = true;
+        }
+      });
+    }
+    if (conv.running && String(conv.running.requestId || "") === normalizedRequestId) {
+      const runningParts = normalizeContentParts(conv.running.content);
+      if (updateContentPartStageState(runningParts, mediaId, patch)) {
+        conv.running.content = stripTransientContentFields(runningParts);
+        changed = true;
+      }
+    }
+    if (Array.isArray(conv.messages)) {
+      conv.messages.forEach((msg) => {
+        if (msg.role !== "user") return;
+        if (String(msg.requestId || "") !== normalizedRequestId) return;
+        const parts = normalizeContentParts(msg.content);
+        if (updateContentPartStageState(parts, mediaId, patch)) {
+          msg.content = stripTransientContentFields(parts);
+          changed = true;
+        }
+      });
+    }
+    return changed;
+  }
+
   function inferMediaType(mime, fileName = "") {
     const normalizedMime = String(mime || "").toLowerCase();
     if (normalizedMime.startsWith("image/")) return "image";
@@ -147,6 +295,15 @@ export function createChatFlow({
     if (/\.(mp4|mov|m4v|webm|mkv|avi)$/.test(lowerName)) return "video";
     if (/\.(m4a|mp3|wav|ogg|webm|aac|flac)$/.test(lowerName)) return "audio";
     return "";
+  }
+
+  function formatFileSize(bytes) {
+    const value = Number(bytes || 0);
+    if (!Number.isFinite(value) || value <= 0) return "--";
+    if (value < 1024) return `${Math.trunc(value)}B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)}KB`;
+    if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)}MB`;
+    return `${(value / (1024 * 1024 * 1024)).toFixed(1)}GB`;
   }
 
   function normalizeContentPart(rawPart) {
@@ -165,8 +322,16 @@ export function createChatFlow({
       const text = String(part.text || "").trim();
       if (!pathHint && !text) return null;
       const normalized = { type: "fileRef" };
+      const mediaId = String(part.mediaId || "").trim();
+      const mime = String(part.mime || "").trim();
+      const size = Number(part.size || 0);
+      const fileName = String(part.fileName || "").trim();
+      if (mediaId) normalized.mediaId = mediaId;
+      if (mime) normalized.mime = mime;
+      if (Number.isFinite(size) && size > 0) normalized.size = Math.trunc(size);
       if (pathHint) normalized.pathHint = pathHint;
       if (text) normalized.text = text;
+      if (fileName) normalized.fileName = fileName;
       return normalized;
     }
 
@@ -182,6 +347,11 @@ export function createChatFlow({
     const pathHint = String(part.pathHint || "").trim();
     const text = String(part.text || "").trim();
     const dataBase64 = String(part.dataBase64 || "").trim();
+    const stagedMediaId = String(part.stagedMediaId || "").trim();
+    const stageErrorCode = String(part.stageErrorCode || "").trim();
+    const stageErrorReason = String(part.stageErrorReason || "").trim();
+    const stageStatus = String(part.stageStatus || "").trim();
+    const stageProgress = Number(part.stageProgress ?? 0);
     const previewUrl = String(part.previewUrl || "").trim();
     const fileName = String(part.fileName || "").trim();
 
@@ -192,6 +362,11 @@ export function createChatFlow({
     if (pathHint) normalized.pathHint = pathHint;
     if (text) normalized.text = text;
     if (dataBase64) normalized.dataBase64 = dataBase64;
+    if (stagedMediaId) normalized.stagedMediaId = stagedMediaId;
+    if (stageErrorCode) normalized.stageErrorCode = stageErrorCode;
+    if (stageErrorReason) normalized.stageErrorReason = stageErrorReason;
+    if (stageStatus) normalized.stageStatus = stageStatus;
+    if (Number.isFinite(stageProgress) && stageProgress > 0) normalized.stageProgress = Math.trunc(stageProgress);
     if (previewUrl) normalized.previewUrl = previewUrl;
     if (fileName) normalized.fileName = fileName;
     return normalized;
@@ -245,6 +420,8 @@ export function createChatFlow({
       delete next.dataBase64;
       delete next.previewUrl;
       delete next.fileName;
+      delete next.stageProgress;
+      delete next.stageStatus;
       return next;
     });
   }
@@ -268,6 +445,19 @@ export function createChatFlow({
     const key = String(conversationKey || "").trim();
     if (!key) return;
     delete state.chat.composerMediaByKey[key];
+  }
+
+  function setAttachmentMenuOpen(nextOpen) {
+    const normalized = Boolean(nextOpen);
+    if (Boolean(state.chat.attachmentMenuOpen) === normalized) {
+      return false;
+    }
+    state.chat.attachmentMenuOpen = normalized;
+    return true;
+  }
+
+  function closeAttachmentMenu() {
+    return setAttachmentMenuOpen(false);
   }
 
   async function readBlobAsBase64(blob) {
@@ -370,10 +560,12 @@ export function createChatFlow({
   async function onComposerMediaPicked(inputElement) {
     const conv = activeConversation();
     const files = Array.from(inputElement?.files || []);
+    const menuClosed = closeAttachmentMenu();
     if (inputElement) {
       inputElement.value = "";
     }
     if (!conv || files.length === 0) {
+      if (menuClosed) render();
       return;
     }
 
@@ -387,20 +579,28 @@ export function createChatFlow({
 
     const maxBytes = 25 * 1024 * 1024;
     const nextItems = [...current];
+    let unsupportedCount = 0;
+    let emptyCount = 0;
+    let oversizeCount = 0;
+    let failedCount = 0;
+    let overflowCount = 0;
     for (const file of files) {
-      if (nextItems.length >= limit) break;
+      if (nextItems.length >= limit) {
+        overflowCount += 1;
+        continue;
+      }
       const mime = String(file.type || "").trim();
       const mediaType = inferMediaType(mime, file.name);
-      if (!mediaType) {
-        conv.error = "仅支持图片/视频/语音文件";
+      if (mediaType !== "image" && mediaType !== "video") {
+        unsupportedCount += 1;
         continue;
       }
       if (Number(file.size || 0) <= 0) {
-        conv.error = "附件大小为 0，无法发送";
+        emptyCount += 1;
         continue;
       }
       if (Number(file.size || 0) > maxBytes) {
-        conv.error = "单个附件超过 25MB，请压缩后重试";
+        oversizeCount += 1;
         continue;
       }
       try {
@@ -412,18 +612,102 @@ export function createChatFlow({
         });
         if (part) nextItems.push(part);
       } catch (error) {
-        conv.error = `附件处理失败：${error}`;
+        failedCount += 1;
+        addLog({
+          type: "warn",
+          scope: "chat-media",
+          msg: "处理照片/视频附件失败",
+          data: { name: file?.name || "", error: String(error || "") },
+        });
       }
+    }
+    const notices = [];
+    if (unsupportedCount > 0) notices.push(`已忽略 ${unsupportedCount} 个非图片/视频文件`);
+    if (emptyCount > 0) notices.push(`${emptyCount} 个附件大小为 0`);
+    if (oversizeCount > 0) notices.push(`${oversizeCount} 个附件超过 25MB`);
+    if (failedCount > 0) notices.push(`${failedCount} 个附件处理失败`);
+    if (overflowCount > 0) notices.push(`附件上限 ${limit} 个，已忽略其余 ${overflowCount} 个`);
+    if (notices.length > 0) {
+      conv.error = notices.join("；");
     }
     state.chat.composerMediaByKey[conv.key] = nextItems;
     touchConversation(conv, { persist: false });
     render();
   }
 
+  async function onComposerFilePicked(inputElement) {
+    const conv = activeConversation();
+    const files = Array.from(inputElement?.files || []);
+    const menuClosed = closeAttachmentMenu();
+    if (inputElement) {
+      inputElement.value = "";
+    }
+    if (!conv || files.length === 0) {
+      if (menuClosed) render();
+      return;
+    }
+
+    const current = composerMediaForKey(conv.key);
+    const limit = 10;
+    if (current.length >= limit) {
+      conv.error = `附件上限 ${limit} 个`;
+      render();
+      return;
+    }
+
+    const maxBytes = 50 * 1024 * 1024;
+    const nextItems = [...current];
+    for (const file of files) {
+      if (nextItems.length >= limit) break;
+      const mediaType = inferMediaType(file.type, file.name);
+      if (mediaType === "image" || mediaType === "video") {
+        conv.error = "图片/视频请从“照片/视频”入口选择";
+        continue;
+      }
+      const size = Number(file.size || 0);
+      if (size <= 0) {
+        conv.error = "文件大小为 0，无法发送";
+        continue;
+      }
+      if (size > maxBytes) {
+        conv.error = "单个文件超过 50MB，请压缩后重试";
+        continue;
+      }
+      nextItems.push(normalizeContentPart({
+        type: "fileRef",
+        mediaId: createId("file"),
+        pathHint: file.name,
+        fileName: file.name,
+        mime: String(file.type || "").trim(),
+        size,
+        text: `${file.name} (${formatFileSize(size)})`,
+      }));
+    }
+
+    state.chat.composerMediaByKey[conv.key] = nextItems;
+    touchConversation(conv, { persist: false });
+    render();
+  }
+
+  function toggleComposerAudioPreview(mediaId) {
+    const normalizedId = String(mediaId || "").trim();
+    if (!normalizedId || !uiRefs?.chatComposerMediaTray) return;
+    const audio = Array.from(uiRefs.chatComposerMediaTray.querySelectorAll("[data-chat-audio-id]"))
+      .find((node) => String(node.getAttribute("data-chat-audio-id") || "") === normalizedId);
+    if (!(audio instanceof HTMLAudioElement)) return;
+    if (audio.paused) {
+      void audio.play();
+      return;
+    }
+    audio.pause();
+    audio.currentTime = 0;
+  }
+
   async function startVoiceRecord() {
     if (recordState.pending || recordState.recording) return;
     const conv = activeConversation();
     if (!conv) return;
+    closeAttachmentMenu();
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
       conv.error = "当前环境不支持录音";
       render();
@@ -434,10 +718,16 @@ export function createChatFlow({
       syncRecordState();
       render();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const preferredMime = window.MediaRecorder && typeof window.MediaRecorder.isTypeSupported === "function"
-        && window.MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
-        ? "audio/webm;codecs=opus"
-        : "";
+      const mimeCandidates = [
+        "audio/webm;codecs=opus",
+        "audio/webm",
+        "audio/ogg;codecs=opus",
+        "audio/mp4",
+      ];
+      let preferredMime = "";
+      if (window.MediaRecorder && typeof window.MediaRecorder.isTypeSupported === "function") {
+        preferredMime = mimeCandidates.find((candidate) => window.MediaRecorder.isTypeSupported(candidate)) || "";
+      }
       const recorder = preferredMime
         ? new MediaRecorder(stream, { mimeType: preferredMime })
         : new MediaRecorder(stream);
@@ -457,7 +747,11 @@ export function createChatFlow({
       recorder.onstop = async () => {
         const chunks = Array.isArray(recordState.chunks) ? [...recordState.chunks] : [];
         const targetConversationKey = String(recordState.conversationKey || "");
-        const mime = String(recorder.mimeType || "audio/webm").trim();
+        const recorderMime = String(recorder.mimeType || "").trim().toLowerCase();
+        const isVideoLike = recorderMime.startsWith("video/");
+        const mime = isVideoLike
+          ? "audio/webm"
+          : (String(recorder.mimeType || preferredMime || "audio/webm").trim() || "audio/webm");
         resetRecordState();
         if (!chunks.length || !targetConversationKey) {
           render();
@@ -472,7 +766,7 @@ export function createChatFlow({
           const blob = new Blob(chunks, { type: mime || "audio/webm" });
           const part = await buildComposerMediaPartFromBlob({
             blob,
-            mime: blob.type || mime,
+            mime: "audio/webm",
             fileName: `voice-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`,
             pathHint: "语音消息",
           });
@@ -968,6 +1262,74 @@ export function createChatFlow({
     return state.chat.conversationsByKey[key] || null;
   }
 
+  function rememberLaunchRequest(requestId, payload = {}) {
+    const id = String(requestId || "").trim();
+    if (!id) return;
+    state.chat.launchRequestsById[id] = {
+      requestId: id,
+      conversationKey: String(payload.conversationKey || ""),
+      hostId: String(payload.hostId || ""),
+      toolName: String(payload.toolName || ""),
+      cwd: String(payload.cwd || ""),
+      messageId: String(payload.messageId || ""),
+    };
+  }
+
+  function forgetLaunchRequest(requestId) {
+    const id = String(requestId || "").trim();
+    if (!id) return;
+    delete state.chat.launchRequestsById[id];
+  }
+
+  function resolveLaunchConversationKey(hostId, payload) {
+    const byPayload = String(payload.conversationKey || "").trim();
+    if (byPayload) return byPayload;
+    const requestId = String(payload.requestId || "").trim();
+    if (requestId) {
+      const remembered = asMap(state.chat.launchRequestsById[requestId]);
+      const key = String(remembered.conversationKey || "").trim();
+      if (key) return key;
+    }
+    return "";
+  }
+
+  function appendLaunchSystemMessage(conv, payload, status, text) {
+    if (!conv) return;
+    const requestId = String(payload.requestId || "").trim();
+    const remembered = requestId ? asMap(state.chat.launchRequestsById[requestId]) : {};
+    const messageId = String(remembered.messageId || "").trim();
+    let target = null;
+    if (messageId) {
+      target = conv.messages.find((msg) => String(msg.id || "") === messageId) || null;
+    }
+    if (!target && requestId) {
+      target = conv.messages.find((msg) => String(msg.requestId || "") === requestId && msg.role === "system") || null;
+    }
+    if (!target) {
+      target = {
+        id: createId("msg"),
+        role: "system",
+        text: "",
+        status,
+        ts: new Date().toISOString(),
+        requestId,
+        meta: {},
+      };
+      conv.messages.push(target);
+      if (requestId) {
+        rememberLaunchRequest(requestId, {
+          ...remembered,
+          conversationKey: conv.key,
+          hostId: conv.hostId,
+          messageId: target.id,
+        });
+      }
+    }
+    target.status = status;
+    target.text = text;
+    target.ts = new Date().toISOString();
+  }
+
   function openConversation(key) {
     const normalizedKey = String(key || "").trim();
     if (!normalizedKey || !state.chat.conversationsByKey[normalizedKey]) return;
@@ -978,6 +1340,7 @@ export function createChatFlow({
     state.chat.swipedConversationKey = "";
     state.chat.activeConversationKey = normalizedKey;
     state.chat.viewMode = "detail";
+    state.chat.attachmentMenuOpen = false;
     state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     clearMessageSelection(normalizedKey);
     void persistIndex();
@@ -990,6 +1353,7 @@ export function createChatFlow({
     if (conv) clearMessageSelection(conv.key);
     if (conv) stopVoiceRecordForConversation(conv.key);
     state.chat.swipedConversationKey = "";
+    state.chat.attachmentMenuOpen = false;
     state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     state.chat.viewMode = "list";
     render();
@@ -1000,6 +1364,7 @@ export function createChatFlow({
     if (conv) clearMessageSelection(conv.key);
     if (conv) stopVoiceRecordForConversation(conv.key);
     state.chat.swipedConversationKey = "";
+    state.chat.attachmentMenuOpen = false;
     state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     state.chat.viewMode = "list";
   }
@@ -1014,8 +1379,14 @@ export function createChatFlow({
     }
     const removed = removeConversation(state.chat, normalizedKey);
     if (!removed) return false;
+    clearPendingMediaStageByConversation(normalizedKey);
     stopVoiceRecordForConversation(normalizedKey);
     clearComposerMediaByKey(normalizedKey);
+    Object.entries(asMap(state.chat.launchRequestsById)).forEach(([requestId, row]) => {
+      if (String(row?.conversationKey || "") === normalizedKey) {
+        delete state.chat.launchRequestsById[requestId];
+      }
+    });
     if (String(state.chat.messageViewer.conversationKey || "") === normalizedKey) {
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
     }
@@ -1023,6 +1394,7 @@ export function createChatFlow({
     if (state.chat.conversationOrder.length === 0) {
       state.chat.viewMode = "list";
     }
+    state.chat.attachmentMenuOpen = false;
     render();
 
     if (deleteStore) {
@@ -1100,8 +1472,14 @@ export function createChatFlow({
     conv.running = null;
     conv.draft = "";
     conv.error = "";
+    clearPendingMediaStageByConversation(normalizedKey);
     stopVoiceRecordForConversation(normalizedKey);
     clearComposerMediaByKey(normalizedKey);
+    Object.entries(asMap(state.chat.launchRequestsById)).forEach(([requestId, row]) => {
+      if (String(row?.conversationKey || "") === normalizedKey) {
+        delete state.chat.launchRequestsById[requestId];
+      }
+    });
     setQueuePanelExpanded(normalizedKey, false);
     clearMessageSelection(normalizedKey);
     if (state.chat.swipedConversationKey === normalizedKey) {
@@ -1144,7 +1522,144 @@ export function createChatFlow({
     }
   }
 
-  function maybeDispatchNext(conversationKey) {
+  async function stageMediaPartForQueueItem(conv, item, runtimeToolId, part) {
+    const mediaId = String(part.mediaId || "").trim();
+    const mime = String(part.mime || "").trim();
+    const dataBase64 = String(part.dataBase64 || "").trim();
+    if (!mediaId || !mime || !dataBase64) {
+      return {
+        ok: false,
+        mediaId,
+        code: "MEDIA_STAGE_NOT_FOUND",
+        reason: "附件内容不完整，无法暂存",
+      };
+    }
+    const pending = registerMediaStagePromise(conv.hostId, conv.key, item.requestId, mediaId);
+    if (!pending) {
+      return {
+        ok: false,
+        mediaId,
+        code: "MEDIA_STAGE_NOT_FOUND",
+        reason: "附件暂存队列初始化失败",
+      };
+    }
+    const sent = sendSocketEvent(
+      conv.hostId,
+      "tool_media_stage_request",
+      {
+        toolId: runtimeToolId,
+        conversationKey: conv.key,
+        requestId: item.requestId,
+        mediaId,
+        mime,
+        dataBase64,
+        pathHint: String(part.pathHint || part.fileName || "").trim(),
+      },
+      {
+        action: "tool_media_stage_request",
+        traceId: item.requestId.replace(/^req_/, "trc_"),
+        toolId: runtimeToolId,
+      },
+    );
+    if (!sent) {
+      rejectMediaStagePromise(conv.hostId, conv.key, item.requestId, mediaId, {
+        ok: false,
+        mediaId,
+        code: "MEDIA_STAGE_NOT_FOUND",
+        reason: "发送暂存请求失败：宿主机未连接",
+      });
+      return {
+        ok: false,
+        mediaId,
+        code: "MEDIA_STAGE_NOT_FOUND",
+        reason: "发送暂存请求失败：宿主机未连接",
+      };
+    }
+    try {
+      return await pending;
+    } catch (error) {
+      const err = asMap(error);
+      return {
+        ok: false,
+        mediaId,
+        code: String(err.code || "MEDIA_STAGE_NOT_FOUND"),
+        reason: String(err.reason || "附件暂存失败"),
+      };
+    }
+  }
+
+  function applyQueueItemContentUpdate(conv, item, content) {
+    const normalized = cloneContentParts(content);
+    item.content = normalized;
+    const queued = conv.queue.find((row) => String(row.queueItemId || "") === String(item.queueItemId || ""));
+    if (queued) queued.content = cloneContentParts(normalized);
+    const userMsg = conv.messages.find((msg) => String(msg.queueItemId || "") === String(item.queueItemId || ""));
+    if (userMsg) userMsg.content = stripTransientContentFields(normalized);
+  }
+
+  async function prepareOutboundContent(conv, item, runtimeToolId) {
+    const content = normalizeContentParts(item.content);
+    const mediaParts = content.filter((part) => (
+      isMediaPartType(part.type)
+      && String(part.mediaId || "").trim()
+      && !String(part.stagedMediaId || "").trim()
+      && String(part.dataBase64 || "").trim()
+    ));
+    if (!mediaParts.length) {
+      return { content, stageFailures: [] };
+    }
+
+    mediaParts.forEach((part) => {
+      part.stageStatus = "staging";
+      part.stageProgress = 0;
+      delete part.stageErrorCode;
+      delete part.stageErrorReason;
+    });
+    applyQueueItemContentUpdate(conv, item, content);
+    render();
+
+    const results = await Promise.all(mediaParts.map((part) => (
+      stageMediaPartForQueueItem(conv, item, runtimeToolId, part)
+    )));
+
+    const failures = [];
+    results.forEach((row) => {
+      const mediaId = String(row.mediaId || "").trim();
+      if (!mediaId) return;
+      const target = content.find((part) => String(part.mediaId || "").trim() === mediaId);
+      if (!target) return;
+      if (row.ok) {
+        target.stagedMediaId = String(row.stagedMediaId || "").trim();
+        target.stageStatus = "staged";
+        target.stageProgress = 100;
+        delete target.dataBase64;
+        delete target.stageErrorCode;
+        delete target.stageErrorReason;
+      } else {
+        const reason = String(row.reason || "附件暂存失败");
+        const code = String(row.code || "MEDIA_STAGE_NOT_FOUND");
+        target.stageStatus = "failed";
+        target.stageProgress = 0;
+        delete target.stagedMediaId;
+        const allowInlineFallback = code === "MEDIA_STAGE_NOT_FOUND" || code === "MEDIA_STAGE_TIMEOUT";
+        if (allowInlineFallback && String(target.dataBase64 || "").trim()) {
+          target.stageStatus = "fallback_inline";
+          delete target.stageErrorCode;
+          delete target.stageErrorReason;
+        } else {
+          target.stageErrorCode = code;
+          target.stageErrorReason = reason;
+          delete target.dataBase64;
+          failures.push({ mediaId, code, reason });
+        }
+      }
+    });
+
+    applyQueueItemContentUpdate(conv, item, content);
+    return { content, stageFailures: failures };
+  }
+
+  async function dispatchQueueHead(conversationKey) {
     const conv = state.chat.conversationsByKey[conversationKey];
     if (!conv || !conv.online || conv.running || conv.queue.length === 0) return;
     if (String(conv.availability || "").toLowerCase() === "invalid") {
@@ -1161,8 +1676,30 @@ export function createChatFlow({
       render();
       return;
     }
-    const outboundContent = normalizeContentParts(item.content);
+
+    const { content: stagedContent, stageFailures } = await prepareOutboundContent(conv, item, runtimeToolId);
+    const outboundContent = normalizeContentParts(stagedContent);
     const text = String(item.text || "").trim() || contentSummaryText(outboundContent);
+    const hasTextPart = outboundContent.some((part) => part.type === "text" && String(part.text || "").trim());
+    const hasSendableMedia = outboundContent.some((part) => (
+      isMediaPartType(part.type)
+      && (String(part.stagedMediaId || "").trim() || String(part.dataBase64 || "").trim())
+    ));
+    const hasFileRef = outboundContent.some((part) => part.type === "fileRef");
+    if (!hasTextPart && !hasSendableMedia && !hasFileRef) {
+      conv.error = stageFailures.length > 0
+        ? `附件暂存失败：${stageFailures.map((row) => row.reason).join("；")}`
+        : "发送失败：消息为空";
+      const userMsg = conv.messages.find((msg) => String(msg.queueItemId || "") === item.queueItemId);
+      if (userMsg) userMsg.status = "failed";
+      conv.queue.shift();
+      normalizeQueuePanelByConversation(conv);
+      touchConversation(conv);
+      render();
+      window.setTimeout(() => maybeDispatchNext(conv.key), 0);
+      return;
+    }
+
     const payload = {
       toolId: runtimeToolId,
       conversationKey: conv.key,
@@ -1204,9 +1741,106 @@ export function createChatFlow({
     const userMsg = conv.messages.find((msg) => String(msg.queueItemId || "") === item.queueItemId);
     if (userMsg) {
       userMsg.status = "sending";
-      userMsg.content = stripTransientContentFields(userMsg.content);
+      userMsg.content = stripTransientContentFields(outboundContent);
     }
     conv.error = "";
+    touchConversation(conv);
+    render();
+  }
+
+  function maybeDispatchNext(conversationKey) {
+    const key = String(conversationKey || "").trim();
+    if (!key) return;
+    if (dispatchingByConversationKey[key]) return;
+    dispatchingByConversationKey[key] = true;
+    void dispatchQueueHead(key)
+      .catch((error) => {
+        const conv = state.chat.conversationsByKey[key];
+        if (conv) {
+          conv.error = `发送失败：${error}`;
+          touchConversation(conv);
+          render();
+        }
+      })
+      .finally(() => {
+        delete dispatchingByConversationKey[key];
+      });
+  }
+
+  function dispatchLaunchRequest(conv, rawDraft, launchConfirm) {
+    const toolName = String(launchConfirm?.toolName || "").trim();
+    const cwd = String(launchConfirm?.cwd || "").trim();
+    if (!toolName || !cwd) {
+      conv.error = "启动提案内容不完整，请重新引用后再试。";
+      render();
+      return;
+    }
+    const requestId = createId("lch");
+    const userMessage = {
+      id: createId("msg"),
+      role: "user",
+      text: String(rawDraft || "").trim() || buildLaunchConfirmDraft({ toolName, cwd }),
+      status: "completed",
+      ts: new Date().toISOString(),
+      requestId,
+    };
+    const systemMessage = {
+      id: createId("msg"),
+      role: "system",
+      text: `已提交启动请求：${toolName} @ ${cwd}`,
+      status: "sending",
+      ts: new Date().toISOString(),
+      requestId,
+      meta: {},
+    };
+    conv.messages.push(userMessage);
+    conv.messages.push(systemMessage);
+    rememberLaunchRequest(requestId, {
+      conversationKey: conv.key,
+      hostId: conv.hostId,
+      toolName,
+      cwd,
+      messageId: systemMessage.id,
+    });
+
+    let sent = false;
+    if (typeof requestToolLaunch === "function") {
+      const result = requestToolLaunch(conv.hostId, {
+        toolName,
+        cwd,
+        requestId,
+        conversationKey: conv.key,
+      });
+      sent = Boolean(result && result.ok);
+    } else {
+      sent = sendSocketEvent(
+        conv.hostId,
+        "tool_launch_request",
+        {
+          toolName,
+          cwd,
+          requestId,
+          conversationKey: conv.key,
+        },
+        {
+          action: "tool_launch_request",
+          traceId: requestId.replace(/^lch_/, "trc_"),
+        },
+      );
+    }
+
+    if (!sent) {
+      systemMessage.status = "failed";
+      systemMessage.text = `启动请求发送失败：${toolName} @ ${cwd}`;
+      conv.error = "发送失败：宿主机未连接";
+      forgetLaunchRequest(requestId);
+    } else {
+      conv.error = "";
+    }
+
+    conv.draft = "";
+    clearComposerMediaByKey(conv.key);
+    closeAttachmentMenu();
     touchConversation(conv);
     render();
   }
@@ -1214,13 +1848,21 @@ export function createChatFlow({
   function enqueueMessage() {
     const conv = activeConversation();
     if (!conv) return;
+    const menuClosed = closeAttachmentMenu();
     const text = String(conv.draft || "").trim();
+    const mediaParts = cloneContentParts(activeComposerMedia());
+    const launchConfirm = parseLaunchConfirmFromText(text);
+    if (launchConfirm && mediaParts.length === 0) {
+      dispatchLaunchRequest(conv, text, launchConfirm);
+      return;
+    }
     const content = [];
     if (text) {
       content.push({ type: "text", text });
     }
-    cloneContentParts(activeComposerMedia()).forEach((part) => content.push(part));
+    mediaParts.forEach((part) => content.push(part));
     if (content.length === 0) {
+      if (menuClosed) render();
       maybeDispatchNext(conv.key);
       return;
     }
@@ -1569,6 +2211,84 @@ export function createChatFlow({
     return conv;
   }
 
+  function onToolMediaStageProgress(hostId, payload) {
+    const data = asMap(payload);
+    const conv = ensureConversationByPayload(hostId, data);
+    if (!conv) return;
+    const requestId = String(data.requestId || "").trim();
+    const mediaId = String(data.mediaId || "").trim();
+    const progress = Math.max(0, Math.min(100, Math.trunc(Number(data.progress || 0))));
+    if (!requestId || !mediaId) return;
+    const changed = syncStageStateToConversation(conv, requestId, mediaId, {
+      stageStatus: progress >= 100 ? "staged" : "staging",
+      stageProgress: progress,
+    });
+    if (changed) {
+      touchConversation(conv, { persist: false });
+      render();
+    }
+  }
+
+  function onToolMediaStageFinished(hostId, payload) {
+    const data = asMap(payload);
+    const requestId = String(data.requestId || "").trim();
+    const mediaId = String(data.mediaId || "").trim();
+    const stagedMediaId = String(data.stagedMediaId || "").trim();
+    if (!requestId || !mediaId) return;
+    settleMediaStagePromise(hostId, data, {
+      ok: true,
+      mediaId,
+      stagedMediaId,
+      relativePath: String(data.relativePath || "").trim(),
+      stagedPath: String(data.stagedPath || "").trim(),
+      expiresAt: String(data.expiresAt || "").trim(),
+      mime: String(data.mime || "").trim(),
+      size: Number(data.size || 0),
+      pathHint: String(data.pathHint || "").trim(),
+    });
+    const conv = ensureConversationByPayload(hostId, data);
+    if (!conv) return;
+    syncStageStateToConversation(conv, requestId, mediaId, {
+      stageStatus: "staged",
+      stageProgress: 100,
+      stagedMediaId,
+      mime: String(data.mime || "").trim(),
+      size: Number(data.size || 0),
+      pathHint: String(data.pathHint || "").trim(),
+      stageErrorCode: "",
+      stageErrorReason: "",
+      dataBase64: "",
+    });
+    touchConversation(conv, { persist: false });
+    render();
+  }
+
+  function onToolMediaStageFailed(hostId, payload) {
+    const data = asMap(payload);
+    const requestId = String(data.requestId || "").trim();
+    const mediaId = String(data.mediaId || "").trim();
+    const code = String(data.code || "MEDIA_STAGE_NOT_FOUND").trim();
+    const reason = String(data.reason || "附件暂存失败").trim();
+    if (!requestId || !mediaId) return;
+    settleMediaStagePromise(hostId, data, {
+      ok: false,
+      mediaId,
+      code,
+      reason,
+    });
+    const conv = ensureConversationByPayload(hostId, data);
+    if (!conv) return;
+    syncStageStateToConversation(conv, requestId, mediaId, {
+      stageStatus: "failed",
+      stageProgress: 0,
+      stageErrorCode: code,
+      stageErrorReason: reason,
+      stagedMediaId: "",
+    });
+    touchConversation(conv, { persist: false });
+    render();
+  }
+
   function onToolChatStarted(hostId, payload) {
     const data = asMap(payload);
     const conv = ensureConversationByPayload(hostId, data);
@@ -1798,6 +2518,96 @@ export function createChatFlow({
     render();
   }
 
+  function resolveLaunchConversation(hostId, payload) {
+    const data = asMap(payload);
+    const conversationKey = resolveLaunchConversationKey(hostId, data);
+    if (conversationKey && state.chat.conversationsByKey[conversationKey]) {
+      return state.chat.conversationsByKey[conversationKey];
+    }
+    const requestId = String(data.requestId || "").trim();
+    if (requestId) {
+      const remembered = asMap(state.chat.launchRequestsById[requestId]);
+      const rememberedKey = String(remembered.conversationKey || "").trim();
+      if (rememberedKey && state.chat.conversationsByKey[rememberedKey]) {
+        return state.chat.conversationsByKey[rememberedKey];
+      }
+    }
+    return activeConversation();
+  }
+
+  function onToolLaunchStarted(hostId, payload) {
+    const data = asMap(payload);
+    const conv = resolveLaunchConversation(hostId, data);
+    if (!conv) return false;
+    const toolName = String(data.toolName || "").trim();
+    const cwd = String(data.cwd || "").trim();
+    const requestId = String(data.requestId || "").trim();
+    appendLaunchSystemMessage(
+      conv,
+      data,
+      "sending",
+      `启动流程开始：${toolName || "tool"} @ ${cwd || "--"}`,
+    );
+    if (requestId) {
+      rememberLaunchRequest(requestId, {
+        conversationKey: conv.key,
+        hostId: conv.hostId,
+        toolName,
+        cwd,
+      });
+    }
+    touchConversation(conv);
+    render();
+    return true;
+  }
+
+  function onToolLaunchFinished(hostId, payload) {
+    const data = asMap(payload);
+    const conv = resolveLaunchConversation(hostId, data);
+    if (!conv) return false;
+    const requestId = String(data.requestId || "").trim();
+    const toolName = String(data.toolName || "").trim();
+    const cwd = String(data.cwd || "").trim();
+    const pidText = Number.isFinite(Number(data.pid)) ? ` (pid ${Number(data.pid)})` : "";
+    const reason = String(data.reason || "").trim();
+    appendLaunchSystemMessage(
+      conv,
+      data,
+      "completed",
+      reason || `启动完成：${toolName || "tool"} @ ${cwd || "--"}${pidText}`,
+    );
+    conv.error = "";
+    if (requestId) {
+      forgetLaunchRequest(requestId);
+    }
+    touchConversation(conv);
+    render();
+    return true;
+  }
+
+  function onToolLaunchFailed(hostId, payload) {
+    const data = asMap(payload);
+    const conv = resolveLaunchConversation(hostId, data);
+    if (!conv) return false;
+    const requestId = String(data.requestId || "").trim();
+    const toolName = String(data.toolName || "").trim();
+    const cwd = String(data.cwd || "").trim();
+    const reason = String(data.reason || "").trim() || "启动失败";
+    appendLaunchSystemMessage(
+      conv,
+      data,
+      "failed",
+      `${reason}（${toolName || "tool"} @ ${cwd || "--"}）`,
+    );
+    conv.error = reason;
+    if (requestId) {
+      forgetLaunchRequest(requestId);
+    }
+    touchConversation(conv);
+    render();
+    return true;
+  }
+
   function onChatListTouchStart(event) {
     const row = event.target.closest("[data-chat-row]");
     const touch = event.touches && event.touches[0];
@@ -1898,11 +2708,62 @@ export function createChatFlow({
   }
 
   function onComposerMediaTrayClick(event) {
+    const previewBtn = event.target.closest("[data-chat-preview-audio]");
+    if (previewBtn) {
+      const mediaId = String(previewBtn.getAttribute("data-chat-preview-audio") || "").trim();
+      if (mediaId) toggleComposerAudioPreview(mediaId);
+      return;
+    }
     const removeBtn = event.target.closest("[data-chat-remove-media]");
     if (!removeBtn) return;
     const mediaId = String(removeBtn.getAttribute("data-chat-remove-media") || "").trim();
     if (!mediaId) return;
     removeComposerMediaItem(mediaId);
+  }
+
+  function toggleAttachmentMenu() {
+    const conv = activeConversation();
+    if (!conv) return;
+    if (String(conv.availability || "").toLowerCase() === "invalid") {
+      return;
+    }
+    const changed = setAttachmentMenuOpen(!Boolean(state.chat.attachmentMenuOpen));
+    if (changed) render();
+  }
+
+  function onAttachMenuClick(event) {
+    const origin = event.target instanceof Element ? event.target : null;
+    if (!origin) return;
+    const target = origin.closest("[data-chat-attach-action]");
+    if (!target) return;
+    const action = String(target.getAttribute("data-chat-attach-action") || "").trim();
+    closeAttachmentMenu();
+    render();
+    if (action === "media") {
+      if (uiRefs?.chatMediaInput) {
+        uiRefs.chatMediaInput.value = "";
+        uiRefs.chatMediaInput.setAttribute("accept", MEDIA_INPUT_ACCEPT);
+        uiRefs.chatMediaInput.click();
+      }
+      return;
+    }
+    if (action === "file") {
+      if (uiRefs?.chatFileInput) {
+        uiRefs.chatFileInput.value = "";
+        uiRefs.chatFileInput.setAttribute("accept", FILE_INPUT_ACCEPT);
+        uiRefs.chatFileInput.click();
+      }
+    }
+  }
+
+  function onDocumentPointerDown(event) {
+    if (!state.chat.attachmentMenuOpen) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+    if (target.closest(".chat-attach-group")) return;
+    if (closeAttachmentMenu()) {
+      render();
+    }
   }
 
   function onDraftInput(value) {
@@ -1933,6 +2794,19 @@ export function createChatFlow({
     const conv = activeConversation();
     if (!conv) return;
     if (onReportPathClick(event)) {
+      return;
+    }
+    const launchQuoteBtn = event.target.closest("[data-chat-launch-quote]");
+    if (launchQuoteBtn) {
+      if (state.chat.messageSelectionModeByKey[conv.key]) return;
+      const toolName = String(launchQuoteBtn.getAttribute("data-chat-launch-tool") || "").trim();
+      const cwd = String(launchQuoteBtn.getAttribute("data-chat-launch-cwd") || "").trim();
+      const draft = buildLaunchConfirmDraft({ toolName, cwd });
+      if (!draft) return;
+      const existing = String(conv.draft || "").trim();
+      conv.draft = existing ? `${existing}\n${draft}` : draft;
+      conv.error = "";
+      render();
       return;
     }
     const expandBtn = event.target.closest("[data-chat-expand-message]");
@@ -2102,6 +2976,7 @@ export function createChatFlow({
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
       state.chat.queuePanelExpandedByKey = {};
       state.chat.composerMediaByKey = {};
+      state.chat.attachmentMenuOpen = false;
       state.chat.recordingConversationKey = "";
       state.chat.recordingPending = false;
       state.chat.messageSelectionModeByKey = {};
@@ -2109,6 +2984,7 @@ export function createChatFlow({
       state.chat.swipedConversationKey = "";
       state.chat.reportViewer = createReportViewerState();
       state.chat.reportTransfersByRequestId = {};
+      state.chat.launchRequestsById = {};
       state.chat.hydrated = true;
       normalizeConversationOnlineState();
       void persistIndex();
@@ -2124,6 +3000,7 @@ export function createChatFlow({
       state.chat.messageViewer = { conversationKey: "", messageId: "", scale: 1 };
       state.chat.queuePanelExpandedByKey = {};
       state.chat.composerMediaByKey = {};
+      state.chat.attachmentMenuOpen = false;
       state.chat.recordingConversationKey = "";
       state.chat.recordingPending = false;
       state.chat.messageSelectionModeByKey = {};
@@ -2131,6 +3008,7 @@ export function createChatFlow({
       state.chat.swipedConversationKey = "";
       state.chat.reportViewer = createReportViewerState();
       state.chat.reportTransfersByRequestId = {};
+      state.chat.launchRequestsById = {};
       state.chat.hydrated = true;
       normalizeConversationOnlineState();
       render();
@@ -2142,6 +3020,7 @@ export function createChatFlow({
   }
 
   function bindEvents(ui) {
+    uiRefs = ui;
     ui.chatConversationList.addEventListener("click", onChatListClick);
     ui.chatConversationList.addEventListener("touchstart", onChatListTouchStart, { passive: true });
     ui.chatConversationList.addEventListener("touchmove", onChatListTouchMove, { passive: true });
@@ -2152,12 +3031,18 @@ export function createChatFlow({
     ui.chatComposerMediaTray.addEventListener("click", onComposerMediaTrayClick);
     ui.chatMessages.addEventListener("click", onMessagesClick);
     ui.chatMessageFullBody.addEventListener("click", onMessageFullBodyClick);
-    ui.chatAttachBtn.addEventListener("click", () => {
-      if (ui.chatMediaInput) ui.chatMediaInput.click();
-    });
-    ui.chatMediaInput.addEventListener("change", () => {
+    ui.chatAttachBtn.addEventListener("click", toggleAttachmentMenu);
+    ui.chatAttachMenu?.addEventListener("click", onAttachMenuClick);
+    ui.chatMediaInput?.addEventListener("change", () => {
       void onComposerMediaPicked(ui.chatMediaInput);
     });
+    ui.chatFileInput?.addEventListener("change", () => {
+      void onComposerFilePicked(ui.chatFileInput);
+    });
+    if (!documentPointerListenerBound) {
+      document.addEventListener("pointerdown", onDocumentPointerDown, true);
+      documentPointerListenerBound = true;
+    }
     ui.chatRecordBtn.addEventListener("click", toggleVoiceRecord);
     ui.chatInput.addEventListener("input", () => onDraftInput(ui.chatInput.value));
     ui.chatSendBtn.addEventListener("click", enqueueMessage);
@@ -2176,12 +3061,18 @@ export function createChatFlow({
     bindEvents,
     enterChatTab,
     backToList,
+    onToolMediaStageProgress,
+    onToolMediaStageFinished,
+    onToolMediaStageFailed,
     onToolChatStarted,
     onToolChatChunk,
     onToolChatFinished,
     onToolReportFetchStarted,
     onToolReportFetchChunk,
     onToolReportFetchFinished,
+    onToolLaunchStarted,
+    onToolLaunchFinished,
+    onToolLaunchFailed,
     enqueueMessage,
     stopRunningMessage,
     openConversation,

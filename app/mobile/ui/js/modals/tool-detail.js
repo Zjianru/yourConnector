@@ -1277,7 +1277,6 @@ export function createToolDetailModal({
     );
     const summaryRows = buildOpenClawSummaryRows(detailData);
     const pages = buildOpenClawPages(detailData);
-
     ui.toolModalTitle.textContent = displayName || "OpenClaw";
     ui.toolSummaryTitle.textContent = "OpenClaw 摘要";
     ui.toolDetailSectionTitle.textContent = "OpenClaw 详情";

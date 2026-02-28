@@ -3,8 +3,15 @@
 //! 2. 按工具类型执行 OpenCode/OpenClaw 命令并转为统一事件。
 //! 3. 支持取消运行中任务并在完成后释放会话占用。
 
-use std::{collections::HashMap, process::Stdio, time::Duration};
+use std::{
+    collections::HashMap,
+    env, fs,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
+use base64::{Engine as _, engine::general_purpose};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, BufReader},
@@ -186,6 +193,33 @@ struct ChatExecutionResult {
     meta: Value,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedPrompt {
+    prompt_text: String,
+    attachment_delivery: Value,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedMediaAttachment {
+    media_id: String,
+    kind: String,
+    mime: String,
+    path: String,
+    path_hint: String,
+    size: u64,
+    duration_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct MediaDeliveryFailure {
+    media_id: String,
+    kind: String,
+    mime: String,
+    path_hint: String,
+    code: &'static str,
+    reason: String,
+}
+
 /// 任务入口：发送 started -> 执行工具命令 -> 发送 finished。
 async fn run_chat_task(
     request: ChatRequestInput,
@@ -251,30 +285,30 @@ async fn execute_chat_request(
         return Err(ChatExecError::Cancelled);
     }
 
-    let prompt_text = render_request_prompt(request);
+    let prepared = prepare_request_prompt(request, tool);
+    let prompt_text = prepared.prompt_text;
 
-    if is_opencode_tool(tool) {
-        return run_opencode_request(request, &prompt_text, tool, trace_id, event_tx, cancel_rx)
-            .await;
-    }
-    if is_openclaw_tool(tool) {
-        return run_openclaw_request(request, &prompt_text, tool, trace_id, event_tx, cancel_rx)
-            .await;
-    }
-    if is_codex_tool(tool) {
-        return run_codex_request(request, &prompt_text, tool, cancel_rx).await;
-    }
-    if is_claude_code_tool(tool) {
-        return run_claude_code_request(request, &prompt_text, tool, cancel_rx).await;
-    }
-    Err(ChatExecError::Failed(
-        "当前工具类型不支持聊天执行".to_string(),
-    ))
+    let mut result = if is_opencode_tool(tool) {
+        run_opencode_request(request, &prompt_text, tool, trace_id, event_tx, cancel_rx).await?
+    } else if is_openclaw_tool(tool) {
+        run_openclaw_request(request, &prompt_text, tool, trace_id, event_tx, cancel_rx).await?
+    } else if is_codex_tool(tool) {
+        run_codex_request(request, &prompt_text, tool, cancel_rx).await?
+    } else if is_claude_code_tool(tool) {
+        run_claude_code_request(request, &prompt_text, tool, cancel_rx).await?
+    } else {
+        return Err(ChatExecError::Failed("当前工具类型不支持聊天执行".to_string()));
+    };
+
+    result.meta = merge_attachment_delivery_meta(result.meta, prepared.attachment_delivery);
+    Ok(result)
 }
 
-fn render_request_prompt(request: &ChatRequestInput) -> String {
+fn prepare_request_prompt(request: &ChatRequestInput, tool: &ToolRuntimePayload) -> PreparedPrompt {
     let mut text_blocks = Vec::new();
-    let mut media_blocks = Vec::new();
+    let mut file_ref_blocks = Vec::new();
+    let mut sent_media = Vec::<PreparedMediaAttachment>::new();
+    let mut failed_media = Vec::<MediaDeliveryFailure>::new();
 
     for part in &request.content {
         let kind = part.kind.trim().to_ascii_lowercase();
@@ -294,43 +328,424 @@ fn render_request_prompt(request: &ChatRequestInput) -> String {
             } else {
                 "file reference".to_string()
             };
-            media_blocks.push(note);
+            file_ref_blocks.push(note);
             continue;
         }
         if kind == "image" || kind == "video" || kind == "audio" {
-            let label = if kind == "image" {
-                "image"
-            } else if kind == "video" {
-                "video"
-            } else {
-                "audio"
-            };
-            let hint = if !part.path_hint.trim().is_empty() {
-                part.path_hint.trim().to_string()
-            } else if !part.media_id.trim().is_empty() {
-                part.media_id.trim().to_string()
-            } else {
-                format!("inline-{label}")
-            };
-            media_blocks.push(format!("{label}: {hint}"));
+            match resolve_media_attachment_for_prompt(request, tool, part, kind.as_str()) {
+                Ok(ok) => sent_media.push(ok),
+                Err(err) => failed_media.push(err),
+            }
         }
     }
 
     if text_blocks.is_empty() && !request.text.trim().is_empty() {
         text_blocks.push(request.text.trim().to_string());
     }
+    if !file_ref_blocks.is_empty() {
+        text_blocks.push(format!("Attached files:\n- {}", file_ref_blocks.join("\n- ")));
+    }
 
-    if media_blocks.is_empty() {
-        return text_blocks.join("\n").trim().to_string();
+    let media_context = build_media_context_block(request, &sent_media, &failed_media);
+    let prompt_text = if media_context.is_empty() {
+        text_blocks.join("\n").trim().to_string()
+    } else if text_blocks.is_empty() {
+        media_context
+    } else {
+        format!("{media_context}\n\n{}", text_blocks.join("\n"))
+    };
+
+    PreparedPrompt {
+        prompt_text,
+        attachment_delivery: build_attachment_delivery_json(&sent_media, &failed_media),
     }
-    if text_blocks.is_empty() {
-        return format!("Attached media:\n- {}", media_blocks.join("\n- "));
+}
+
+fn merge_attachment_delivery_meta(meta: Value, attachment_delivery: Value) -> Value {
+    if let Some(mut obj) = meta.as_object().cloned() {
+        obj.insert("attachmentDelivery".to_string(), attachment_delivery);
+        Value::Object(obj)
+    } else {
+        json!({
+            "attachmentDelivery": attachment_delivery,
+            "providerMeta": meta,
+        })
     }
-    format!(
-        "{}\n\nAttached media:\n- {}",
-        text_blocks.join("\n"),
-        media_blocks.join("\n- ")
-    )
+}
+
+fn resolve_media_attachment_for_prompt(
+    request: &ChatRequestInput,
+    tool: &ToolRuntimePayload,
+    part: &ChatContentPart,
+    kind: &str,
+) -> Result<PreparedMediaAttachment, MediaDeliveryFailure> {
+    if !part.stage_error_code.trim().is_empty() {
+        return Err(MediaDeliveryFailure {
+            media_id: resolve_media_id(part, kind),
+            kind: kind.to_string(),
+            mime: part.mime.trim().to_string(),
+            path_hint: part.path_hint.trim().to_string(),
+            code: map_error_code(part.stage_error_code.trim()),
+            reason: if part.stage_error_reason.trim().is_empty() {
+                "附件暂存失败，已跳过。".to_string()
+            } else {
+                part.stage_error_reason.trim().to_string()
+            },
+        });
+    }
+
+    let staged_path = if !part.staged_media_id.trim().is_empty() {
+        resolve_staged_media_path(tool, part.staged_media_id.trim()).map_err(|(code, reason)| {
+            MediaDeliveryFailure {
+                media_id: resolve_media_id(part, kind),
+                kind: kind.to_string(),
+                mime: part.mime.trim().to_string(),
+                path_hint: part.path_hint.trim().to_string(),
+                code,
+                reason,
+            }
+        })?
+    } else if !part.data_base64.trim().is_empty() {
+        stage_inline_media_attachment(request, tool, part, kind).map_err(|(code, reason)| {
+            MediaDeliveryFailure {
+                media_id: resolve_media_id(part, kind),
+                kind: kind.to_string(),
+                mime: part.mime.trim().to_string(),
+                path_hint: part.path_hint.trim().to_string(),
+                code,
+                reason,
+            }
+        })?
+    } else {
+        return Err(MediaDeliveryFailure {
+            media_id: resolve_media_id(part, kind),
+            kind: kind.to_string(),
+            mime: part.mime.trim().to_string(),
+            path_hint: part.path_hint.trim().to_string(),
+            code: MEDIA_STAGE_NOT_FOUND,
+            reason: "附件缺少暂存引用，已跳过。".to_string(),
+        });
+    };
+
+    let staged_path_text = staged_path.to_string_lossy().to_string();
+    Ok(PreparedMediaAttachment {
+        media_id: resolve_media_id(part, kind),
+        kind: kind.to_string(),
+        mime: part.mime.trim().to_string(),
+        path: staged_path_text,
+        path_hint: part.path_hint.trim().to_string(),
+        size: part.size,
+        duration_ms: part.duration_ms,
+    })
+}
+
+fn resolve_media_id(part: &ChatContentPart, kind: &str) -> String {
+    let media_id = part.media_id.trim();
+    if !media_id.is_empty() {
+        return media_id.to_string();
+    }
+    format!("inline-{kind}")
+}
+
+fn map_error_code(raw: &str) -> &'static str {
+    match raw.trim() {
+        MEDIA_UNSUPPORTED_MIME => MEDIA_UNSUPPORTED_MIME,
+        MEDIA_TOO_LARGE => MEDIA_TOO_LARGE,
+        MEDIA_DECODE_FAILED => MEDIA_DECODE_FAILED,
+        MEDIA_STAGE_NOT_FOUND => MEDIA_STAGE_NOT_FOUND,
+        MEDIA_STAGE_EXPIRED => MEDIA_STAGE_EXPIRED,
+        MEDIA_PATH_FORBIDDEN => MEDIA_PATH_FORBIDDEN,
+        _ => MEDIA_STAGE_NOT_FOUND,
+    }
+}
+
+fn resolve_staged_media_path(
+    tool: &ToolRuntimePayload,
+    staged_media_id: &str,
+) -> Result<PathBuf, (&'static str, String)> {
+    let root = resolve_media_inbox_root(tool).map_err(|reason| (MEDIA_PATH_FORBIDDEN, reason))?;
+    let normalized = staged_media_id.trim().replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains("../")
+        || normalized.contains("/..")
+    {
+        return Err((MEDIA_PATH_FORBIDDEN, "暂存附件路径非法。".to_string()));
+    }
+    let candidate = root.join(normalized);
+    let canonical_candidate = fs::canonicalize(&candidate).map_err(|err| {
+        (
+            MEDIA_STAGE_NOT_FOUND,
+            format!("暂存附件不存在或不可访问: {err}"),
+        )
+    })?;
+    let canonical_root = fs::canonicalize(&root).map_err(|err| {
+        (
+            MEDIA_PATH_FORBIDDEN,
+            format!("暂存目录不可访问: {err}"),
+        )
+    })?;
+    if !canonical_candidate.starts_with(&canonical_root) {
+        return Err((MEDIA_PATH_FORBIDDEN, "暂存附件路径越界。".to_string()));
+    }
+    if !canonical_candidate.is_file() {
+        return Err((MEDIA_STAGE_NOT_FOUND, "暂存附件不是文件。".to_string()));
+    }
+    if is_stage_file_expired(&canonical_candidate) {
+        return Err((MEDIA_STAGE_EXPIRED, "暂存附件已过期。".to_string()));
+    }
+    Ok(canonical_candidate)
+}
+
+fn stage_inline_media_attachment(
+    request: &ChatRequestInput,
+    tool: &ToolRuntimePayload,
+    part: &ChatContentPart,
+    kind: &str,
+) -> Result<PathBuf, (&'static str, String)> {
+    let provided_mime = part.mime.trim().to_ascii_lowercase();
+    if !provided_mime.starts_with("image/")
+        && !provided_mime.starts_with("video/")
+        && !provided_mime.starts_with("audio/")
+    {
+        return Err((MEDIA_UNSUPPORTED_MIME, "仅支持 image/video/audio MIME。".to_string()));
+    }
+    let raw_payload = part.data_base64.trim();
+    if raw_payload.is_empty() {
+        return Err((MEDIA_DECODE_FAILED, "附件内容为空。".to_string()));
+    }
+    let (_, base64_payload) = parse_base64_payload(raw_payload);
+    let bytes = general_purpose::STANDARD
+        .decode(base64_payload.as_bytes())
+        .map_err(|err| (MEDIA_DECODE_FAILED, format!("附件 base64 解码失败: {err}")))?;
+    if bytes.is_empty() {
+        return Err((MEDIA_DECODE_FAILED, "附件内容为空。".to_string()));
+    }
+    if bytes.len() > MEDIA_STAGE_MAX_BYTES {
+        return Err((
+            MEDIA_TOO_LARGE,
+            format!("附件超过大小限制（{} MB）。", MEDIA_STAGE_MAX_BYTES / (1024 * 1024)),
+        ));
+    }
+
+    let stage_root = resolve_media_inbox_root(tool).map_err(|reason| (MEDIA_PATH_FORBIDDEN, reason))?;
+    cleanup_media_stage_dir(&stage_root);
+    let conv_segment = sanitize_path_segment(request.conversation_key.as_str());
+    let req_segment = sanitize_path_segment(request.request_id.as_str());
+    let media_segment = sanitize_path_segment(resolve_media_id(part, kind).as_str());
+    let ext = mime_extension(&provided_mime);
+    let dir = stage_root.join(conv_segment).join(req_segment);
+    fs::create_dir_all(&dir)
+        .map_err(|err| (MEDIA_PATH_FORBIDDEN, format!("创建暂存目录失败: {err}")))?;
+    let path = dir.join(format!("{media_segment}.{ext}"));
+    fs::write(&path, &bytes).map_err(|err| (MEDIA_PATH_FORBIDDEN, format!("写入附件失败: {err}")))?;
+    Ok(path)
+}
+
+fn resolve_media_inbox_root(tool: &ToolRuntimePayload) -> Result<PathBuf, String> {
+    if let Some(raw) = env::var_os(MEDIA_STAGE_DIR_ENV) {
+        let candidate = PathBuf::from(raw);
+        if !candidate.as_os_str().is_empty() {
+            return Ok(candidate);
+        }
+    }
+    let Some(workspace) = tool
+        .workspace_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty())
+    else {
+        return Err("工具缺少工作区，无法解析附件。".to_string());
+    };
+    let canonical =
+        fs::canonicalize(workspace).map_err(|err| format!("工作区不可访问或不存在: {err}"))?;
+    if !canonical.is_dir() {
+        return Err("工具工作区不是目录。".to_string());
+    }
+    Ok(canonical.join(MEDIA_STAGE_INBOX_DIR))
+}
+
+fn parse_base64_payload(raw: &str) -> (String, String) {
+    if !raw.starts_with("data:") {
+        return (String::new(), raw.trim().to_string());
+    }
+    let marker = ";base64,";
+    if let Some(index) = raw.find(marker) {
+        let mime = raw[5..index].trim().to_ascii_lowercase();
+        let payload = raw[(index + marker.len())..].trim().to_string();
+        return (mime, payload);
+    }
+    (String::new(), raw.trim().to_string())
+}
+
+fn sanitize_path_segment(raw: &str) -> String {
+    let mut output = String::new();
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' || ch == '.' {
+            output.push(ch);
+        } else {
+            output.push('_');
+        }
+    }
+    if output.is_empty() {
+        "unknown".to_string()
+    } else {
+        output
+    }
+}
+
+fn mime_extension(mime: &str) -> String {
+    let sub = mime
+        .split('/')
+        .nth(1)
+        .unwrap_or("bin")
+        .split(';')
+        .next()
+        .unwrap_or("bin")
+        .trim()
+        .to_ascii_lowercase();
+    let sanitized = sanitize_path_segment(sub.as_str());
+    if sanitized.is_empty() {
+        "bin".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn cleanup_media_stage_dir(root: &Path) {
+    if !root.exists() {
+        return;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    let now = std::time::SystemTime::now();
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path.clone());
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            let Ok(modified) = metadata.modified() else {
+                continue;
+            };
+            let Ok(elapsed) = now.duration_since(modified) else {
+                continue;
+            };
+            if elapsed.as_secs() > MEDIA_STAGE_TTL_SEC {
+                let _ = fs::remove_file(path);
+            }
+        }
+    }
+}
+
+fn is_stage_file_expired(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return true;
+    };
+    let Ok(modified) = meta.modified() else {
+        return true;
+    };
+    let Ok(elapsed) = std::time::SystemTime::now().duration_since(modified) else {
+        return false;
+    };
+    elapsed.as_secs() > MEDIA_STAGE_TTL_SEC
+}
+
+fn build_media_context_block(
+    request: &ChatRequestInput,
+    sent_media: &[PreparedMediaAttachment],
+    failed_media: &[MediaDeliveryFailure],
+) -> String {
+    if sent_media.is_empty() && failed_media.is_empty() {
+        return String::new();
+    }
+    let attachments = sent_media
+        .iter()
+        .map(|item| {
+            json!({
+                "media_id": item.media_id,
+                "kind": item.kind,
+                "mime": item.mime,
+                "path": item.path,
+                "path_hint": item.path_hint,
+                "size": item.size,
+                "duration_ms": item.duration_ms,
+            })
+        })
+        .collect::<Vec<Value>>();
+    let failed = failed_media
+        .iter()
+        .map(|item| {
+            json!({
+                "media_id": item.media_id,
+                "kind": item.kind,
+                "mime": item.mime,
+                "path_hint": item.path_hint,
+                "code": item.code,
+                "reason": item.reason,
+            })
+        })
+        .collect::<Vec<Value>>();
+    let payload = json!({
+        "request_id": request.request_id,
+        "conversation_key": request.conversation_key,
+        "attachments": attachments,
+        "failed_attachments": failed,
+    });
+    let serialized = serde_json::to_string_pretty(&payload)
+        .unwrap_or_else(|_| payload.to_string());
+    format!("[YC_MEDIA_CONTEXT_V1]\n{serialized}\n[/YC_MEDIA_CONTEXT_V1]")
+}
+
+fn build_attachment_delivery_json(
+    sent_media: &[PreparedMediaAttachment],
+    failed_media: &[MediaDeliveryFailure],
+) -> Value {
+    let status = if sent_media.is_empty() && failed_media.is_empty() {
+        "none"
+    } else if !sent_media.is_empty() && failed_media.is_empty() {
+        "full"
+    } else if sent_media.is_empty() {
+        "none"
+    } else {
+        "partial"
+    };
+    json!({
+        "status": status,
+        "sent": sent_media
+            .iter()
+            .map(|item| {
+                json!({
+                    "mediaId": item.media_id,
+                    "kind": item.kind,
+                    "mime": item.mime,
+                    "path": item.path,
+                    "pathHint": item.path_hint,
+                    "size": item.size,
+                    "durationMs": item.duration_ms,
+                })
+            })
+            .collect::<Vec<Value>>(),
+        "failed": failed_media
+            .iter()
+            .map(|item| {
+                json!({
+                    "mediaId": item.media_id,
+                    "kind": item.kind,
+                    "mime": item.mime,
+                    "pathHint": item.path_hint,
+                    "code": item.code,
+                    "reason": item.reason,
+                })
+            })
+            .collect::<Vec<Value>>(),
+    })
 }
 
 /// OpenCode: 使用 `opencode run --format json` 并按 text 事件流式回传。
@@ -427,9 +842,22 @@ async fn run_opencode_request(
     let status = wait_child_with_cancel(&mut child, cancel_rx).await?;
     let stderr = join_reader_task(stderr_task).await;
     if !status.success() {
+        let mut reason = shorten_error(&stderr);
+        if reason == "未知错误" {
+            let fallback = merged_text
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_string();
+            if !fallback.is_empty() {
+                reason = fallback;
+            }
+        }
         return Err(ChatExecError::Failed(format!(
             "opencode 执行失败: {}",
-            shorten_error(&stderr)
+            reason
         )));
     }
 
@@ -450,7 +878,7 @@ async fn run_codex_request(
     cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<ChatExecutionResult, ChatExecError> {
     let mut command = Command::new("codex");
-    command.arg("run").arg(prompt_text).arg("--json");
+    command.arg("exec").arg(prompt_text).arg("--json");
     if let Some(profile) = tool
         .source
         .as_deref()
@@ -474,14 +902,28 @@ async fn run_codex_request(
         .map_err(|err| ChatExecError::Failed(format!("启动 codex 失败: {err}")))?;
     let output = collect_child_output_with_cancel(child, cancel_rx).await?;
     if !output.success {
+        let reason = extract_codex_exec_text(&output.stdout)
+            .or_else(|| {
+                extract_json_payload(&output.stdout).and_then(|value| extract_generic_text(&value))
+            })
+            .unwrap_or_else(|| {
+                let stderr_reason = shorten_error(&output.stderr);
+                if stderr_reason == "未知错误" {
+                    shorten_error(&output.stdout)
+                } else {
+                    stderr_reason
+                }
+            });
         return Err(ChatExecError::Failed(format!(
             "codex 执行失败: {}",
-            shorten_error(&output.stderr)
+            reason
         )));
     }
 
-    let text = extract_json_payload(&output.stdout)
-        .and_then(|value| extract_generic_text(&value))
+    let text = extract_codex_exec_text(&output.stdout)
+        .or_else(|| {
+            extract_json_payload(&output.stdout).and_then(|value| extract_generic_text(&value))
+        })
         .or_else(|| {
             let trimmed = output.stdout.trim();
             if trimmed.is_empty() {
@@ -511,6 +953,15 @@ async fn run_claude_code_request(
         .arg(prompt_text)
         .arg("--output-format")
         .arg("json");
+    if let Some(profile) = tool
+        .source
+        .as_deref()
+        .and_then(|raw| raw.split("profile=").nth(1))
+        .map(str::trim)
+        .filter(|raw| !raw.is_empty() && *raw != "default")
+    {
+        command.arg("--profile").arg(profile);
+    }
     if let Some(workspace) = tool
         .workspace_dir
         .as_ref()
@@ -525,9 +976,19 @@ async fn run_claude_code_request(
         .map_err(|err| ChatExecError::Failed(format!("启动 claude 失败: {err}")))?;
     let output = collect_child_output_with_cancel(child, cancel_rx).await?;
     if !output.success {
+        let reason = extract_json_payload(&output.stdout)
+            .and_then(|value| extract_generic_text(&value))
+            .unwrap_or_else(|| {
+                let stderr_reason = shorten_error(&output.stderr);
+                if stderr_reason == "未知错误" {
+                    shorten_error(&output.stdout)
+                } else {
+                    stderr_reason
+                }
+            });
         return Err(ChatExecError::Failed(format!(
             "claude 执行失败: {}",
-            shorten_error(&output.stderr)
+            reason
         )));
     }
 
@@ -607,6 +1068,16 @@ const OPENCLAW_CHAT_HISTORY_SYNC_POLL_INTERVAL: Duration = Duration::from_millis
 const OPENCLAW_CHAT_HISTORY_SYNC_POLL_TIMEOUT: Duration = Duration::from_secs(4);
 const OPENCLAW_GATEWAY_UPGRADE_HINT: &str =
     "当前 OpenClaw 版本不支持 chat.send/chat.history，请升级 OpenClaw 后重试。";
+const MEDIA_STAGE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const MEDIA_STAGE_TTL_SEC: u64 = 24 * 3600;
+const MEDIA_STAGE_DIR_ENV: &str = "YC_MEDIA_STAGE_DIR";
+const MEDIA_STAGE_INBOX_DIR: &str = ".yc/inbox";
+const MEDIA_UNSUPPORTED_MIME: &str = "MEDIA_UNSUPPORTED_MIME";
+const MEDIA_TOO_LARGE: &str = "MEDIA_TOO_LARGE";
+const MEDIA_DECODE_FAILED: &str = "MEDIA_DECODE_FAILED";
+const MEDIA_STAGE_NOT_FOUND: &str = "MEDIA_STAGE_NOT_FOUND";
+const MEDIA_STAGE_EXPIRED: &str = "MEDIA_STAGE_EXPIRED";
+const MEDIA_PATH_FORBIDDEN: &str = "MEDIA_PATH_FORBIDDEN";
 
 #[derive(Debug, Clone, Copy, Default)]
 struct OpenClawHistoryAnchor {
@@ -1316,7 +1787,7 @@ fn map_openclaw_slash_gateway_error(err: ChatExecError) -> ChatExecError {
 }
 
 async fn run_openclaw_once(
-    request: &ChatRequestInput,
+    _request: &ChatRequestInput,
     prompt_text: &str,
     tool: &ToolRuntimePayload,
     route: &OpenClawRoute,
@@ -1610,6 +2081,7 @@ fn extract_generic_text(value: &Value) -> Option<String> {
         "/output_text",
         "/output",
         "/message",
+        "/result",
         "/result/text",
         "/result/output_text",
         "/result/message",
@@ -1622,6 +2094,44 @@ fn extract_generic_text(value: &Value) -> Option<String> {
         }
     }
     None
+}
+
+fn extract_codex_exec_text(raw: &str) -> Option<String> {
+    let mut blocks = Vec::<String>::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        let event_type = value.get("type").and_then(Value::as_str).unwrap_or_default();
+        if event_type != "item.completed" {
+            continue;
+        }
+        let Some(item) = value.get("item") else {
+            continue;
+        };
+        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if item_type != "agent_message" {
+            continue;
+        }
+        let text = item
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        if !text.is_empty() {
+            blocks.push(text);
+        }
+    }
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n"))
+    }
 }
 
 fn apply_openclaw_profile(tool: &ToolRuntimePayload, command: &mut Command) {

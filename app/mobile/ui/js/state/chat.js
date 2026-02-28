@@ -35,6 +35,7 @@ export function createChatStateSlice() {
     selectedMessageIdsByKey: {},
     swipedConversationKey: "",
     composerMediaByKey: {},
+    attachmentMenuOpen: false,
     recordingConversationKey: "",
     recordingPending: false,
     reportViewer: {
@@ -51,6 +52,7 @@ export function createChatStateSlice() {
       bytesTotal: 0,
     },
     reportTransfersByRequestId: {},
+    launchRequestsById: {},
     conversationsByKey: {},
     conversationOrder: [],
     hydrated: false,
